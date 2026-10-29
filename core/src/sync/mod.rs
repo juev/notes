@@ -32,13 +32,11 @@ use crate::LogLevel;
 use sha2::{Digest, Sha256};
 
 use crate::db::{
-    self, is_sha256, Change, Touched, KIND_ATTACHMENT, KIND_BLOB, KIND_FILTER, KIND_LIST, KIND_SETTINGS, KIND_TASK,
+    self, is_sha256, Change, Touched, KIND_ATTACHMENT, KIND_BLOB, KIND_FILTER, KIND_FOLDER, KIND_NOTE, KIND_SETTINGS,
 };
 use crate::error::{AppError, Result};
 use crate::hlc::Clock;
-use crate::model::{
-    Attachment, AttachmentReport, ConnectionCheck, SyncConfig, SyncReport, SyncSide, SyncStatus, INBOX_ID,
-};
+use crate::model::{Attachment, AttachmentReport, ConnectionCheck, SyncConfig, SyncReport, SyncSide, SyncStatus};
 use crate::store::{hex, new_device_id, Store};
 use remote::{DirRemote, Remote};
 use seal::{Keys, SealedRemote, Wrapped};
@@ -64,17 +62,17 @@ const SNAP_BYTES: &str = "snap_bytes";
 /// S45: what a snapshot is taken to weigh before the device has written one.
 const SNAP_FLOOR: u64 = 16 * 1024;
 
-/// S47: set while the last run for the fields read everything the storage held.
+/// S26: set while the last run for the fields read everything the storage held.
 const WHOLE: &str = "blobs_whole";
 
-/// S47: attachment content still needed: an attachment that is not deleted
-/// refers to it, and its task, if known here, is not deleted for good.
+/// S26: attachment content still needed: an attachment that is not deleted
+/// refers to it, and its note, if known here, is not deleted for good. A note in the Trash keeps its content.
 const NEEDED: &str = "SELECT DISTINCT a.sha256 FROM attachments a
-     WHERE a.deleted = 0 AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.id = a.task_id AND t.purged = 1)";
+     WHERE a.deleted = 0 AND NOT EXISTS (SELECT 1 FROM notes n WHERE n.id = a.note_id AND n.purged = 1)";
 
-/// Set while this device is to put its data over the storage's (S38).
+/// Set while this device is to put its data over the storage's (S37).
 const REPLACE: &str = "replace_remote";
-/// What the registers looked like when `kept` was filled (S39).
+/// What the registers looked like when `kept` was filled (S37).
 const KEPT_AT: &str = "replace_kept_at";
 
 #[derive(Serialize, Deserialize)]
@@ -157,7 +155,7 @@ fn encode(header: &Header, changes: &[Change]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// S46: a snapshot goes to the storage compressed. S50: its header carries the
+/// S15: a snapshot goes to the storage compressed; its header carries the
 /// time it was written, so that a tool showing that field does not show 1970.
 fn compress(data: &[u8]) -> Result<Vec<u8>> {
     use std::io::Write;
@@ -428,10 +426,6 @@ impl Store {
             }
         }
         db::settle(&tx, &touched)?;
-        // S42: what arrived is brought to the rule of subtasks at the end of the run, not here.
-        if changed > 0 {
-            db::meta_set(&tx, crate::subtasks::HOLD, "1")?;
-        }
         for (device, seq) in cursors {
             tx.execute(
                 "INSERT INTO peers (device, seq) VALUES (?1, ?2)
@@ -443,7 +437,7 @@ impl Store {
         Ok(changed)
     }
 
-    /// Reads `vault.json` (S14, S46, S49) and, for an encrypted storage, opens
+    /// Reads `vault.json` (S17) and, for an encrypted storage, opens
     /// its data key (S54). What it found is kept for the runs that follow.
     fn check_vault(&self, remote: &dyn Remote) -> Result<()> {
         let sealing = self.read_sealing(remote)?;
@@ -775,8 +769,8 @@ impl Store {
         let inner = self.lock();
         let mut stmt = inner.conn.prepare(
             "SELECT DISTINCT a.sha256, EXISTS (SELECT 1 FROM blobs_uploaded b WHERE b.sha256 = a.sha256)
-             FROM attachments a JOIN tasks t ON t.id = a.task_id
-             WHERE a.deleted = 0 AND t.purged = 0",
+             FROM attachments a JOIN notes n ON n.id = a.note_id
+             WHERE a.deleted = 0 AND n.purged = 0",
         )?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
         let wanted: Vec<(String, bool)> = rows.collect::<rusqlite::Result<_>>()?;
@@ -914,7 +908,7 @@ impl Store {
         Ok(report)
     }
 
-    /// S47: removes content no attachment needs any more from this device. Only
+    /// S26: removes content no attachment needs any more from this device. Only
     /// over a whole state: halfway through a run a reference may not have arrived yet.
     pub(crate) fn drop_unneeded_blobs(&self) -> Result<()> {
         let needed: BTreeSet<String> = {
@@ -935,7 +929,7 @@ impl Store {
         Ok(())
     }
 
-    /// S48: removes unneeded content from the storage, unless the data says a
+    /// S27: removes unneeded content from the storage, unless the data says a
     /// device did so after it became unneeded, and then says it did.
     fn remove_unneeded_blobs(&self, remote: &dyn Remote) -> Result<()> {
         let unneeded: Vec<(String, String, Option<String>)> = {
@@ -945,11 +939,11 @@ impl Store {
                         (SELECT g.stamp FROM fields g WHERE g.kind = ?1 AND g.id = a.sha256 AND g.field = 'gone')
                  FROM attachments a
                  JOIN fields f ON (f.kind = ?2 AND f.id = a.id AND f.field = 'deleted')
-                               OR (f.kind = ?3 AND f.id = a.task_id AND f.field = 'purged')
+                               OR (f.kind = ?3 AND f.id = a.note_id AND f.field = 'purged')
                  WHERE a.sha256 NOT IN ({NEEDED})
                  GROUP BY a.sha256"
             ))?;
-            let rows = stmt.query_map(params![KIND_BLOB, KIND_ATTACHMENT, KIND_TASK], |r| {
+            let rows = stmt.query_map(params![KIND_BLOB, KIND_ATTACHMENT, KIND_NOTE], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?))
             })?;
             rows.collect::<rusqlite::Result<_>>()?
@@ -958,7 +952,7 @@ impl Store {
             if !is_sha256(&sha256) || gone.is_some_and(|g| g > unneeded_since) {
                 continue;
             }
-            // The record goes out with the next log file, after the content is gone (S48).
+            // The record goes out with the next log file, after the content is gone (S27).
             match remote.delete(&blob_remote_path(&sha256)) {
                 Ok(()) => self.write(|w| w.set(KIND_BLOB, &sha256, "gone", serde_json::json!(true)))?,
                 Err(e) => self.note(LogLevel::Error, "attachments", || {
@@ -1147,10 +1141,10 @@ impl Store {
             db::meta_set(&self.lock().conn, WHOLE, "1")?;
         }
         *self.storage_seen.lock().unwrap_or_else(|p| p.into_inner()) = Some(storage);
-        // S42: everything the storage held is here, so a task of a project has the mark of its project.
+        // S8: everything the storage held is here, so a note is not purged before the edit that restores it arrives.
         // A file that could not be read leaves the state halfway; the run that reads it does this.
         if !unreadable {
-            self.tidy_whole()?;
+            self.expire_trash()?;
         }
         report.pulled = pulled;
         report.pushed = self.push(remote, &me)?;
@@ -1344,7 +1338,7 @@ impl Store {
         )?)
     }
 
-    /// S38, S39: a run that also puts this device's data over the storage's
+    /// S37: a run that also puts this device's data over the storage's
     /// when that was asked for. The caller holds the sync lock.
     fn replacing(&self, run: impl Fn() -> Result<SyncReport>) -> Result<SyncReport> {
         if db::meta_get(&self.lock().conn, REPLACE)?.is_none() {
@@ -1386,7 +1380,7 @@ impl Store {
         })
     }
 
-    /// S38: gives every register the value this device remembered, under a new
+    /// S37: gives every register the value this device remembered, under a new
     /// stamp, and sends what it did not have to the trash.
     fn put_back(&self) -> Result<()> {
         self.write(|w| {
@@ -1404,12 +1398,8 @@ impl Store {
                 let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
                 rows.collect::<rusqlite::Result<_>>()?
             };
-            // What has a trash to go to; the inbox and the shared settings cannot be deleted.
-            let has_trash = |kind: &str, id: &str| match kind {
-                KIND_TASK | KIND_ATTACHMENT | KIND_FILTER => true,
-                KIND_LIST => id != INBOX_ID,
-                _ => false,
-            };
+            // What has a Trash to go to; the shared settings cannot be deleted.
+            let has_trash = |kind: &str| matches!(kind, KIND_NOTE | KIND_FOLDER | KIND_ATTACHMENT | KIND_FILTER);
             let mut gone: BTreeSet<(String, String)> = BTreeSet::new();
             for (kind, id, field, kept) in rows {
                 match kept {
@@ -1417,14 +1407,19 @@ impl Store {
                         let value = serde_json::from_str(&value).unwrap_or(serde_json::Value::Null);
                         w.set(&kind, &id, &field, value)?;
                     }
-                    None if !known.contains(&(kind.clone(), id.clone())) && has_trash(&kind, &id) => {
+                    None if !known.contains(&(kind.clone(), id.clone())) && has_trash(&kind) => {
                         gone.insert((kind, id));
                     }
                     None => w.set(&kind, &id, &field, serde_json::Value::Null)?,
                 }
             }
             for (kind, id) in gone {
-                w.set(&kind, &id, "deleted", serde_json::Value::Bool(true))?;
+                // A note and a folder carry the moment they went to the Trash (S6, S10).
+                let value = match kind.as_str() {
+                    KIND_NOTE | KIND_FOLDER => serde_json::json!(w.now_ms()),
+                    _ => serde_json::Value::Bool(true),
+                };
+                w.set(&kind, &id, "deleted", value)?;
             }
             w.tx.execute("DELETE FROM kept", [])?;
             db::meta_del(w.tx, REPLACE)?;
@@ -1454,7 +1449,7 @@ impl Store {
     /// Runs the configured kind of sync; `None` when sync is off.
     fn run_configured(&self) -> Result<Option<SyncReport>> {
         // The settings are read under the lock: a run never starts with a
-        // storage that was replaced while it waited (S36).
+        // storage that was replaced while it waited (S35).
         let _running = self.sync_lock.lock().unwrap_or_else(|p| p.into_inner());
         let config = self.sync_config()?;
         Ok(Some(match config {
@@ -1473,23 +1468,23 @@ impl Store {
         }))
     }
 
-    /// Whether this device has a task out of the trash or a list of its own (S36, R88).
+    /// Whether this device has a note out of the Trash or a folder of its own (S33).
     pub(crate) fn holds_data(&self) -> Result<bool> {
         Ok(self.lock().conn.query_row(
-            "SELECT EXISTS (SELECT 1 FROM tasks WHERE deleted = 0 AND purged = 0)
-                 OR EXISTS (SELECT 1 FROM lists WHERE deleted = 0 AND id != ?1)",
-            [INBOX_ID],
+            "SELECT EXISTS (SELECT 1 FROM notes WHERE deleted = 0 AND purged = 0)
+                 OR EXISTS (SELECT 1 FROM folders WHERE deleted = 0)",
+            [],
             |r| r.get(0),
         )?)
     }
 
-    /// S37 without the lock: the caller holds it.
+    /// S36 without the lock: the caller holds it.
     fn drop_local(&self) -> Result<()> {
         self.renew(None, false)
     }
 
     /// Replaces the registers and makes this a device the storage has not seen
-    /// (S37, S40): with nothing, or with the registers of the database at
+    /// (S36, S38): with nothing, or with the registers of the database at
     /// `from` (R90). One transaction: a failure leaves what was there. The
     /// caller holds the sync lock.
     pub(crate) fn renew(&self, from: Option<&std::path::Path>, keep_settings: bool) -> Result<()> {
@@ -1506,8 +1501,6 @@ impl Store {
             let _ = inner.conn.execute("DETACH DATABASE restored", []);
         }
         done?;
-        // R112: a copy made before the rule of subtasks holds what does not fit it.
-        inner.write(|w| w.tidy())?;
         *self.storage_seen.lock().unwrap_or_else(|p| p.into_inner()) = None;
         *self.folder_seen.lock().unwrap_or_else(|p| p.into_inner()) = None;
         *self.sealed.lock().unwrap_or_else(|p| p.into_inner()) = None;
@@ -1527,8 +1520,7 @@ impl Store {
         }
         tx.execute_batch(
             "DELETE FROM kept;
-             DELETE FROM tasks; DELETE FROM task_tags; DELETE FROM attachments; DELETE FROM filters; DELETE FROM lists;
-             INSERT INTO lists (id) VALUES ('inbox');
+             DELETE FROM notes; DELETE FROM note_tags; DELETE FROM folders; DELETE FROM attachments; DELETE FROM filters;
              DELETE FROM peers; DELETE FROM outbox; DELETE FROM blobs_uploaded;
              DELETE FROM meta WHERE key IN ('sync_ok', 'sync_error', 'push_published',
                                             'own_seq', 'force_snapshot', 'replace_remote', 'replace_kept_at',
@@ -1562,7 +1554,7 @@ impl Store {
         Ok(())
     }
 
-    /// S38 without the lock: the caller holds it.
+    /// S37 without the lock: the caller holds it.
     pub(crate) fn ask_to_replace_remote(&self) -> Result<()> {
         let inner = self.lock();
         inner.conn.execute("DELETE FROM kept", [])?;
@@ -1708,7 +1700,7 @@ impl Store {
         self.join_storage(config, SyncSide::Merge)
     }
 
-    /// Stores where to sync and which side to keep there (S36). Replacing a
+    /// Stores where to sync and which side to keep there (S33, S35). Replacing a
     /// side waits for a run that is under way and lets none start in between,
     /// so it may take as long as that run: call it off the main thread.
     pub fn join_storage(&self, config: SyncConfig, side: SyncSide) -> Result<()> {
@@ -1723,7 +1715,7 @@ impl Store {
         }
     }
 
-    /// S36: whether both this device and the storage at `config` hold data, so
+    /// S33: whether both this device and the storage at `config` hold data, so
     /// that the person has a side to choose. Only reads, here and there.
     pub fn sync_conflict(&self, config: SyncConfig, password: String) -> Result<bool> {
         if !self.holds_data()? {
@@ -1745,7 +1737,7 @@ impl Store {
         }
     }
 
-    /// S37: drops what this device holds and makes it a new device, so that the
+    /// S36: drops what this device holds and makes it a new device, so that the
     /// next run reads the storage from the start. Changes not uploaded yet are
     /// lost; attachment content on disk stays.
     pub fn replace_local_with_remote(&self) -> Result<()> {
@@ -1753,9 +1745,9 @@ impl Store {
         self.drop_local()
     }
 
-    /// S38: asks the next run to put the data of this device over what the
+    /// S37: asks the next run to put the data of this device over what the
     /// storage and the other devices hold. Until a run gets through, the
-    /// request waits (S39).
+    /// request waits (S37).
     pub fn replace_remote_with_local(&self) -> Result<()> {
         let _running = self.sync_lock.lock().unwrap_or_else(|p| p.into_inner());
         self.ask_to_replace_remote()
@@ -1836,17 +1828,17 @@ impl Store {
     /// S35: downloads the content of one attachment now, ahead of the pass.
     pub fn fetch_attachment(&self, id: String) -> Result<Attachment> {
         let found = |store: &Store| -> Result<Attachment> {
-            let task: Option<String> = store
+            let note: Option<String> = store
                 .lock()
                 .conn
                 .query_row(
-                    "SELECT task_id FROM attachments WHERE id = ?1 AND deleted = 0",
+                    "SELECT note_id FROM attachments WHERE id = ?1 AND deleted = 0",
                     [&id],
                     |r| r.get(0),
                 )
                 .optional()?;
-            let all = match task {
-                Some(task) => store.attachments(task)?,
+            let all = match note {
+                Some(note) => store.attachments(note)?,
                 None => vec![],
             };
             all.into_iter()
@@ -1930,7 +1922,7 @@ mod tests {
     #[test]
     fn truncated_file_is_rejected() {
         let change = Change {
-            kind: "task".into(),
+            kind: "note".into(),
             id: "1".into(),
             field: "title".into(),
             value: serde_json::json!("x"),

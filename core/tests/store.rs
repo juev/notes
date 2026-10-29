@@ -1,4 +1,5 @@
-//! Behaviour of lists, tasks, subtasks and recurrence: docs/specs/product.md.
+//! Behaviour of notes, folders, tags, flags, the Trash, attachments, filters and the shared settings on
+//! one device: docs/specs/product.md and docs/specs/sync.md. What needs two devices is in `sync.rs`.
 
 mod common;
 
@@ -6,2414 +7,815 @@ use common::*;
 use notes_core::*;
 use serde_json::json;
 
-fn weekly() -> Repeat {
-    Repeat {
-        freq: Freq::Weekly,
-        interval: 1,
-        weekdays: vec![],
-        monthday: None,
-        nth: None,
-        nth_weekday: None,
-        from_done: false,
-        count: None,
-        until: None,
-    }
+fn tag_names(d: &Device) -> Vec<(String, u32)> {
+    d.tags().unwrap().into_iter().map(|t| (t.name, t.count)).collect()
 }
 
-#[test]
-fn r1_inbox_always_exists_and_cannot_be_removed() {
-    let d = device();
-    let lists = d.lists().unwrap();
-    assert_eq!(lists.len(), 1);
-    assert_eq!(lists[0].id, INBOX_ID);
-    assert!(d.delete_list(INBOX_ID.into()).is_err());
-    assert!(d.set_list_archived(INBOX_ID.into(), true).is_err());
-
-    add(&d, "без списка");
-    assert_eq!(view(&d, Scope::Inbox), ["без списка"]);
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
 }
 
+const DAY_MS: u64 = 24 * 60 * 60 * 1000;
+
+// ---- notes ----
+
 #[test]
-fn r2_list_settings_are_stored_and_applied() {
+fn r1_a_note_has_a_title_a_folder_tags_flags_and_moments() {
     let d = device();
-    let list = d.create_list("Работа".into()).unwrap();
-    d.set_list_color(list.id.clone(), "#3478F6".into()).unwrap();
-    d.set_list_icon(list.id.clone(), "briefcase".into()).unwrap();
-    d.set_list_defaults(list.id.clone(), Priority::High, true).unwrap();
-
-    let got = d.list(list.id.clone()).unwrap();
-    assert_eq!((got.color.as_str(), got.icon.as_str()), ("#3478F6", "briefcase"));
-
-    let in_list = |title: &str| NewTask {
-        title: title.into(),
-        list_id: Some(list.id.clone()),
-        ..NewTask::default()
-    };
-    let b = d.create_task(in_list("b")).unwrap();
-    assert_eq!(b.priority, Priority::High, "list default priority");
-    assert_eq!(b.due.as_deref(), Some("2026-10-05"), "list default due");
-    let a = d
-        .create_task(NewTask {
-            priority: Some(Priority::Low),
-            due: Some("2026-10-01".into()),
-            ..in_list("a")
+    let folder = new_folder(&d, "Работа", None);
+    let note = d
+        .create_note(NewNote {
+            title: "План".into(),
+            folder_id: Some(folder.id.clone()),
+            tags: vec!["срочно".into(), "Дом".into()],
         })
         .unwrap();
-    assert_eq!(a.priority, Priority::Low, "explicit value wins over the default");
+    assert_eq!(note.title, "План");
+    assert_eq!(note.folder_id.as_deref(), Some(folder.id.as_str()));
+    assert_eq!(note.tags, ["Дом", "срочно"]);
+    assert!(!(note.pinned || note.starred || note.archived || note.locked || note.deleted));
+    assert_eq!(note.attachments, 0);
+    // The moment of creation is the moment of the device; nothing was edited since.
+    let created = chrono::NaiveDateTime::parse_from_str(NOW, "%Y-%m-%dT%H:%M")
+        .unwrap()
+        .and_utc()
+        .timestamp_millis() as u64;
+    assert_eq!((note.created_ms, note.edited_ms), (created, created));
+    assert_eq!(note.deleted_ms, None);
 
-    let of = |d: &Device| view(d, Scope::List { id: list.id.clone() });
-    assert_eq!(of(&d), ["b", "a"], "manual order is creation order");
-    d.set_list_sort(list.id.clone(), SortMode::Title).unwrap();
-    assert_eq!(of(&d), ["a", "b"]);
-    d.set_list_sort(list.id.clone(), SortMode::Priority).unwrap();
-    assert_eq!(of(&d), ["b", "a"]);
-    d.set_list_sort(list.id.clone(), SortMode::Due).unwrap();
-    assert_eq!(of(&d), ["a", "b"]);
+    d.set_now_for_tests("2026-10-05T11:00");
+    d.set_title(note.id.clone(), "План на неделю".into()).unwrap();
+    let edited = d.get_note(note.id.clone()).unwrap();
+    assert_eq!(edited.created_ms, created);
+    assert_eq!(
+        edited.edited_ms,
+        created + 60 * 60 * 1000,
+        "the last edit is the greatest stamp"
+    );
 
-    d.complete_task(a.id).unwrap();
-    // A task completed a moment ago stays where it was (R68); this is about the time after that.
-    d.set_now_for_tests("2026-10-05T10:30");
-    assert_eq!(of(&d), ["b"]);
-    d.set_list_show_done(list.id.clone(), true).unwrap();
-    assert_eq!(of(&d), ["b", "a"], "completed tasks go last");
-    d.set_list_show_done(list.id.clone(), false).unwrap();
-    assert_eq!(of(&d), ["b"], "switched off, completed tasks leave the list again");
-    assert_eq!(d.list(list.id).unwrap().open_count, 1);
-}
-
-#[test]
-fn r3_lists_are_reordered_archived_and_deleted() {
-    let d = device();
-    let a = d.create_list("A".into()).unwrap();
-    let b = d.create_list("B".into()).unwrap();
-    let c = d.create_list("C".into()).unwrap();
-    let names = |d: &Device| d.lists().unwrap().into_iter().map(|l| l.name).collect::<Vec<_>>();
-    assert_eq!(names(&d)[1..], ["A", "B", "C"]);
-    d.move_list(c.id.clone(), None).unwrap();
-    assert_eq!(names(&d)[1..], ["C", "A", "B"]);
-    d.move_list(c.id.clone(), Some(a.id.clone())).unwrap();
-    assert_eq!(names(&d)[1..], ["A", "C", "B"]);
-
-    let task = d
-        .create_task(NewTask {
-            title: "в B".into(),
-            list_id: Some(b.id.clone()),
-            due: Some("2026-10-05".into()),
-            ..NewTask::default()
-        })
-        .unwrap();
-    d.set_list_archived(b.id.clone(), true).unwrap();
-    assert!(view(&d, Scope::Today).is_empty(), "archived lists stay out of Today");
-    d.set_list_archived(b.id.clone(), false).unwrap();
-    assert_eq!(view(&d, Scope::Today), ["в B"]);
-
-    d.delete_list(b.id.clone()).unwrap();
-    assert_eq!(names(&d)[1..], ["A", "C"]);
-    assert_eq!(view(&d, Scope::Trash), ["в B"]);
-    // S6: restored without its list, the task shows up in the inbox.
-    d.restore_task(task.id).unwrap();
-    assert_eq!(view(&d, Scope::Inbox), ["в B"]);
-}
-
-#[test]
-fn r4_fields_round_trip() {
-    let d = device();
-    let t = add(&d, "  задача  ");
-    assert_eq!(t.title, "задача");
+    assert!(d.get_note("missing".into()).is_err());
     assert!(d
-        .create_task(NewTask {
-            title: "   ".into(),
-            ..NewTask::default()
+        .create_note(NewNote {
+            title: "x".into(),
+            folder_id: Some("missing".into()),
+            ..NewNote::default()
         })
         .is_err());
-
-    d.set_notes(t.id.clone(), "заметка".into()).unwrap();
-    d.set_start(t.id.clone(), Some("2026-10-06".into())).unwrap();
-    d.set_due(t.id.clone(), Some("2026-10-07T09:30".into())).unwrap();
-    d.set_priority(t.id.clone(), Priority::Medium).unwrap();
-    d.set_remind(t.id.clone(), Some("2026-10-07T09:00".into())).unwrap();
-    d.add_tag(t.id.clone(), "#Дом".into()).unwrap();
-    d.add_tag(t.id.clone(), "срочно".into()).unwrap();
-    d.remove_tag(t.id.clone(), "срочно".into()).unwrap();
-
-    let got = d.task(t.id.clone()).unwrap();
-    assert_eq!(got.notes, "заметка");
-    assert_eq!(got.start.as_deref(), Some("2026-10-06"));
-    assert_eq!(got.due.as_deref(), Some("2026-10-07T09:30"));
-    assert_eq!(got.priority, Priority::Medium);
-    assert_eq!(got.remind.as_deref(), Some("2026-10-07T09:00"));
-    assert_eq!(got.tags, ["дом"]);
-
-    assert!(d.set_due(t.id.clone(), Some("завтра".into())).is_err());
-    assert!(d.set_due(t.id.clone(), Some("2026-13-40".into())).is_err());
-    d.set_due(t.id.clone(), None).unwrap();
-    assert_eq!(d.task(t.id).unwrap().due, None);
 }
 
 #[test]
-fn r5_start_date_hides_the_task_from_today() {
+fn r3_a_note_may_have_no_title() {
     let d = device();
-    let t = add(&d, "позже");
-    d.set_start(t.id.clone(), Some("2026-10-06".into())).unwrap();
-    assert!(view(&d, Scope::Today).is_empty());
-    assert_eq!(view(&d, Scope::Upcoming), ["позже"]);
-
-    d.set_start(t.id.clone(), Some("2026-10-05".into())).unwrap();
-    assert_eq!(view(&d, Scope::Today), ["позже"]);
-    assert!(view(&d, Scope::Upcoming).is_empty());
-
-    // Due today but not startable until tomorrow: still hidden.
-    d.set_due(t.id.clone(), Some("2026-10-05".into())).unwrap();
-    d.set_start(t.id, Some("2026-10-06".into())).unwrap();
-    assert!(view(&d, Scope::Today).is_empty());
+    let note = add(&d, "");
+    assert_eq!(note.title, "");
+    assert_eq!(view(&d, Scope::All), [""]);
 }
 
 #[test]
-fn r7_tags_list_only_those_in_use() {
+fn r2_the_folder_for_a_new_note_follows_the_setting() {
     let d = device();
+    let first = new_folder(&d, "Первая", None);
+    let second = new_folder(&d, "Вторая", None);
+    let set = |choice: &str| {
+        d.set_settings(AppSettings {
+            new_note_folder: choice.into(),
+            ..d.settings().unwrap()
+        })
+        .unwrap()
+    };
+    assert_eq!(
+        d.default_folder_id(Some(first.id.clone())).unwrap(),
+        None,
+        "root is the default"
+    );
+
+    set("last");
+    assert_eq!(
+        d.default_folder_id(Some(first.id.clone())).unwrap(),
+        Some(first.id.clone())
+    );
+    assert_eq!(d.default_folder_id(None).unwrap(), None);
+
+    set(&second.id);
+    assert_eq!(
+        d.default_folder_id(Some(first.id.clone())).unwrap(),
+        Some(second.id.clone())
+    );
+
+    // A folder that is gone gives the root.
+    d.delete_folder(second.id).unwrap();
+    assert_eq!(d.default_folder_id(Some(first.id.clone())).unwrap(), None);
+    set("last");
+    d.delete_folder(first.id.clone()).unwrap();
+    assert_eq!(d.default_folder_id(Some(first.id)).unwrap(), None);
+}
+
+#[test]
+fn r4_a_copy_keeps_the_folder_the_tags_and_the_content_of_the_attachments() {
+    let d = device();
+    let folder = new_folder(&d, "Папка", None);
+    let note = add_in(&d, "Оригинал", &folder);
+    d.add_tag(note.id.clone(), "тег".into()).unwrap();
+    d.set_pinned(note.id.clone(), true).unwrap();
+    let src = tempfile::tempdir().unwrap();
+    let file = src.path().join("Счёт.pdf");
+    std::fs::write(&file, b"%PDF-1.7 demo").unwrap();
+    let original = d
+        .add_attachment(note.id.clone(), file.to_string_lossy().into_owned(), None)
+        .unwrap();
+
+    let copy = d.duplicate_note(note.id.clone()).unwrap();
+    assert_ne!(copy.id, note.id);
+    assert_eq!(copy.title, "Оригинал (copy)");
+    assert_eq!(copy.folder_id, note.folder_id);
+    assert_eq!(copy.tags, ["тег"]);
+    assert!(!copy.pinned, "the flags stay with the original");
+    let files = d.attachments(copy.id.clone()).unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].sha256, original.sha256, "the same content");
+    assert_ne!(files[0].id, original.id);
+
+    // Taking one away does not touch the other.
+    d.remove_attachment(files[0].id.clone()).unwrap();
+    assert_eq!(d.attachments(note.id).unwrap().len(), 1);
+}
+
+#[test]
+fn r28_a_locked_note_keeps_its_title_tags_and_attachments_but_can_be_moved_flagged_and_deleted() {
+    let d = device();
+    let folder = new_folder(&d, "Папка", None);
+    let note = add(&d, "закрыта");
+    d.add_tag(note.id.clone(), "тег".into()).unwrap();
+    let src = tempfile::tempdir().unwrap();
+    let file = src.path().join("a.txt");
+    std::fs::write(&file, b"a").unwrap();
+    let path = file.to_string_lossy().into_owned();
+    let attached = d.add_attachment(note.id.clone(), path.clone(), None).unwrap();
+    d.set_locked(note.id.clone(), true).unwrap();
+
+    let refused = |e: AppError| matches!(e, AppError::Invalid { .. });
+    assert!(refused(d.set_title(note.id.clone(), "иначе".into()).unwrap_err()));
+    assert!(refused(d.add_tag(note.id.clone(), "новый".into()).unwrap_err()));
+    assert!(refused(d.remove_tag(note.id.clone(), "тег".into()).unwrap_err()));
+    assert!(refused(d.add_attachment(note.id.clone(), path, None).unwrap_err()));
+    assert!(refused(d.remove_attachment(attached.id).unwrap_err()));
+    let still = d.get_note(note.id.clone()).unwrap();
+    assert_eq!(
+        (still.title.as_str(), still.tags.clone(), still.attachments),
+        ("закрыта", vec!["тег".to_string()], 1)
+    );
+
+    d.move_note(note.id.clone(), Some(folder.id.clone())).unwrap();
+    d.set_pinned(note.id.clone(), true).unwrap();
+    d.set_starred(note.id.clone(), true).unwrap();
+    d.set_archived(note.id.clone(), true).unwrap();
+    d.delete_note(note.id.clone()).unwrap();
+    d.restore_note(note.id.clone()).unwrap();
+    let moved = d.get_note(note.id.clone()).unwrap();
+    assert_eq!(moved.folder_id.as_deref(), Some(folder.id.as_str()));
+    assert!(moved.pinned && moved.starred && moved.archived && moved.locked);
+
+    // Unlocking is possible, and then the note is editable again.
+    d.set_locked(note.id.clone(), false).unwrap();
+    d.set_title(note.id.clone(), "иначе".into()).unwrap();
+    assert_eq!(d.get_note(note.id).unwrap().title, "иначе");
+}
+
+#[test]
+fn r25_r26_r27_pinned_comes_first_starred_has_a_view_and_archived_is_left_out() {
+    let d = device();
+    let folder = new_folder(&d, "Папка", None);
+    d.set_now_for_tests("2026-10-05T10:00");
+    let a = add_in(&d, "a", &folder);
+    d.set_now_for_tests("2026-10-05T10:01");
+    let b = add_in(&d, "b", &folder);
+    d.set_now_for_tests("2026-10-05T10:02");
+    let c = add_in(&d, "c", &folder);
+    let in_folder = || view(&d, Scope::Folder { id: folder.id.clone() });
+    assert_eq!(in_folder(), ["c", "b", "a"], "the last edit first");
+
+    d.set_pinned(a.id.clone(), true).unwrap();
+    assert_eq!(in_folder(), ["a", "c", "b"]);
+    assert_eq!(view(&d, Scope::All)[0], "a", "in every view");
+    d.set_folder_sort(
+        folder.id.clone(),
+        FolderSort {
+            by: SortBy::Title,
+            descending: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(in_folder(), ["a", "b", "c"]);
+    d.set_pinned(c.id.clone(), true).unwrap();
+    assert_eq!(
+        in_folder(),
+        ["a", "c", "b"],
+        "pinned first under any sort, in the order of the sort"
+    );
+
+    // Starring does not change the order.
+    d.set_starred(b.id.clone(), true).unwrap();
+    assert_eq!(view(&d, Scope::Starred), ["b"]);
+    assert_eq!(in_folder(), ["a", "c", "b"]);
+
+    // Archived is out of the folder, All, the tags and the counters, and in Archived.
+    d.add_tag(b.id.clone(), "тег".into()).unwrap();
+    d.set_archived(b.id.clone(), true).unwrap();
+    assert_eq!(in_folder(), ["a", "c"]);
+    assert_eq!(view(&d, Scope::All), ["a", "c"]);
+    assert_eq!(view(&d, Scope::Archived), ["b"]);
+    assert!(view(&d, Scope::Tag { name: "тег".into() }).is_empty());
+    assert!(d.tags().unwrap().is_empty());
+    assert_eq!(d.folders().unwrap()[0].note_count, 2);
+
+    d.set_archived(b.id, false).unwrap();
+    assert_eq!(in_folder(), ["a", "c", "b"]);
+}
+
+#[test]
+fn r16_a_folder_sorts_by_edit_creation_or_title_in_either_direction() {
+    let d = device();
+    let folder = new_folder(&d, "Папка", None);
+    d.set_now_for_tests("2026-10-05T10:00");
+    let b = add_in(&d, "b", &folder);
+    d.set_now_for_tests("2026-10-05T10:01");
+    add_in(&d, "A", &folder);
+    d.set_now_for_tests("2026-10-05T10:02");
+    add_in(&d, "c", &folder);
+    d.set_now_for_tests("2026-10-05T10:03");
+    d.set_starred(b.id, true).unwrap();
+    let sorted = |by, descending| {
+        d.set_folder_sort(folder.id.clone(), FolderSort { by, descending })
+            .unwrap();
+        view(&d, Scope::Folder { id: folder.id.clone() })
+    };
+    assert_eq!(d.folder(folder.id.clone()).unwrap().sort, FolderSort::default());
+    assert_eq!(sorted(SortBy::Edited, true), ["b", "c", "A"]);
+    assert_eq!(sorted(SortBy::Edited, false), ["A", "c", "b"]);
+    assert_eq!(
+        sorted(SortBy::Created, true),
+        ["c", "A", "b"],
+        "an edit does not move it"
+    );
+    assert_eq!(sorted(SortBy::Created, false), ["b", "A", "c"]);
+    assert_eq!(sorted(SortBy::Title, false), ["A", "b", "c"], "case does not matter");
+    assert_eq!(sorted(SortBy::Title, true), ["c", "b", "A"]);
+    assert_eq!(
+        d.folder(folder.id).unwrap().sort,
+        FolderSort {
+            by: SortBy::Title,
+            descending: true
+        }
+    );
+}
+
+#[test]
+fn r16_a_folder_can_hide_the_preview_and_the_date_and_be_a_daily_one() {
+    let d = device();
+    let folder = new_folder(&d, "Дневник", None);
+    assert!(folder.show_preview && folder.show_date && !folder.daily);
+    d.set_folder_display(folder.id.clone(), false, true).unwrap();
+    d.set_folder_daily(folder.id.clone(), true).unwrap();
+    d.set_folder_icon(folder.id.clone(), "📓".into()).unwrap();
+    let got = d.folder(folder.id).unwrap();
+    assert_eq!(
+        (got.show_preview, got.show_date, got.daily, got.icon.as_str()),
+        (false, true, true, "📓")
+    );
+}
+
+// ---- folders ----
+
+#[test]
+fn r10_r15_folders_nest_and_names_are_checked() {
+    let d = device();
+    let a = new_folder(&d, "A", None);
+    let b = new_folder(&d, "B", Some(&a));
+    let c = new_folder(&d, "C", Some(&b));
+    new_folder(&d, "A", None);
+    let by_id = |id: &str| d.folder(id.into()).unwrap().parent_id;
+    assert_eq!(
+        (by_id(&a.id), by_id(&b.id), by_id(&c.id)),
+        (None, Some(a.id.clone()), Some(b.id.clone()))
+    );
+    assert_eq!(
+        d.folders().unwrap().iter().filter(|f| f.name == "A").count(),
+        2,
+        "names may repeat"
+    );
+
+    let invalid = |e: AppError| matches!(e, AppError::Invalid { .. });
+    assert!(invalid(d.create_folder("  ".into(), None).unwrap_err()));
+    assert!(invalid(d.rename_folder(a.id.clone(), "".into()).unwrap_err()));
+    assert!(d.create_folder("я".repeat(200), None).is_ok());
+    assert!(invalid(d.create_folder("я".repeat(201), None).unwrap_err()));
+    assert!(d.create_folder("x".into(), Some("missing".into())).is_err());
+
+    d.rename_folder(a.id.clone(), "  Новое имя ".into()).unwrap();
+    assert_eq!(d.folder(a.id).unwrap().name, "Новое имя");
+}
+
+#[test]
+fn r11_a_folder_cannot_go_into_itself_or_its_own_subfolder() {
+    let d = device();
+    let a = new_folder(&d, "A", None);
+    let b = new_folder(&d, "B", Some(&a));
+    let c = new_folder(&d, "C", Some(&b));
+    let other = new_folder(&d, "Другая", None);
+    for (id, into) in [(&a.id, &a.id), (&a.id, &b.id), (&a.id, &c.id), (&b.id, &c.id)] {
+        let error = d.move_folder(id.clone(), Some(into.clone()), None).unwrap_err();
+        assert!(matches!(error, AppError::Invalid { .. }), "{error}");
+    }
+    d.move_folder(c.id.clone(), Some(other.id.clone()), None).unwrap();
+    d.move_folder(b.id.clone(), None, None).unwrap();
+    let parent = |id: &str| d.folder(id.into()).unwrap().parent_id;
+    assert_eq!((parent(&c.id), parent(&b.id)), (Some(other.id), None));
+}
+
+#[test]
+fn r12_r13_the_tree_counts_the_notes_of_the_subfolders_and_no_folder_lists_the_rest() {
+    let d = device();
+    let a = new_folder(&d, "A", None);
+    let b = new_folder(&d, "B", Some(&a));
+    add_in(&d, "в A", &a);
+    add_in(&d, "в B 1", &b);
+    add_in(&d, "в B 2", &b);
+    let hidden = add_in(&d, "в архиве", &b);
+    d.set_archived(hidden.id, true).unwrap();
+    let gone = add_in(&d, "в корзине", &b);
+    d.delete_note(gone.id).unwrap();
+    add(&d, "без папки");
+
+    let count = |f: &Folder| d.folder(f.id.clone()).unwrap().note_count;
+    assert_eq!((count(&a), count(&b)), (3, 2));
+    assert_eq!(view(&d, Scope::NoFolder), ["без папки"]);
+    assert_eq!(
+        view(&d, Scope::Folder { id: a.id.clone() }),
+        ["в A"],
+        "the folder lists its own notes"
+    );
+    assert!(d.notes(Scope::Folder { id: "missing".into() }).is_err());
+}
+
+#[test]
+fn r11_notes_move_between_folders_and_to_the_root() {
+    let d = device();
+    let a = new_folder(&d, "A", None);
+    let note = add(&d, "н");
+    d.move_note(note.id.clone(), Some(a.id.clone())).unwrap();
+    assert_eq!(view(&d, Scope::Folder { id: a.id.clone() }), ["н"]);
+    d.move_note(note.id.clone(), None).unwrap();
+    assert_eq!(view(&d, Scope::NoFolder), ["н"]);
+    assert!(d.move_note(note.id, Some("missing".into())).is_err());
+}
+
+#[test]
+fn s10_a_note_of_a_deleted_or_unknown_folder_and_a_folder_of_a_deleted_parent_are_shown_at_the_root() {
+    let d = device();
+    let parent = new_folder(&d, "Родитель", None);
+    let child = new_folder(&d, "Дочерняя", Some(&parent));
+    let in_parent = add_in(&d, "в родителе", &parent);
+    let in_child = add_in(&d, "в дочерней", &child);
+    let lost = add(&d, "в неизвестной");
+    d.set_note_field_for_tests(&lost.id, "folder", json!("no-such-folder"));
+    assert_eq!(
+        d.get_note(lost.id.clone()).unwrap().folder_id,
+        None,
+        "unknown folder: the root"
+    );
+
+    // Only the parent is deleted, as another device can leave it.
+    d.set_folder_field_for_tests(&parent.id, "deleted", json!(1));
+    assert_eq!(d.get_note(in_parent.id).unwrap().folder_id, None);
+    assert_eq!(
+        d.get_note(in_child.id).unwrap().folder_id.as_deref(),
+        Some(child.id.as_str())
+    );
+    assert_eq!(
+        d.folder(child.id.clone()).unwrap().parent_id,
+        None,
+        "the folder of a deleted parent: the root"
+    );
+    assert!(d.folder(parent.id).is_err(), "a deleted folder is not listed");
+    let mut root = view(&d, Scope::NoFolder);
+    root.sort();
+    assert_eq!(root, ["в неизвестной", "в родителе"]);
+
+    // Once the folder of a note is deleted as well, the note is at the root too.
+    d.set_folder_field_for_tests(&child.id, "deleted", json!(1));
+    assert!(view(&d, Scope::NoFolder).contains(&"в дочерней".to_string()));
+}
+
+#[test]
+fn s10_r14_deleting_a_folder_sends_it_its_subfolders_and_their_notes_to_the_trash_in_one_change() {
+    let d = device();
+    let x = new_folder(&d, "X", None);
+    let y = new_folder(&d, "Y", Some(&x));
+    let z = new_folder(&d, "Z", None);
+    let n1 = add_in(&d, "n1", &x);
+    let n2 = add_in(&d, "n2", &x);
+    let n3 = add_in(&d, "n3", &y);
+    let n4 = add_in(&d, "n4", &y);
+    let other = add_in(&d, "в другой", &z);
+    d.set_archived(n2.id.clone(), true).unwrap();
+    // A note that went to the Trash earlier keeps its own moment.
+    d.set_now_for_tests("2026-10-01T09:00");
+    d.delete_note(n4.id.clone()).unwrap();
+    d.set_now_for_tests(NOW);
+    let earlier = d.get_note(n4.id.clone()).unwrap().deleted_ms;
+
+    assert_eq!(
+        d.folder_deletion_count(x.id.clone()).unwrap(),
+        3,
+        "n1, n2 and n3 are told to the user"
+    );
+    assert_eq!(d.delete_folder(x.id.clone()).unwrap(), 3);
+    assert_eq!(
+        d.folders().unwrap().iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+        ["Z"]
+    );
+    let mut trash = view(&d, Scope::Trash);
+    trash.sort();
+    assert_eq!(trash, ["n1", "n2", "n3", "n4"]);
+    assert_eq!(view(&d, Scope::All), ["в другой"]);
+    assert_eq!(d.get_note(n4.id.clone()).unwrap().deleted_ms, earlier);
+    assert!(d.get_note(other.id).is_ok_and(|n| !n.deleted));
+
+    // One undo takes the whole action back.
+    assert_eq!(d.undo().unwrap(), 1);
+    assert_eq!(d.folders().unwrap().len(), 3);
+    let mut back = view(&d, Scope::All);
+    back.sort();
+    assert_eq!(back, ["n1", "n3", "в другой"]);
+    assert_eq!(view(&d, Scope::Trash), ["n4"], "and no more than the action");
+    let _ = (n1, n3);
+}
+
+#[test]
+fn s10_restoring_a_note_restores_the_chain_of_its_folders_and_nothing_else() {
+    let d = device();
+    let x = new_folder(&d, "X", None);
+    let y = new_folder(&d, "Y", Some(&x));
+    let sibling = new_folder(&d, "Брат", Some(&x));
+    let a = add_in(&d, "a", &y);
+    let b = add_in(&d, "b", &y);
+    let c = add_in(&d, "c", &x);
+    let s = add_in(&d, "s", &sibling);
+    d.delete_folder(x.id.clone()).unwrap();
+
+    d.restore_note(a.id.clone()).unwrap();
+    let names: Vec<String> = d.folders().unwrap().into_iter().map(|f| f.name).collect();
+    assert_eq!(names.len(), 2, "X and Y are back: {names:?}");
+    assert!(names.contains(&"X".to_string()) && names.contains(&"Y".to_string()));
+    assert_eq!(d.get_note(a.id.clone()).unwrap().folder_id, Some(y.id.clone()));
+    assert_eq!(d.folder(y.id.clone()).unwrap().parent_id, Some(x.id.clone()));
+    let mut trash = view(&d, Scope::Trash);
+    trash.sort();
+    assert_eq!(trash, ["b", "c", "s"], "the other notes stay in the Trash");
+    assert!(
+        d.folder(sibling.id.clone()).is_err(),
+        "and so does the folder next to the chain"
+    );
+
+    // Restoring a note whose folder is out of the Trash changes nothing else, and a note out of it is left alone.
+    d.restore_note(c.id).unwrap();
+    d.restore_note(a.id).unwrap();
+    let mut trash = view(&d, Scope::Trash);
+    trash.sort();
+    assert_eq!(trash, ["b", "s"]);
+    let _ = (b, s);
+}
+
+// ---- the Trash ----
+
+#[test]
+fn s6_a_note_goes_to_the_trash_with_its_moment_and_comes_back_with_an_empty_value() {
+    let d = device();
+    let note = add(&d, "н");
+    d.set_now_for_tests("2026-10-05T12:00");
+    d.delete_note(note.id.clone()).unwrap();
+    let deleted_at = chrono::NaiveDateTime::parse_from_str("2026-10-05T12:00", "%Y-%m-%dT%H:%M")
+        .unwrap()
+        .and_utc()
+        .timestamp_millis() as u64;
+    let got = d.get_note(note.id.clone()).unwrap();
+    assert!(got.deleted);
+    assert_eq!(
+        got.deleted_ms,
+        Some(deleted_at),
+        "R46: the Trash counts the days from this"
+    );
+    assert!(view(&d, Scope::All).is_empty());
+    assert_eq!(view(&d, Scope::Trash), ["н"]);
+
+    // Deleting again does not start the days over.
+    d.set_now_for_tests("2026-10-07T12:00");
+    d.delete_note(note.id.clone()).unwrap();
+    assert_eq!(d.get_note(note.id.clone()).unwrap().deleted_ms, Some(deleted_at));
+
+    d.restore_note(note.id.clone()).unwrap();
+    let back = d.get_note(note.id).unwrap();
+    assert!(!back.deleted && back.deleted_ms.is_none());
+    assert_eq!(view(&d, Scope::All), ["н"]);
+}
+
+#[test]
+fn s7_a_note_deleted_for_good_is_shown_nowhere_and_cannot_be_brought_back() {
+    let d = device();
+    let folder = new_folder(&d, "Папка", None);
+    let note = add_in(&d, "навсегда", &folder);
+    d.add_tag(note.id.clone(), "тег".into()).unwrap();
+    d.set_starred(note.id.clone(), true).unwrap();
+    d.purge_note(note.id.clone()).unwrap();
+
+    for scope in [
+        Scope::All,
+        Scope::Starred,
+        Scope::Archived,
+        Scope::Trash,
+        Scope::Untagged,
+        Scope::NoFolder,
+        Scope::Folder { id: folder.id.clone() },
+        Scope::Tag { name: "тег".into() },
+    ] {
+        assert!(view(&d, scope.clone()).is_empty(), "{scope:?}");
+    }
+    assert!(d.tags().unwrap().is_empty());
+    assert_eq!(d.folder(folder.id).unwrap().note_count, 0);
+    assert!(matches!(d.get_note(note.id.clone()), Err(AppError::NotFound { .. })));
+    assert!(matches!(
+        d.restore_note(note.id.clone()),
+        Err(AppError::NotFound { .. })
+    ));
+    assert!(matches!(
+        d.set_title(note.id, "x".into()),
+        Err(AppError::NotFound { .. })
+    ));
+}
+
+#[test]
+fn r46_the_trash_lists_deleted_notes_and_is_emptied_by_hand() {
+    let d = device();
+    d.set_now_for_tests("2026-10-05T10:00");
     let a = add(&d, "a");
     let b = add(&d, "b");
-    d.add_tag(a.id.clone(), "дом".into()).unwrap();
-    d.add_tag(b.id.clone(), "дом".into()).unwrap();
-    d.add_tag(b.id.clone(), "офис".into()).unwrap();
-    let tags = |d: &Device| {
-        d.tags()
-            .unwrap()
-            .into_iter()
-            .map(|t| (t.name, t.open_count))
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(tags(&d), [("дом".to_string(), 2), ("офис".to_string(), 1)]);
-    assert_eq!(view(&d, Scope::Tag { name: "Дом".into() }), ["a", "b"]);
+    let kept = add(&d, "остаётся");
+    d.delete_note(a.id.clone()).unwrap();
+    d.set_now_for_tests("2026-10-05T10:05");
+    d.delete_note(b.id.clone()).unwrap();
+    assert_eq!(view(&d, Scope::Trash), ["b", "a"], "the one that went last first");
 
-    d.complete_task(b.id).unwrap();
-    assert_eq!(tags(&d), [("дом".to_string(), 1)]);
-    assert!(d.add_tag(a.id, "два слова".into()).is_err());
-}
-
-#[test]
-fn s51_a_tag_at_the_limit_of_a_field_is_taken_and_a_longer_one_is_refused() {
-    let d = device();
-    let t = add(&d, "задача");
-    let latin = "a".repeat(196);
-    let cyrillic = "я".repeat(98);
-    d.add_tag(t.id.clone(), latin.clone()).unwrap();
-    d.add_tag(t.id.clone(), cyrillic.clone()).unwrap();
-    assert_eq!(d.task(t.id.clone()).unwrap().tags, [latin.clone(), cyrillic.clone()]);
-
-    // One byte more than the field can carry: 197 Latin letters, 99 Cyrillic ones.
-    for too_long in ["a".repeat(197), "я".repeat(99)] {
-        let error = d.add_tag(t.id.clone(), too_long.clone()).unwrap_err().to_string();
-        assert!(error.contains("196 bytes"), "{error}");
-        assert!(
-            d.remove_tag(t.id.clone(), too_long).is_err(),
-            "no field is written either"
-        );
-    }
-    assert_eq!(d.task(t.id).unwrap().tags, [latin, cyrillic]);
-}
-
-#[test]
-fn s51_quick_add_refuses_a_tag_that_the_register_cannot_carry() {
-    let d = device();
-    let too_long = "a".repeat(197);
-    let error = d
-        .quick_add(format!("задача #{too_long}"), None, true, None)
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("196 bytes"), "{error}");
-    assert!(view(&d, Scope::All).is_empty(), "the task is not created");
-
-    let fits = "я".repeat(98);
-    let task = d.quick_add(format!("задача #{fits}"), None, true, None).unwrap();
-    assert_eq!(task.tags, [fits]);
-}
-
-#[test]
-fn s51_a_tag_from_before_the_limit_leaves_the_view_after_an_upgrade() {
-    let dir = tempfile::tempdir().unwrap();
-    let t = {
-        let store = Store::open(dir.path().to_string_lossy().into_owned()).unwrap();
-        store.set_now_for_tests(NOW);
-        add(&store, "задача")
-    };
-    let long = "a".repeat(197);
-    {
-        let conn = rusqlite::Connection::open(dir.path().join("notes.sqlite")).unwrap();
-        let stamp: String = conn
-            .query_row("SELECT max(stamp) FROM fields", [], |r| r.get(0))
-            .unwrap();
-        conn.execute(
-            "INSERT OR REPLACE INTO fields (kind, id, field, value, stamp, dirty)
-             VALUES ('task', ?1, ?2, 'true', ?3, 0)",
-            rusqlite::params![t.id, format!("tag:{long}"), stamp],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT OR REPLACE INTO task_tags (task_id, tag) VALUES (?1, ?2)",
-            rusqlite::params![t.id, long],
-        )
-        .unwrap();
-        // The derived tables are as version 4, the one before S51, left them.
-        conn.execute("UPDATE meta SET value = '4' WHERE key = 'derived_version'", [])
-            .unwrap();
-    }
-
-    let store = Store::open(dir.path().to_string_lossy().into_owned()).unwrap();
-    assert!(
-        store.task(t.id).unwrap().tags.is_empty(),
-        "a tag no register can carry is not shown"
-    );
-}
-
-#[test]
-fn r9_trash_restore_and_purge() {
-    let d = device();
-    let t = add(&d, "мусор");
-    d.set_project(t.id.clone(), true).unwrap();
-    let sub = add_sub(&d, &t, "часть");
-    d.set_due(sub.id.clone(), Some("2026-10-05".into())).unwrap();
-    assert_eq!(view(&d, Scope::Today), ["часть"]);
-
-    d.delete_task(t.id.clone()).unwrap();
-    assert!(view(&d, Scope::Inbox).is_empty());
-    assert!(
-        view(&d, Scope::Today).is_empty(),
-        "subtasks of a deleted task are hidden too"
-    );
-    assert_eq!(view(&d, Scope::Trash), ["мусор"]);
-    assert_eq!(d.counts().unwrap().trash, 1);
-
-    d.restore_task(t.id.clone()).unwrap();
-    assert_eq!(
-        titles(&d.projects().unwrap()),
-        ["мусор"],
-        "a project is restored to the sidebar (R120)"
-    );
-    assert_eq!(view(&d, Scope::Today), ["часть"]);
-
-    d.delete_task(t.id.clone()).unwrap();
+    d.purge_note(a.id).unwrap();
+    assert_eq!(view(&d, Scope::Trash), ["b"]);
     assert_eq!(d.empty_trash().unwrap(), 1);
     assert!(view(&d, Scope::Trash).is_empty());
-    assert!(d.task(t.id).is_err());
+    assert!(d.get_note(b.id).is_err());
+    assert_eq!(d.empty_trash().unwrap(), 0);
+    assert_eq!(view(&d, Scope::All), ["остаётся"]);
+    let _ = kept;
 }
 
 #[test]
-fn r46_completed_is_cleared_in_whole_or_before_a_day() {
+fn s8_the_trash_is_emptied_on_start_by_the_age_of_the_note_and_the_setting() {
+    // A device without sync: the check runs at the start, on the real clock.
     let d = device();
-    d.set_now_for_tests("2026-08-01T09:00");
-    let old = add(&d, "давняя");
-    add_sub(&d, &old, "её часть");
-    d.complete_task(old.id.clone()).unwrap();
-    d.set_now_for_tests("2026-08-01T10:00");
-    let rep = add(&d, "зарядка");
-    d.set_due(rep.id.clone(), Some("2026-08-01".into())).unwrap();
-    d.set_repeat(rep.id.clone(), Some(weekly())).unwrap();
-    d.complete_task(rep.id.clone()).unwrap();
-    d.set_now_for_tests("2026-09-20T09:00");
-    let mid = add(&d, "сентябрьская");
-    d.complete_task(mid.id).unwrap();
-    d.set_now_for_tests(NOW);
-    let fresh = add(&d, "свежая");
-    d.complete_task(fresh.id).unwrap();
-    let open = add(&d, "в работе");
-    let part = add_sub(&d, &open, "сделанная часть");
-    d.complete_task(part.id.clone()).unwrap();
-    let binned = add(&d, "в корзине");
-    d.complete_task(binned.id.clone()).unwrap();
-    d.delete_task(binned.id.clone()).unwrap();
-    assert_eq!(
-        view(&d, Scope::Completed),
-        ["свежая", "сентябрьская", "зарядка", "давняя"]
-    );
-
-    assert!(d.clear_completed(Some("в августе".into())).is_err());
-    assert!(
-        d.clear_completed(Some(String::new())).is_err(),
-        "an empty day does not mean everything"
-    );
-    assert_eq!(
-        d.clear_completed(Some("2026-08-01".into())).unwrap(),
-        0,
-        "the day itself is kept"
-    );
-    assert_eq!(d.clear_completed(Some("2026-09-05".into())).unwrap(), 2);
-    assert_eq!(view(&d, Scope::Completed), ["свежая", "сентябрьская"]);
-    assert!(d.task(old.id).is_err(), "cleared for good, not moved to the trash");
-    assert!(
-        view(
-            &d,
-            Scope::Search {
-                text: "её часть".into()
-            }
-        )
-        .is_empty(),
-        "subtasks go with their task"
-    );
-    assert!(
-        d.task(rep.id.clone()).unwrap().done.is_none(),
-        "the repeating task itself stays"
-    );
-    assert_eq!(view(&d, Scope::Trash), ["в корзине"]);
-
-    assert_eq!(d.clear_completed(None).unwrap(), 2);
-    assert!(view(&d, Scope::Completed).is_empty());
-    assert_eq!(view(&d, Scope::Inbox), ["зарядка", "в работе"]);
-    assert!(
-        d.task(part.id).unwrap().done.is_some(),
-        "a completed subtask of an open task stays"
-    );
-    assert_eq!(view(&d, Scope::Trash), ["в корзине"]);
-    d.restore_task(binned.id).unwrap();
-    assert_eq!(view(&d, Scope::Completed), ["в корзине"], "the trash was not cleared");
-}
-
-#[test]
-fn r46_completed_lists_the_whole_log() {
-    let d = device();
-    let t = add(&d, "зарядка");
-    d.set_due(t.id.clone(), Some("2026-10-05".into())).unwrap();
-    let mut daily = weekly();
-    daily.freq = Freq::Daily;
-    d.set_repeat(t.id.clone(), Some(daily)).unwrap();
-    for _ in 0..501 {
-        d.complete_task(t.id.clone()).unwrap();
-    }
-    assert_eq!(d.tasks(Scope::Completed).unwrap().len(), 501);
-}
-
-#[test]
-fn r10_a_subtask_has_a_title_only() {
-    let d = device();
-    let top = add(&d, "а");
-    let other = add(&d, "в");
-    let sub = add_sub(&d, &top, "б");
-
-    // No field but the title.
-    assert!(d.set_due(sub.id.clone(), Some("2026-10-09".into())).is_err());
-    assert!(d.set_start(sub.id.clone(), Some("2026-10-09".into())).is_err());
-    assert!(d.set_notes(sub.id.clone(), "заметка".into()).is_err());
-    assert!(d.set_priority(sub.id.clone(), Priority::High).is_err());
-    assert!(d.set_remind(sub.id.clone(), Some("2026-10-09T09:00".into())).is_err());
-    assert!(d.set_repeat(sub.id.clone(), Some(weekly())).is_err());
-    assert!(d.add_tag(sub.id.clone(), "дом".into()).is_err());
-    let file = d.dir().join("файл.txt");
-    std::fs::write(&file, b"1").unwrap();
-    assert!(d
-        .add_attachment(sub.id.clone(), file.to_string_lossy().into_owned(), None)
-        .is_err());
-    let with_due = NewTask {
-        title: "г".into(),
-        parent_id: Some(top.id.clone()),
-        due: Some("2026-10-09".into()),
-        ..NewTask::default()
-    };
-    assert!(d.create_task(with_due).is_err());
-    // The line typed under a task is the title as it stands: nothing is picked out of it.
-    let typed = d
-        .quick_add_under("молоко завтра !! #дом".into(), top.id.clone(), false, None)
-        .unwrap();
-    assert_eq!(typed.title, "молоко завтра !! #дом");
-    assert_eq!((typed.due, typed.priority, typed.tags.len()), (None, Priority::None, 0));
-
-    // No subtasks of its own, and it stays with its task.
-    assert!(d.quick_add_under("глубже".into(), sub.id.clone(), false, None).is_err());
-    assert!(d.move_task(sub.id.clone(), None, None, None).is_err());
-    assert!(d.move_task(sub.id.clone(), None, Some(other.id.clone()), None).is_err());
-    assert!(d.move_to_list(sub.id.clone(), INBOX_ID.into()).is_err());
-    // A task does not become a subtask.
-    assert!(d.move_task(other.id.clone(), None, Some(top.id.clone()), None).is_err());
-    assert!(d.move_task(other.id.clone(), None, Some(sub.id.clone()), None).is_err());
-
-    // What a line can do: be renamed, reordered, closed and deleted.
-    d.set_title(sub.id.clone(), "б2".into()).unwrap();
-    assert_eq!(
-        titles(&d.subtasks(top.id.clone()).unwrap()),
-        ["б2", "молоко завтра !! #дом"]
-    );
-    d.move_task(sub.id.clone(), None, Some(top.id.clone()), Some(typed.id.clone()))
-        .unwrap();
-    assert_eq!(
-        titles(&d.subtasks(top.id.clone()).unwrap()),
-        ["молоко завтра !! #дом", "б2"]
-    );
-    d.wont_do_task(typed.id).unwrap();
-    d.complete_task(sub.id.clone()).unwrap();
-    assert_eq!(d.task(top.id.clone()).unwrap().subtasks_done, 1);
-    d.delete_task(sub.id).unwrap();
-    assert_eq!(d.subtasks(top.id.clone()).unwrap().len(), 1);
-
-    assert_eq!(view(&d, Scope::Inbox), ["а", "в"], "only top-level tasks in a list");
-}
-
-#[test]
-fn r10_the_tasks_of_a_project_are_full_tasks() {
-    let d = device();
-    let project = add(&d, "п");
-    d.set_project(project.id.clone(), true).unwrap();
-    let task = d
-        .quick_add_under("т завтра !!".into(), project.id.clone(), false, None)
-        .unwrap();
-    assert_eq!((task.title.as_str(), task.due.as_deref()), ("т", Some("2026-10-06")));
-    d.set_notes(task.id.clone(), "заметка".into()).unwrap();
-    d.add_tag(task.id.clone(), "дом".into()).unwrap();
-    assert_eq!(view(&d, Scope::Upcoming), ["т"]);
-
-    // A task of a project has subtasks, and those have a title only.
-    let sub = add_sub(&d, &task, "у");
-    assert!(d.set_due(sub.id.clone(), Some("2026-10-09".into())).is_err());
-    assert!(d.quick_add_under("глубже".into(), sub.id, false, None).is_err());
-
-    // A task goes into a project and out of it with its fields.
-    let loose = add(&d, "в");
-    d.set_due(loose.id.clone(), Some("2026-10-07".into())).unwrap();
-    d.move_task(loose.id.clone(), None, Some(project.id.clone()), None)
-        .unwrap();
-    assert_eq!(d.task(loose.id.clone()).unwrap().due.as_deref(), Some("2026-10-07"));
-    d.move_to_list(task.id.clone(), INBOX_ID.into()).unwrap();
-    let out = d.task(task.id).unwrap();
-    assert_eq!(
-        (out.parent_id, out.due.as_deref(), out.notes.as_str()),
-        (None, Some("2026-10-06"), "заметка")
-    );
-
-    // R32: a project with tasks is not turned back; an empty one is.
-    assert!(d.set_project(project.id.clone(), false).is_err());
-    let empty = add(&d, "пусто");
-    d.set_project(empty.id.clone(), true).unwrap();
-    d.set_project(empty.id, false).unwrap();
-
-    // A project does not go into another project, nor does a task with subtasks: their tasks and
-    // lines would be a level too deep.
-    let second = add(&d, "второй");
-    d.set_project(second.id.clone(), true).unwrap();
-    assert!(d
-        .move_task(project.id.clone(), None, Some(second.id.clone()), None)
-        .is_err());
-    let holder = add(&d, "с подзадачей");
-    add_sub(&d, &holder, "строка");
-    assert!(d.move_task(holder.id, None, Some(second.id), None).is_err());
-    assert_eq!(d.task(loose.id).unwrap().due.as_deref(), Some("2026-10-07"));
-}
-
-#[test]
-fn r32_tasks_closed_as_wont_do_or_in_the_trash_are_tasks_of_the_project() {
-    let d = device();
-    let project = add(&d, "п");
-    d.set_project(project.id.clone(), true).unwrap();
-    let wont = d
-        .quick_add_under("не буду завтра".into(), project.id.clone(), false, None)
-        .unwrap();
-    let trashed = d
-        .quick_add_under("в корзине завтра".into(), project.id.clone(), false, None)
-        .unwrap();
-    d.wont_do_task(wont.id.clone()).unwrap();
-    d.delete_task(trashed.id.clone()).unwrap();
-    assert_eq!(
-        d.task(project.id.clone()).unwrap().subtasks_total,
-        0,
-        "neither is counted"
-    );
-
-    assert!(d.set_project(project.id, false).is_err());
-    d.restore_task(trashed.id.clone()).unwrap();
-    for id in [wont.id, trashed.id] {
-        assert_eq!(d.task(id).unwrap().due.as_deref(), Some("2026-10-06"));
-    }
-}
-
-#[test]
-fn r126_a_project_is_completed_whatever_the_state_of_its_tasks() {
-    let d = device();
-    let project = add(&d, "п");
-    d.set_project(project.id.clone(), true).unwrap();
-    let open = add_sub(&d, &project, "открыта");
-    let weekly_task = add_sub(&d, &project, "каждую неделю");
-    d.set_due(weekly_task.id.clone(), Some("2026-10-05".into())).unwrap();
-    d.set_repeat(weekly_task.id.clone(), Some(weekly())).unwrap();
-    assert_eq!(titles(&d.projects().unwrap()), ["п"]);
-
-    d.complete_task(project.id.clone()).unwrap();
-    assert!(d.projects().unwrap().is_empty(), "it leaves the sidebar (R32)");
-    assert!(d.task(open.id.clone()).unwrap().done.is_some());
-    let repeating = d.task(weekly_task.id.clone()).unwrap();
-    assert!(repeating.done.is_some(), "closed for good, not moved on");
-    assert_eq!(repeating.due.as_deref(), Some("2026-10-05"));
-
-    d.set_now_for_tests("2026-10-05T10:00:06");
-    d.undo_close_task(project.id.clone()).unwrap();
-    assert_eq!(titles(&d.projects().unwrap()), ["п"]);
-    for id in [open.id, weekly_task.id] {
-        assert!(d.task(id).unwrap().done.is_none());
-    }
-}
-
-#[test]
-fn r127_a_project_is_created_with_a_title_and_no_defaults_of_its_list() {
-    let d = device();
-    let work = d.create_list("Работа".into()).unwrap();
-    d.set_list_defaults(work.id.clone(), Priority::High, true).unwrap();
-
-    let project = d.create_project("  Отпуск ".into(), Some(work.id.clone())).unwrap();
-    assert!(project.is_project);
-    assert_eq!(project.title, "Отпуск");
-    assert_eq!(project.list_id, work.id);
-    assert_eq!(project.due, None, "a due date would become that of every task (R125)");
-    assert_eq!(project.start, None);
-    assert_eq!(project.priority, Priority::None);
-    assert_eq!(titles(&d.projects().unwrap()), ["Отпуск"]);
-    assert!(
-        view(&d, Scope::List { id: work.id }).is_empty(),
-        "not a row of its list (R120)"
-    );
-
-    assert!(d.create_project("  ".into(), None).is_err());
-    assert_eq!(d.projects().unwrap().len(), 1);
-}
-
-#[test]
-fn r127_a_project_without_a_list_goes_to_the_default_one() {
-    let d = device();
-    let home = d.create_list("Дом".into()).unwrap();
-    d.set_new_task_list(home.id.clone()).unwrap();
-    let project = d.create_project("Ремонт".into(), None).unwrap();
-    assert_eq!(project.list_id, home.id);
-}
-
-#[test]
-fn r10_the_copy_of_a_project_keeps_the_fields_of_its_tasks() {
-    let d = device();
-    let project = add(&d, "п");
-    d.set_project(project.id.clone(), true).unwrap();
-    let task = d
-        .quick_add_under("т завтра".into(), project.id.clone(), false, None)
-        .unwrap();
-    add_sub(&d, &task, "строка");
-
-    let copy = d.duplicate_task(project.id).unwrap();
-    assert!(copy.is_project);
-    let tasks = d.subtasks(copy.id).unwrap();
-    assert_eq!(titles(&tasks), ["т"]);
-    assert_eq!(tasks[0].due.as_deref(), Some("2026-10-06"));
-    assert_eq!(titles(&d.subtasks(tasks[0].id.clone()).unwrap()), ["строка"]);
-}
-
-#[test]
-fn r112_data_from_before_the_rule_is_brought_to_it() {
-    let d = device();
-    let top = add(&d, "а");
-    let sub = add_sub(&d, &top, "б");
-    let last = add_sub(&d, &top, "я");
-    let deep = add(&d, "в");
-    let deeper = add(&d, "г");
-    let project = add(&d, "п");
-    d.set_project(project.id.clone(), true).unwrap();
-    let dated = add_sub(&d, &project, "т");
-    d.set_due(dated.id.clone(), Some("2026-10-05".into())).unwrap();
-    d.add_tag(dated.id.clone(), "дом".into()).unwrap();
-
-    let tag = "tag:дом";
+    let old = add(&d, "давно");
+    let recent = add(&d, "недавно");
+    let borderline = add(&d, "почти");
+    let live = add(&d, "в работе");
+    let planted = |ago_days: u64| json!(now_ms() - ago_days * DAY_MS);
     let d = plant(
         d,
         &[
-            ("task", &sub.id, "due", json!("2026-10-05")),
-            ("task", &sub.id, "start", json!("2026-10-04")),
-            ("task", &sub.id, "notes", json!("заметка")),
-            ("task", &sub.id, "priority", json!(3)),
-            ("task", &sub.id, "remind", json!("2026-10-05T12:00")),
-            ("task", &sub.id, "repeat", serde_json::to_value(weekly()).unwrap()),
-            ("task", &sub.id, tag, json!(true)),
-            ("attachment", "file-1", "task", json!(sub.id)),
-            ("attachment", "file-1", "name", json!("файл.txt")),
-            // A chain three deep: а → б → в → г.
-            ("task", &deep.id, "parent", json!(sub.id)),
-            ("task", &deeper.id, "parent", json!(deep.id)),
+            ("note", &old.id, "deleted", planted(31)),
+            ("note", &recent.id, "deleted", planted(1)),
+            (
+                "note",
+                &borderline.id,
+                "deleted",
+                json!(now_ms() - 30 * DAY_MS + 60_000),
+            ),
         ],
     );
-
-    assert_eq!(titles(&d.subtasks(top.id.clone()).unwrap()), ["б", "в", "г", "я"]);
-    let _ = last;
-    let got = d.task(sub.id.clone()).unwrap();
-    assert_eq!(
-        (
-            got.due,
-            got.start,
-            got.notes.as_str(),
-            got.priority,
-            got.remind,
-            got.repeat
-        ),
-        (None, None, "", Priority::None, None, None)
+    assert_eq!(d.settings().unwrap().trash_days, 30, "the default");
+    assert!(d.get_note(old.id.clone()).is_err(), "31 days: gone");
+    assert!(d.get_note(recent.id.clone()).unwrap().deleted, "a day: still there");
+    assert!(
+        d.get_note(borderline.id).unwrap().deleted,
+        "a minute short of 30 days: still there"
     );
-    assert!(got.tags.is_empty());
-    assert!(d.attachments(sub.id).unwrap().is_empty());
-    assert_eq!(d.task(deeper.id).unwrap().parent_id, Some(top.id));
-    // R12: a subtask does not stand on its own; the task of a project does, as before.
-    assert_eq!(view(&d, Scope::Today), ["т"]);
-    assert_eq!(view(&d, Scope::Tag { name: "дом".into() }), ["т"]);
-    assert_eq!(view(&d, Scope::Inbox), ["а"], "the project is in the sidebar (R120)");
-    assert!(d
-        .planned_notifications(notify_all())
-        .unwrap()
-        .iter()
-        .all(|n| n.title != "б"));
+    assert!(!d.get_note(live.id.clone()).unwrap().deleted);
+
+    // The setting is the one that counts, from 1 to 3650.
+    let d = plant(
+        d,
+        &[
+            ("settings", "app", "trash_days", json!(3)),
+            ("note", &recent.id, "deleted", planted(4)),
+            ("note", &live.id, "deleted", planted(2)),
+        ],
+    );
+    assert!(d.get_note(recent.id).is_err(), "4 days with a limit of 3");
+    assert!(d.get_note(live.id).unwrap().deleted, "2 days with a limit of 3");
 }
 
 #[test]
-fn r113_the_subtasks_of_a_new_task_are_added_in_the_order_they_were_typed() {
+fn s7_the_content_of_a_purged_note_is_no_longer_needed_on_the_device() {
     let d = device();
-    let trip = add(&d, "поездка");
-    let typed = vec!["билеты завтра !!".to_string(), "  ".to_string(), " отель ".to_string()];
-    let added = d.add_subtasks(trip.id.clone(), typed).unwrap();
-    assert_eq!(titles(&added), ["билеты завтра !!", "отель"]);
-    let lines = d.subtasks(trip.id.clone()).unwrap();
-    assert_eq!(titles(&lines), ["билеты завтра !!", "отель"]);
-    assert!(lines.iter().all(|l| l.due.is_none() && l.priority == Priority::None));
-
-    // All or nothing: a line cannot have lines of its own, and nothing of the call stays.
-    let refused = d.add_subtasks(lines[0].id.clone(), vec!["а".into(), "б".into()]);
-    assert!(refused.is_err());
-    assert!(d.subtasks(lines[0].id.clone()).unwrap().is_empty());
-    // A task of a project takes them as well; under a project itself they are tasks of the project.
-    let project = add(&d, "п");
-    d.set_project(project.id.clone(), true).unwrap();
-    let task = add_sub(&d, &project, "т");
-    assert_eq!(d.add_subtasks(task.id, vec!["у".into()]).unwrap().len(), 1);
-    assert!(d.add_subtasks("нет такой".into(), vec!["а".into()]).is_err());
-}
-
-#[test]
-fn r22_a_subtask_is_found_inside_its_task() {
-    let d = device();
-    let shop = add(&d, "купить");
-    add_sub(&d, &shop, "Молоко");
-    add_sub(&d, &shop, "хлеб");
-    add(&d, "молоко отдельно");
-
-    let found = d
-        .tasks(Scope::Search {
-            text: "молоко".into()
-        })
+    let note = add(&d, "с файлом");
+    let src = tempfile::tempdir().unwrap();
+    let file = src.path().join("a.txt");
+    std::fs::write(&file, b"content of the only note").unwrap();
+    let a = d
+        .add_attachment(note.id.clone(), file.to_string_lossy().into_owned(), None)
         .unwrap();
-    assert_eq!(sorted_titles(&found), ["купить", "молоко отдельно"]);
-    assert_eq!(
-        titles(&d.found_subtasks(shop.id.clone(), "молоко".into()).unwrap()),
-        ["Молоко"]
+    let blob = std::path::PathBuf::from(a.local_path.unwrap());
+    d.delete_note(note.id.clone()).unwrap();
+    let d = reopen(d);
+    assert!(blob.exists(), "S26: a note in the Trash keeps its content");
+    d.purge_note(note.id).unwrap();
+    let d = reopen(d);
+    assert!(
+        !blob.exists(),
+        "S26: the content goes with the note, on start without sync"
     );
-    assert!(d.found_subtasks(shop.id, " ".into()).unwrap().is_empty());
+    drop(d);
 }
 
-fn sorted_titles(tasks: &[TaskItem]) -> Vec<&str> {
-    let mut all = titles(tasks);
-    all.sort_unstable();
-    all
-}
-
-fn notify_all() -> NotifySettings {
-    NotifySettings {
-        enabled: true,
-        lead_minutes: vec![0],
-        all_day_at: Some("09:00".into()),
-        summary_at: None,
-    }
-}
+// ---- tags ----
 
 #[test]
-fn r11_completing_a_task_completes_its_open_subtasks() {
+fn r20_r21_a_tag_is_words_without_comma_and_hash_and_is_one_tag_whatever_the_case() {
     let d = device();
-    let top = add(&d, "родитель");
-    // Two levels below: the tasks of a project and a subtask of one of them (R10).
-    d.set_project(top.id.clone(), true).unwrap();
-    let a = add_sub(&d, &top, "a");
-    let b = add_sub(&d, &top, "b");
-    let deep = add_sub(&d, &b, "deep");
+    let a = add(&d, "a");
+    let b = add(&d, "b");
+    d.add_tag(a.id.clone(), "  Work  plans ".into()).unwrap();
+    assert_eq!(
+        d.get_note(a.id.clone()).unwrap().tags,
+        ["Work plans"],
+        "spaces inside are kept as one"
+    );
+    d.add_tag(b.id.clone(), "work PLANS".into()).unwrap();
+    assert_eq!(
+        d.get_note(b.id.clone()).unwrap().tags,
+        ["Work plans"],
+        "the spelling first written is kept"
+    );
+    assert_eq!(tag_names(&d), [("Work plans".to_string(), 2)], "one tag with two notes");
+    assert_eq!(
+        view(
+            &d,
+            Scope::Tag {
+                name: "WORK plans".into()
+            }
+        )
+        .len(),
+        2
+    );
 
-    d.complete_task(top.id.clone()).unwrap();
-    for id in [&a.id, &b.id, &deep.id] {
-        assert!(d.task(id.clone()).unwrap().done.is_some());
+    // The same tag again, in any case, changes nothing.
+    d.add_tag(a.id.clone(), "WORK PLANS".into()).unwrap();
+    assert_eq!(d.get_note(a.id.clone()).unwrap().tags, ["Work plans"]);
+
+    for bad in ["", "   ", "a,b", "#work", "two #words"] {
+        let error = d.add_tag(a.id.clone(), bad.into()).unwrap_err();
+        assert!(matches!(error, AppError::Invalid { .. }), "{bad:?}: {error}");
     }
-    assert_eq!(d.task(top.id.clone()).unwrap().subtasks_done, 2);
-    assert_eq!(view(&d, Scope::Completed), ["родитель"]);
 
-    // Reopening the parent leaves the subtasks alone.
-    d.reopen_task(top.id.clone()).unwrap();
-    assert!(d.task(top.id).unwrap().done.is_none());
-    assert!(d.task(a.id).unwrap().done.is_some());
+    // Taking it off, in any case.
+    d.remove_tag(b.id.clone(), "WORK plans".into()).unwrap();
+    assert!(d.get_note(b.id).unwrap().tags.is_empty());
+    assert_eq!(tag_names(&d), [("Work plans".to_string(), 1)]);
+    assert_eq!(view(&d, Scope::Untagged), ["b"]);
 }
 
 #[test]
-fn manual_order_within_a_list() {
+fn r22_a_tag_is_renamed_merged_and_deleted_for_all_notes() {
     let d = device();
     let a = add(&d, "a");
     let b = add(&d, "b");
     let c = add(&d, "c");
-    assert_eq!(view(&d, Scope::Inbox), ["a", "b", "c"]);
-    d.move_task(c.id.clone(), None, None, None).unwrap();
-    assert_eq!(view(&d, Scope::Inbox), ["c", "a", "b"]);
-    d.move_task(c.id.clone(), None, None, Some(a.id.clone())).unwrap();
-    assert_eq!(view(&d, Scope::Inbox), ["a", "c", "b"]);
-    d.move_task(a.id, None, None, Some(b.id)).unwrap();
-    assert_eq!(view(&d, Scope::Inbox), ["c", "b", "a"]);
+    d.add_tag(a.id.clone(), "дом".into()).unwrap();
+    d.add_tag(b.id.clone(), "дом".into()).unwrap();
+    d.add_tag(b.id.clone(), "работа".into()).unwrap();
+    d.add_tag(c.id.clone(), "Работа".into()).unwrap();
+    assert_eq!(
+        tag_names(&d),
+        [("дом".to_string(), 2), ("работа".to_string(), 2)],
+        "first spelling"
+    );
+
+    // A change of case alone is the new spelling.
+    assert_eq!(d.rename_tag("дом".into(), "Дом".into()).unwrap(), 2);
+    assert_eq!(tag_names(&d)[0], ("Дом".to_string(), 2));
+
+    // Into a tag that exists: the two are one, spelled as the one that was there.
+    assert_eq!(d.rename_tag("дом".into(), "работа".into()).unwrap(), 2);
+    assert_eq!(tag_names(&d), [("работа".to_string(), 3)]);
+    assert_eq!(
+        d.get_note(b.id.clone()).unwrap().tags,
+        ["работа"],
+        "b had both: one is left"
+    );
+
+    assert_eq!(d.delete_tag("РАБОТА".into()).unwrap(), 3);
+    assert!(d.tags().unwrap().is_empty());
+    assert_eq!(view(&d, Scope::Untagged).len(), 3);
+    assert_eq!(d.rename_tag("нет".into(), "есть".into()).unwrap(), 0);
 }
 
 #[test]
-fn r17_completing_a_repeating_task_moves_it_forward() {
+fn s5_a_tag_at_the_limit_of_a_field_is_taken_and_a_longer_one_is_refused() {
     let d = device();
-    let t = add(&d, "полить цветы");
-    d.set_start(t.id.clone(), Some("2026-10-03".into())).unwrap();
-    d.set_due(t.id.clone(), Some("2026-10-05T19:00".into())).unwrap();
-    d.set_remind(t.id.clone(), Some("2026-10-05T18:45".into())).unwrap();
-    d.set_repeat(t.id.clone(), Some(weekly())).unwrap();
-    let sub = add_sub(&d, &t, "набрать воды");
-    d.complete_task(sub.id.clone()).unwrap();
-
-    let after = d.complete_task(t.id.clone()).unwrap();
-    assert!(after.done.is_none(), "the task stays open");
-    assert_eq!(after.due.as_deref(), Some("2026-10-12T19:00"));
-    assert_eq!(after.start.as_deref(), Some("2026-10-10"));
-    assert_eq!(after.remind.as_deref(), Some("2026-10-12T18:45"));
-    assert!(
-        d.task(sub.id).unwrap().done.is_none(),
-        "subtasks are reopened for the next round"
-    );
-
-    let log = d.tasks(Scope::Completed).unwrap();
-    assert_eq!(titles(&log), ["полить цветы"]);
-    assert!(log[0].is_log);
-    assert_eq!(log[0].due.as_deref(), Some("2026-10-05T19:00"));
-    assert_eq!(
-        log[0].start.as_deref(),
-        Some("2026-10-03"),
-        "the record keeps the start too"
-    );
-    d.set_now_for_tests("2026-10-05T10:01");
-    assert_eq!(
-        view(&d, Scope::Inbox),
-        ["полить цветы"],
-        "the record is not a task of the list"
-    );
-}
-
-#[test]
-fn r17_last_occurrence_completes_the_task() {
-    let d = device();
-    let t = add(&d, "курс");
-    d.set_due(t.id.clone(), Some("2026-10-05".into())).unwrap();
-    d.set_repeat(
-        t.id.clone(),
-        Some(Repeat {
-            freq: Freq::Daily,
-            count: Some(2),
-            ..weekly()
+    let note = add(&d, "н");
+    // `tag:` takes four of the 200 bytes of a key, so a name has 196.
+    let latin = "a".repeat(196);
+    let cyrillic = "я".repeat(98);
+    d.add_tag(note.id.clone(), latin.clone()).unwrap();
+    d.add_tag(note.id.clone(), cyrillic.clone()).unwrap();
+    for too_long in ["a".repeat(197), "я".repeat(99)] {
+        let error = d.add_tag(note.id.clone(), too_long).unwrap_err();
+        assert!(matches!(error, AppError::Invalid { .. }), "{error}");
+    }
+    assert_eq!(d.get_note(note.id.clone()).unwrap().tags, [latin, cyrillic]);
+    assert!(matches!(
+        d.create_note(NewNote {
+            title: "x".into(),
+            tags: vec!["я".repeat(99)],
+            ..NewNote::default()
         }),
-    )
-    .unwrap();
-
-    let first = d.complete_task(t.id.clone()).unwrap();
-    assert!(first.done.is_none());
-    assert_eq!(first.due.as_deref(), Some("2026-10-06"));
-    assert_eq!(first.repeat.unwrap().count, Some(1));
-
-    d.set_now_for_tests("2026-10-06T10:00");
-    let second = d.complete_task(t.id).unwrap();
-    assert!(second.done.is_some());
-    assert_eq!(d.tasks(Scope::Completed).unwrap().len(), 2);
-}
-
-/// The repeating task of the R128 scenario, with subtask "а" completed at 9:00 and "б" open.
-fn weekly_with_subtasks(d: &Device) -> (TaskItem, TaskItem, TaskItem) {
-    let t = add(d, "каждую неделю");
-    d.set_start(t.id.clone(), Some("2026-10-03".into())).unwrap();
-    d.set_due(t.id.clone(), Some("2026-10-05T19:00".into())).unwrap();
-    d.set_remind(t.id.clone(), Some("2026-10-05T18:45".into())).unwrap();
-    d.set_repeat(
-        t.id.clone(),
-        Some(Repeat {
-            count: Some(3),
-            ..weekly()
-        }),
-    )
-    .unwrap();
-    let a = add_sub(d, &t, "а");
-    let b = add_sub(d, &t, "б");
-    d.set_now_for_tests("2026-10-05T09:00");
-    d.complete_task(a.id.clone()).unwrap();
-    d.set_now_for_tests(NOW);
-    (t, a, b)
+        Err(AppError::Invalid { .. })
+    ));
 }
 
 #[test]
-fn r128_undo_gives_back_what_the_completion_of_a_repeat_changed() {
+fn s5_a_tag_from_before_the_limit_leaves_the_view() {
     let d = device();
-    let (t, a, b) = weekly_with_subtasks(&d);
-    d.complete_task(t.id.clone()).unwrap();
-    d.undo_close_task(t.id.clone()).unwrap();
-
-    let back = d.task(t.id.clone()).unwrap();
-    assert!(back.done.is_none());
-    assert_eq!(back.due.as_deref(), Some("2026-10-05T19:00"));
-    assert_eq!(back.start.as_deref(), Some("2026-10-03"));
-    assert_eq!(back.remind.as_deref(), Some("2026-10-05T18:45"));
-    assert_eq!(
-        back.repeat.unwrap().count,
-        Some(3),
-        "the repeat that was used is given back"
-    );
-    assert_eq!(
-        d.task(a.id).unwrap().done.as_deref(),
-        Some("2026-10-05T09:00"),
-        "completed before, with its moment"
-    );
-    assert!(d.task(b.id).unwrap().done.is_none());
-    assert!(view(&d, Scope::Completed).is_empty(), "the record has gone");
-    assert_eq!(view(&d, Scope::Inbox), ["каждую неделю"]);
-
-    // The same occurrence completed again comes back as the same record (S7).
-    d.complete_task(t.id.clone()).unwrap();
-    assert_eq!(view(&d, Scope::Completed), ["каждую неделю"]);
-    assert_eq!(d.task(t.id).unwrap().due.as_deref(), Some("2026-10-12T19:00"));
+    let note = add(&d, "н");
+    let long = format!("tag:{}", "a".repeat(197));
+    // A key of 201 bytes cannot be a register of any device; one that was stored all the same is not shown.
+    d.set_note_field_for_tests(&note.id, &long, json!(true));
+    let d = plant(d, &[("note", &note.id, "tag:ok", json!(true))]);
+    assert_eq!(d.get_note(note.id).unwrap().tags, ["ok"]);
 }
 
-#[test]
-fn r128_the_mark_of_the_record_is_undo() {
-    let d = device();
-    let (t, a, _) = weekly_with_subtasks(&d);
-    d.wont_do_task(t.id.clone()).unwrap();
-    d.set_now_for_tests("2026-10-05T10:00:03");
-    let record = d.tasks(Scope::Inbox).unwrap().into_iter().find(|r| r.is_log).unwrap();
-    assert!(record.wont, "closed as won't do");
-    d.reopen_task(record.id).unwrap();
-    assert_eq!(d.task(t.id).unwrap().due.as_deref(), Some("2026-10-05T19:00"));
-    assert_eq!(d.task(a.id).unwrap().done.as_deref(), Some("2026-10-05T09:00"));
-    assert!(view(&d, Scope::WontDo).is_empty());
-    assert_eq!(view(&d, Scope::Inbox), ["каждую неделю"]);
-}
+// ---- attachments ----
 
 #[test]
-fn r128_undo_changes_nothing_once_the_task_has_left_that_date() {
+fn r30_r33_attachments_are_stored_by_content_and_listed_for_the_note() {
     let d = device();
-    let (t, _, _) = weekly_with_subtasks(&d);
-    d.complete_task(t.id.clone()).unwrap();
-    d.set_due(t.id.clone(), Some("2026-10-20".into())).unwrap();
-    d.undo_close_task(t.id.clone()).unwrap();
-    assert_eq!(d.task(t.id.clone()).unwrap().due.as_deref(), Some("2026-10-20"));
-    assert_eq!(view(&d, Scope::Completed), ["каждую неделю"]);
-
-    // Completed once more: the first completion can no longer be taken back, the second can.
-    let first = d.tasks(Scope::Completed).unwrap().remove(0);
-    d.set_now_for_tests("2026-10-05T10:01");
-    d.complete_task(t.id.clone()).unwrap();
-    d.reopen_task(first.id).unwrap();
-    assert_eq!(d.tasks(Scope::Completed).unwrap().len(), 2, "the first record stays");
-    d.undo_close_task(t.id.clone()).unwrap();
-    assert_eq!(d.task(t.id).unwrap().due.as_deref(), Some("2026-10-20"));
-    assert_eq!(view(&d, Scope::Completed), ["каждую неделю"]);
-}
-
-#[test]
-fn r128_a_record_written_before_undo_existed_cannot_be_reopened() {
-    let d = device();
-    let t = due_today(&d, "старый повтор");
-    d.set_repeat(t.id.clone(), Some(weekly())).unwrap();
-    d.complete_task(t.id.clone()).unwrap();
-    let record = d.tasks(Scope::Completed).unwrap().remove(0);
-    let d = plant(d, &[("task", record.id.as_str(), "undo", serde_json::Value::Null)]);
-    assert!(d.reopen_task(record.id).is_err());
-    d.undo_close_task(t.id.clone()).unwrap();
-    assert_eq!(
-        d.task(t.id).unwrap().due.as_deref(),
-        Some("2026-10-12"),
-        "nothing to give back"
-    );
-}
-
-#[test]
-fn r133_the_mark_of_a_record_in_completed_reopens_while_the_completion_can_be_undone() {
-    let d = device();
-    let (t, a, _) = weekly_with_subtasks(&d);
-    d.complete_task(t.id.clone()).unwrap();
-    d.set_now_for_tests("2026-10-06T10:00");
-    let record = d.tasks(Scope::Completed).unwrap().remove(0);
-    assert!(
-        record.undoable,
-        "the task stands on the date the completion moved it to"
-    );
-    assert!(!d.task(t.id.clone()).unwrap().undoable, "only a record");
-    d.reopen_task(record.id).unwrap();
-    assert_eq!(d.task(t.id.clone()).unwrap().due.as_deref(), Some("2026-10-05T19:00"));
-    assert_eq!(d.task(a.id).unwrap().done.as_deref(), Some("2026-10-05T09:00"));
-    assert!(view(&d, Scope::Completed).is_empty(), "the record has left Completed");
-
-    // Completed twice: the first completion can no longer be taken back, the last one can.
-    d.complete_task(t.id.clone()).unwrap();
-    d.wont_do_task(t.id.clone()).unwrap();
-    let records = d.tasks(Scope::Completed).unwrap();
-    let wont = records.iter().find(|r| r.wont).unwrap();
-    assert!(wont.undoable);
-    assert!(!records.iter().find(|r| !r.wont).unwrap().undoable);
-    assert!(d.tasks(Scope::WontDo).unwrap()[0].undoable, "in Won't do as well");
-
-    // A changed date, and the task completed for good, leave nothing to take back.
-    d.set_due(t.id.clone(), Some("2026-10-30".into())).unwrap();
-    assert!(d.tasks(Scope::Completed).unwrap().iter().all(|r| !r.undoable));
-    d.set_due(t.id.clone(), Some("2026-10-19T19:00".into())).unwrap();
-    assert!(d.task(wont.id.clone()).unwrap().undoable, "back on that date");
-    d.set_repeat(t.id.clone(), None).unwrap();
-    d.complete_task(t.id.clone()).unwrap();
-    assert!(d.tasks(Scope::Completed).unwrap().iter().all(|r| !r.undoable));
-}
-
-#[test]
-fn r133_a_record_written_before_undo_existed_has_no_mark() {
-    let d = device();
-    let t = due_today(&d, "старый повтор");
-    d.set_repeat(t.id.clone(), Some(weekly())).unwrap();
-    d.complete_task(t.id.clone()).unwrap();
-    let record = d.tasks(Scope::Completed).unwrap().remove(0);
-    let d = plant(d, &[("task", record.id.as_str(), "undo", serde_json::Value::Null)]);
-    assert!(!d.task(record.id.clone()).unwrap().undoable);
-    let d = plant(d, &[("task", record.id.as_str(), "undo", serde_json::json!("{broken"))]);
-    assert!(
-        !d.task(record.id).unwrap().undoable,
-        "a value that is not an object reads as none"
-    );
-}
-
-#[test]
-fn r18_monthly_on_the_31st() {
-    let d = device();
-    d.set_now_for_tests("2026-01-31T10:00");
-    let t = add(&d, "отчёт");
-    d.set_due(t.id.clone(), Some("2026-01-31".into())).unwrap();
-    d.set_repeat(
-        t.id.clone(),
-        Some(Repeat {
-            freq: Freq::Monthly,
-            ..weekly()
-        }),
-    )
-    .unwrap();
-    assert_eq!(
-        d.complete_task(t.id.clone()).unwrap().due.as_deref(),
-        Some("2026-02-28")
-    );
-    d.set_now_for_tests("2026-02-28T10:00");
-    assert_eq!(d.complete_task(t.id).unwrap().due.as_deref(), Some("2026-03-31"));
-}
-
-#[test]
-fn repeating_task_without_dates_gets_a_due_date() {
-    let d = device();
-    let t = add(&d, "зарядка");
-    d.set_repeat(
-        t.id.clone(),
-        Some(Repeat {
-            freq: Freq::Daily,
-            ..weekly()
-        }),
-    )
-    .unwrap();
-    assert_eq!(d.complete_task(t.id).unwrap().due.as_deref(), Some("2026-10-06"));
-}
-
-#[test]
-fn r19_attachments_are_stored_by_content() {
-    let d = device();
-    let t = add(&d, "с файлом");
+    let note = add(&d, "с файлом");
     let src = tempfile::tempdir().unwrap();
     let file = src.path().join("Счёт.pdf");
     std::fs::write(&file, b"%PDF-1.7 demo").unwrap();
 
     let a = d
-        .add_attachment(t.id.clone(), file.to_string_lossy().into_owned(), None)
+        .add_attachment(note.id.clone(), file.to_string_lossy().into_owned(), None)
         .unwrap();
     assert_eq!(
-        (a.name.as_str(), a.mime.as_str(), a.size),
-        ("Счёт.pdf", "application/pdf", 13)
+        (a.name.as_str(), a.mime.as_str(), a.size, a.note_id.as_str()),
+        ("Счёт.pdf", "application/pdf", 13, note.id.as_str())
     );
     std::fs::remove_file(&file).unwrap();
-    let stored = a.local_path.expect("content is kept by the store");
+    let stored = a.local_path.clone().expect("content is kept by the store");
     assert_eq!(std::fs::read(stored).unwrap(), b"%PDF-1.7 demo");
-    assert_eq!(d.task(t.id.clone()).unwrap().attachments, 1);
-
-    let copy = d.duplicate_task(t.id.clone()).unwrap();
-    assert_eq!(d.attachments(copy.id).unwrap().len(), 1);
+    assert_eq!(d.get_note(note.id.clone()).unwrap().attachments, 1);
 
     d.remove_attachment(a.id).unwrap();
-    assert!(d.attachments(t.id).unwrap().is_empty());
+    assert!(d.attachments(note.id.clone()).unwrap().is_empty());
+    assert_eq!(d.get_note(note.id).unwrap().attachments, 0);
 }
 
 #[test]
-fn r21_smart_views_and_counts() {
+fn r34_a_note_in_the_trash_keeps_its_attachments() {
     let d = device();
-    let overdue = add(&d, "просрочено");
-    d.set_due(overdue.id, Some("2026-10-01".into())).unwrap();
-    let today = add(&d, "сегодня");
-    d.set_due(today.id, Some("2026-10-05T23:00".into())).unwrap();
-    let later = add(&d, "потом");
-    d.set_due(later.id, Some("2026-10-20".into())).unwrap();
-    let sooner = add(&d, "скоро");
-    d.set_due(sooner.id, Some("2026-10-06".into())).unwrap();
-    add(&d, "без даты");
-
-    assert_eq!(view(&d, Scope::Today), ["просрочено", "сегодня"]);
-    assert_eq!(view(&d, Scope::Upcoming), ["скоро", "потом"]);
-    assert_eq!(view(&d, Scope::All).len(), 5);
-    let c = d.counts().unwrap();
-    assert_eq!((c.inbox, c.today, c.overdue, c.upcoming, c.trash), (5, 2, 1, 2, 0));
-}
-
-#[test]
-fn r93_counts_say_which_built_in_views_hold_something() {
-    let d = device();
-    let c = d.counts().unwrap();
-    assert_eq!((c.all, c.completed, c.wont_do, c.trash), (0, 0, 0, 0));
-
-    let parent = add(&d, "открытая");
-    add_sub(&d, &parent, "подзадача");
-    let done = add(&d, "сделанная");
-    d.complete_task(done.id).unwrap();
-    let dropped = add(&d, "не буду");
-    d.wont_do_task(dropped.id.clone()).unwrap();
-    let gone = add(&d, "удалённая");
-    d.delete_task(gone.id).unwrap();
-
-    let c = d.counts().unwrap();
-    // A subtask is not a row of All; "won't do" is a row of Completed as well.
-    assert_eq!((c.all, c.completed, c.wont_do, c.trash), (1, 2, 1, 1));
-    assert_eq!(c.completed as usize, view(&d, Scope::Completed).len());
-    assert_eq!(c.wont_do as usize, view(&d, Scope::WontDo).len());
-
-    d.reopen_task(dropped.id).unwrap();
-    let c = d.counts().unwrap();
-    assert_eq!((c.all, c.completed, c.wont_do), (2, 1, 0));
-}
-
-#[test]
-fn r121_hiding_inbox_moves_its_open_tasks_and_takes_the_default_list_along() {
-    let d = device();
-    let a = add(&d, "а");
-    add_sub(&d, &a, "а1");
-    let b = add(&d, "б");
-    d.complete_task(b.id).unwrap();
-    let p = add(&d, "п");
-    d.set_project(p.id.clone(), true).unwrap();
-    let home = d.create_list("Дом".into()).unwrap();
-    let own = add(&d, "своя");
-    d.move_to_list(own.id, home.id.clone()).unwrap();
-    let old = d.create_list("Старое".into()).unwrap();
-    d.set_list_archived(old.id.clone(), true).unwrap();
-    d.set_new_task_list(home.id.clone()).unwrap();
-
-    assert!(d.hide_inbox(old.id.clone(), true).is_err());
-    assert!(d.hide_inbox(INBOX_ID.into(), true).is_err());
-    assert!(!d.inbox_hidden().unwrap());
-
-    let hiding = d.hide_inbox(home.id.clone(), true).unwrap();
-    assert_eq!(hiding.moved.len(), 2);
-    assert_eq!(hiding.new_task_list, home.id);
-    assert!(d.inbox_hidden().unwrap());
-    assert_eq!(d.new_task_list().unwrap(), "last");
-    // The moved ones go to the end, in their order; the project is shown in the sidebar only (R120).
-    assert_eq!(view(&d, Scope::List { id: home.id.clone() }), ["своя", "а"]);
-    assert!(d
-        .projects()
-        .unwrap()
-        .iter()
-        .any(|t| t.title == "п" && t.list_id == home.id));
-    assert_eq!(
-        d.tasks(Scope::Inbox)
-            .unwrap()
-            .iter()
-            .filter(|t| t.done.is_none())
-            .count(),
-        0
-    );
-    assert_eq!(d.counts().unwrap().inbox, 0);
-    // The subtask went along with its task.
-    let moved = d
-        .tasks(Scope::List { id: home.id.clone() })
-        .unwrap()
-        .into_iter()
-        .find(|t| t.title == "а")
+    let note = add(&d, "с файлом");
+    let src = tempfile::tempdir().unwrap();
+    let file = src.path().join("a.txt");
+    std::fs::write(&file, b"a").unwrap();
+    d.add_attachment(note.id.clone(), file.to_string_lossy().into_owned(), None)
         .unwrap();
-    assert_eq!(moved.list_id, home.id);
-    assert_eq!(titles(&d.subtasks(moved.id).unwrap()), ["а1"]);
-    assert!(d.subtasks(a.id.clone()).unwrap().iter().all(|t| t.list_id == home.id));
-
-    // R40: the list used last, and while Inbox is hidden it does not count.
-    assert_eq!(d.default_list_id(None).unwrap(), home.id);
-    assert_eq!(d.default_list_id(Some(INBOX_ID.into())).unwrap(), home.id);
-    assert_eq!(d.default_list_id(Some(old.id.clone())).unwrap(), home.id);
-
-    d.undo_hide_inbox(hiding).unwrap();
-    assert!(!d.inbox_hidden().unwrap());
-    assert_eq!(d.new_task_list().unwrap(), home.id);
-    assert_eq!(view(&d, Scope::List { id: home.id.clone() }), ["своя"]);
-    assert!(view(&d, Scope::Inbox).contains(&"а".to_string()));
-    assert!(d
-        .projects()
-        .unwrap()
-        .iter()
-        .any(|t| t.title == "п" && t.list_id == INBOX_ID));
+    d.delete_note(note.id.clone()).unwrap();
+    assert_eq!(d.attachments(note.id.clone()).unwrap().len(), 1);
+    d.restore_note(note.id.clone()).unwrap();
+    assert_eq!(d.get_note(note.id).unwrap().attachments, 1);
 }
 
-#[test]
-fn r121_inbox_hidden_without_moving_keeps_its_tasks_and_is_shown_again_unchanged() {
-    let d = device();
-    add(&d, "а");
-    let home = d.create_list("Дом".into()).unwrap();
-    let hiding = d.hide_inbox(home.id.clone(), false).unwrap();
-    assert!(hiding.moved.is_empty());
-    assert!(d.inbox_hidden().unwrap());
-    // The row comes back by its counter while open tasks are there.
-    assert_eq!(d.counts().unwrap().inbox, 1);
-    let a = d.tasks(Scope::Inbox).unwrap().remove(0);
-    d.move_to_list(a.id, home.id.clone()).unwrap();
-    assert_eq!(d.counts().unwrap().inbox, 0);
-
-    d.set_new_task_list(INBOX_ID.into()).unwrap();
-    d.show_inbox().unwrap();
-    assert!(!d.inbox_hidden().unwrap());
-    assert_eq!(d.new_task_list().unwrap(), INBOX_ID);
-    assert_eq!(d.default_list_id(None).unwrap(), INBOX_ID);
-}
-
-#[test]
-fn r40_default_list_falls_back_to_inbox_or_while_it_is_hidden_to_the_first_list() {
-    let d = device();
-    assert_eq!(d.new_task_list().unwrap(), INBOX_ID);
-    assert_eq!(d.default_list_id(None).unwrap(), INBOX_ID);
-    let work = d.create_list("Работа".into()).unwrap();
-    let home = d.create_list("Дом".into()).unwrap();
-
-    d.set_new_task_list(home.id.clone()).unwrap();
-    assert_eq!(d.default_list_id(Some(work.id.clone())).unwrap(), home.id);
-    d.set_new_task_list("last".into()).unwrap();
-    assert_eq!(d.default_list_id(Some(work.id.clone())).unwrap(), work.id);
-    assert_eq!(d.default_list_id(None).unwrap(), INBOX_ID);
-    d.set_list_archived(work.id.clone(), true).unwrap();
-    assert_eq!(d.default_list_id(Some(work.id.clone())).unwrap(), INBOX_ID);
-    d.delete_list(home.id.clone()).unwrap();
-    d.set_new_task_list(home.id.clone()).unwrap();
-    assert_eq!(d.default_list_id(None).unwrap(), INBOX_ID);
-
-    let other = d.create_list("Другое".into()).unwrap();
-    d.hide_inbox(other.id.clone(), true).unwrap();
-    d.set_new_task_list(INBOX_ID.into()).unwrap();
-    assert_eq!(d.default_list_id(None).unwrap(), other.id);
-    // Not even Inbox fits: it is all there is.
-    d.set_list_archived(other.id, true).unwrap();
-    assert_eq!(d.default_list_id(None).unwrap(), INBOX_ID);
-}
-
-#[test]
-fn r40_the_choice_kept_on_the_device_is_adopted_only_into_an_empty_setting() {
-    let d = device();
-    let home = d.create_list("Дом".into()).unwrap();
-    d.adopt_new_task_list(INBOX_ID.into()).unwrap();
-    assert_eq!(d.setting_for_tests("new_task_list"), None);
-    d.adopt_new_task_list("last".into()).unwrap();
-    assert_eq!(d.new_task_list().unwrap(), "last");
-    d.adopt_new_task_list(home.id.clone()).unwrap();
-    assert_eq!(d.new_task_list().unwrap(), "last");
-    d.set_setting_for_tests("new_task_list", json!(5));
-    assert_eq!(d.new_task_list().unwrap(), INBOX_ID);
-}
-
-#[test]
-fn r22_search_ignores_case_in_any_script() {
-    let d = device();
-    let t = add(&d, "Купить МОЛОКО");
-    d.set_notes(t.id, "в Перекрёстке".into()).unwrap();
-    add(&d, "другое");
-    assert_eq!(
-        view(
-            &d,
-            Scope::Search {
-                text: "молоко".into()
-            }
-        ),
-        ["Купить МОЛОКО"]
-    );
-    assert_eq!(
-        view(
-            &d,
-            Scope::Search {
-                text: "ПЕРЕКРЁСТКЕ".into()
-            }
-        ),
-        ["Купить МОЛОКО"]
-    );
-    assert!(view(&d, Scope::Search { text: "  ".into() }).is_empty());
-}
-
-#[test]
-fn r23_quick_add_creates_the_task_the_line_describes() {
-    let d = device();
-    let shop = d.create_list("Покупки".into()).unwrap();
-    let t = d
-        .quick_add("купить молоко завтра 18:30 !! #дом @покупки".into(), None, false, None)
-        .unwrap();
-    assert_eq!(t.title, "купить молоко");
-    assert_eq!(t.due.as_deref(), Some("2026-10-06T18:30"));
-    assert_eq!(t.priority, Priority::Medium);
-    assert_eq!(t.tags, ["дом"]);
-    assert_eq!(t.list_id, shop.id);
-
-    // An unknown @word is not a list: it stays in the title, the fallback list is used.
-    let other = d
-        .quick_add("написать @ivan".into(), Some(shop.id.clone()), false, None)
-        .unwrap();
-    assert_eq!(other.title, "написать @ivan");
-    assert_eq!(other.list_id, shop.id);
-
-    assert!(
-        d.quick_add("#тег !!".into(), None, false, None).is_err(),
-        "a title is required"
-    );
-}
-
-#[test]
-fn duplicate_copies_the_subtree_next_to_the_original() {
-    let d = device();
-    let a = add(&d, "a");
-    add(&d, "z");
-    add_sub(&d, &a, "sub");
-    d.set_repeat(a.id.clone(), Some(weekly())).unwrap();
-
-    let copy = d.duplicate_task(a.id).unwrap();
-    assert_eq!(view(&d, Scope::Inbox), ["a", "a", "z"]);
-    assert!(copy.repeat.is_some());
-    let copied_sub = d.subtasks(copy.id).unwrap();
-    assert_eq!(titles(&copied_sub), ["sub"]);
-}
-
-#[test]
-fn data_survives_reopening() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().to_string_lossy().into_owned();
-    let id = {
-        let store = Store::open(path.clone()).unwrap();
-        store
-            .create_task(NewTask {
-                title: "помнить".into(),
-                ..NewTask::default()
-            })
-            .unwrap()
-            .id
-    };
-    let store = Store::open(path).unwrap();
-    assert_eq!(store.task(id.clone()).unwrap().title, "помнить");
-    // The clock continues past what is stored, so a new edit wins over the old value.
-    store.set_title(id.clone(), "помнить всё".into()).unwrap();
-    assert_eq!(store.task(id).unwrap().title, "помнить всё");
-}
-
-#[test]
-fn r8_reminders_list_open_tasks_in_time_order() {
-    let d = device();
-    let late = add(&d, "поздно");
-    d.set_remind(late.id, Some("2026-10-07T09:00".into())).unwrap();
-    let early = add(&d, "рано");
-    d.set_remind(early.id.clone(), Some("2026-10-06T08:00".into())).unwrap();
-    let done = add(&d, "уже сделано");
-    d.set_remind(done.id.clone(), Some("2026-10-06T07:00".into())).unwrap();
-    d.complete_task(done.id).unwrap();
-    add(&d, "без напоминания");
-
-    assert_eq!(titles(&d.reminders().unwrap()), ["рано", "поздно"]);
-    d.delete_task(early.id).unwrap();
-    assert_eq!(titles(&d.reminders().unwrap()), ["поздно"]);
-}
-
-#[test]
-fn projects_are_tasks_with_a_view_of_their_own() {
-    let d = device();
-    let work = d.create_list("Работа".into()).unwrap();
-    let launch = d
-        .create_task(NewTask {
-            title: "Запуск сайта".into(),
-            list_id: Some(work.id.clone()),
-            ..NewTask::default()
-        })
-        .unwrap();
-    add(&d, "обычная задача");
-    assert!(d.projects().unwrap().is_empty());
-
-    d.set_project(launch.id.clone(), true).unwrap();
-    let design = d
-        .quick_add_under("Макеты завтра !! #дизайн".into(), launch.id.clone(), false, None)
-        .unwrap();
-    assert_eq!(
-        (design.title.as_str(), design.due.as_deref(), design.priority),
-        ("Макеты", Some("2026-10-06"), Priority::Medium)
-    );
-    assert_eq!(
-        design.list_id, work.id,
-        "a task of a project lives in the project's list"
-    );
-    let copy = add_sub(&d, &launch, "Тексты");
-    d.complete_task(copy.id).unwrap();
-
-    let projects = d.projects().unwrap();
-    assert_eq!(titles(&projects), ["Запуск сайта"]);
-    assert!(projects[0].is_project);
-    assert_eq!((projects[0].subtasks_total, projects[0].subtasks_done), (2, 1));
-    assert_eq!(
-        view(&d, Scope::Project { id: launch.id.clone() }),
-        ["Макеты", "Тексты"],
-        "open first, completed last"
-    );
-    assert_eq!(
-        view(&d, Scope::Upcoming),
-        ["Макеты"],
-        "project tasks show up in the date views"
-    );
-
-    // A task of a project cannot be a project; a project with tasks is not turned back (R32).
-    assert!(d.set_project(design.id, true).is_err());
-    assert!(d.set_project(launch.id.clone(), false).is_err());
-    assert_eq!(d.subtasks(launch.id.clone()).unwrap().len(), 2);
-
-    // A completed project leaves the sidebar.
-    d.complete_task(launch.id).unwrap();
-    assert!(d.projects().unwrap().is_empty());
-}
-
-#[test]
-fn r120_a_project_is_not_a_row_of_the_task_views() {
-    let d = device();
-    add(&d, "а");
-    let b = add(&d, "б");
-    assert_eq!(d.counts().unwrap().inbox, 2);
-
-    d.set_project(b.id.clone(), true).unwrap();
-    assert_eq!(view(&d, Scope::Inbox), ["а"], "the project leaves its list");
-    assert_eq!(d.counts().unwrap().inbox, 1);
-    assert_eq!(titles(&d.projects().unwrap()), ["б"], "it stays in the sidebar");
-
-    // Its own date, tag and priority do not bring it back.
-    d.set_due(b.id.clone(), Some("2026-10-05".into())).unwrap();
-    d.add_tag(b.id.clone(), "дом".into()).unwrap();
-    d.set_priority(b.id.clone(), Priority::High).unwrap();
-    let wide = d
-        .create_filter(
-            "всё".into(),
-            FilterSpec {
-                status: FilterStatus::All,
-                ..spec()
-            },
-        )
-        .unwrap();
-    for scope in [
-        Scope::Today,
-        Scope::Upcoming,
-        Scope::All,
-        Scope::Tag { name: "дом".into() },
-        Scope::Filter { id: wide.id.clone() },
-    ] {
-        assert!(!view(&d, scope.clone()).contains(&"б".to_string()), "{scope:?}");
-    }
-    let counts = d.counts().unwrap();
-    assert_eq!((counts.today, counts.overdue, counts.all), (0, 0, 1));
-    assert!(d.tags().unwrap().iter().all(|t| t.name != "дом" || t.open_count == 0));
-    assert_eq!(d.filters().unwrap()[0].open_count, 1, "only «а»");
-    assert_eq!(
-        view(&d, Scope::Search { text: "б".into() }),
-        ["б"],
-        "search finds the project"
-    );
-
-    // The trash shows it, so it can be restored.
-    d.delete_task(b.id.clone()).unwrap();
-    assert_eq!(view(&d, Scope::Trash), ["б"]);
-    d.restore_task(b.id.clone()).unwrap();
-
-    // An empty project turned back into a task returns to its place.
-    d.set_project(b.id.clone(), false).unwrap();
-    assert_eq!(view(&d, Scope::Inbox), ["а", "б"]);
-    assert_eq!(d.counts().unwrap().inbox, 2);
-
-    // A project with a dated task: the task is in Today, the project is not.
-    let p = add(&d, "п");
-    d.set_project(p.id.clone(), true).unwrap();
-    let t = add_sub(&d, &p, "т");
-    d.set_due(t.id.clone(), Some("2026-10-05".into())).unwrap();
-    d.set_due(p.id.clone(), Some("2026-10-05".into())).unwrap();
-    assert_eq!(
-        view(&d, Scope::Today),
-        ["б", "т"],
-        "«б» is a task again, «п» is not a row"
-    );
-    assert_eq!(d.counts().unwrap().today, 2);
-
-    // A completed project is not a row of its list, even with completed tasks shown, but is in Completed.
-    d.complete_task(t.id).unwrap();
-    d.complete_task(p.id.clone()).unwrap();
-    d.set_now_for_tests("2026-10-05T10:30");
-    d.set_list_show_done(INBOX_ID.into(), true).unwrap();
-    assert_eq!(view(&d, Scope::Inbox), ["а", "б"]);
-    assert!(view(&d, Scope::Completed).contains(&"п".to_string()));
-}
-
-fn spec() -> FilterSpec {
-    FilterSpec::default()
-}
-
-#[test]
-fn saved_filters_select_by_date_list_tag_priority_status_and_text() {
-    let d = device();
-    let work = d.create_list("Работа".into()).unwrap();
-    let mk = |title: &str, due: Option<&str>, list: Option<&str>| {
-        d.create_task(NewTask {
-            title: title.into(),
-            due: due.map(str::to_string),
-            list_id: list.map(str::to_string),
-            ..NewTask::default()
-        })
-        .unwrap()
-    };
-    let late = mk("просрочено", Some("2026-10-01"), None);
-    mk("сегодня", Some("2026-10-05T18:00"), Some(&work.id));
-    let soon = mk("через три дня", Some("2026-10-08"), Some(&work.id));
-    mk("через неделю", Some("2026-10-12"), None);
-    mk("без даты", None, Some(&work.id));
-    let done = mk("сделано", Some("2026-10-05"), None);
-    d.complete_task(done.id).unwrap();
-    // Past the time a completed task stays among the open ones (R68).
-    d.set_now_for_tests("2026-10-05T10:30");
-    d.add_tag(soon.id.clone(), "важное".into()).unwrap();
-    d.set_priority(soon.id.clone(), Priority::High).unwrap();
-    d.set_priority(late.id, Priority::Low).unwrap();
-    d.set_notes(soon.id, "позвонить Ивану".into()).unwrap();
-
-    let show = |s: FilterSpec| {
-        titles(&d.preview_filter(s).unwrap())
-            .into_iter()
-            .map(str::to_string)
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(
-        show(FilterSpec {
-            due: DueWindow::Next { days: 7 },
-            ..spec()
-        }),
-        ["просрочено", "сегодня", "через три дня"]
-    );
-    assert_eq!(
-        show(FilterSpec {
-            due: DueWindow::Next { days: 8 },
-            ..spec()
-        })
-        .len(),
-        4,
-        "the eighth day is the 12th"
-    );
-    assert_eq!(
-        show(FilterSpec {
-            due: DueWindow::Today,
-            ..spec()
-        }),
-        ["сегодня"]
-    );
-    assert_eq!(
-        show(FilterSpec {
-            due: DueWindow::Overdue,
-            ..spec()
-        }),
-        ["просрочено"]
-    );
-    assert_eq!(
-        show(FilterSpec {
-            due: DueWindow::NoDate,
-            ..spec()
-        }),
-        ["без даты"]
-    );
-    assert_eq!(
-        show(FilterSpec {
-            list_ids: vec![work.id.clone()],
-            ..spec()
-        }),
-        ["сегодня", "через три дня", "без даты"]
-    );
-    assert_eq!(
-        show(FilterSpec {
-            tags: vec!["#Важное".into()],
-            ..spec()
-        }),
-        ["через три дня"]
-    );
-    assert_eq!(
-        show(FilterSpec {
-            min_priority: Priority::Low,
-            ..spec()
-        }),
-        ["просрочено", "через три дня"]
-    );
-    assert_eq!(
-        show(FilterSpec {
-            min_priority: Priority::High,
-            ..spec()
-        }),
-        ["через три дня"]
-    );
-    assert_eq!(
-        show(FilterSpec {
-            status: FilterStatus::Done,
-            ..spec()
-        }),
-        ["сделано"]
-    );
-    assert_eq!(
-        show(FilterSpec {
-            status: FilterStatus::All,
-            due: DueWindow::Today,
-            ..spec()
-        }),
-        ["сегодня", "сделано"]
-    );
-    assert_eq!(
-        show(FilterSpec {
-            text: "ИВАНУ позвонить".into(),
-            ..spec()
-        }),
-        ["через три дня"]
-    );
-    assert_eq!(
-        show(FilterSpec {
-            due: DueWindow::Next { days: 7 },
-            list_ids: vec![work.id],
-            min_priority: Priority::Medium,
-            ..spec()
-        }),
-        ["через три дня"]
-    );
-}
-
-#[test]
-fn saved_filters_are_named_stored_and_shown_as_views() {
-    let d = device();
-    add(&d, "без даты");
-    let t = add(&d, "скоро");
-    d.set_due(t.id, Some("2026-10-07".into())).unwrap();
-    assert!(d.create_filter("  ".into(), spec()).is_err());
-
-    let week = d
-        .create_filter(
-            "Неделя".into(),
-            FilterSpec {
-                due: DueWindow::Next { days: 7 },
-                ..spec()
-            },
-        )
-        .unwrap();
-    assert_eq!((week.name.as_str(), week.open_count), ("Неделя", 1));
-    assert_eq!(view(&d, Scope::Filter { id: week.id.clone() }), ["скоро"]);
-
-    d.update_filter(
-        week.id.clone(),
-        "Без срока".into(),
-        FilterSpec {
-            due: DueWindow::NoDate,
-            ..spec()
-        },
-    )
-    .unwrap();
-    let all = d.filters().unwrap();
-    assert_eq!(all.len(), 1);
-    assert_eq!(
-        (all[0].name.as_str(), all[0].spec.due),
-        ("Без срока", DueWindow::NoDate)
-    );
-    assert_eq!(view(&d, Scope::Filter { id: week.id.clone() }), ["без даты"]);
-
-    d.delete_filter(week.id.clone()).unwrap();
-    assert!(d.filters().unwrap().is_empty());
-    assert!(d.tasks(Scope::Filter { id: week.id }).is_err());
-}
-
-#[test]
-fn derived_tables_are_rebuilt_when_their_shape_changes() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().to_string_lossy().into_owned();
-    let id = {
-        let store = Store::open(path.clone()).unwrap();
-        let t = store
-            .create_task(NewTask {
-                title: "переживёт".into(),
-                ..NewTask::default()
-            })
-            .unwrap();
-        store.add_tag(t.id.clone(), "тег".into()).unwrap();
-        store.set_project(t.id.clone(), true).unwrap();
-        t.id
-    };
-    // What an older version of the app left behind: derived tables of another shape.
-    {
-        let conn = rusqlite::Connection::open(dir.path().join("notes.sqlite")).unwrap();
-        conn.execute_batch("DROP TABLE tasks; CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT); UPDATE meta SET value = '1' WHERE key = 'derived_version';").unwrap();
-    }
-    let store = Store::open(path).unwrap();
-    let got = store.task(id).unwrap();
-    assert_eq!((got.title.as_str(), got.is_project), ("переживёт", true));
-    assert_eq!(got.tags, ["тег"]);
-}
-
-fn notify() -> NotifySettings {
-    NotifySettings {
-        enabled: true,
-        lead_minutes: vec![15],
-        all_day_at: Some("09:00".into()),
-        summary_at: None,
-    }
-}
-
-#[test]
-fn notifications_follow_reminders_due_dates_and_settings() {
-    let d = device(); // now is 2026-10-05T10:00
-    let mk = |title: &str, due: Option<&str>, remind: Option<&str>| {
-        let t = d
-            .create_task(NewTask {
-                title: title.into(),
-                due: due.map(str::to_string),
-                ..NewTask::default()
-            })
-            .unwrap();
-        if let Some(r) = remind {
-            d.set_remind(t.id.clone(), Some(r.into())).unwrap();
-        }
-        t
-    };
-    mk(
-        "со своим напоминанием",
-        Some("2026-10-06T18:00"),
-        Some("2026-10-06T12:00"),
-    );
-    mk("срок со временем", Some("2026-10-05T18:30"), None);
-    mk("срок на день", Some("2026-10-07"), None);
-    mk("срок сегодня без времени", Some("2026-10-05"), None);
-    mk("напоминание в прошлом", None, Some("2026-10-05T09:00"));
-    let done = mk("выполнена", Some("2026-10-06T10:00"), None);
-    d.complete_task(done.id).unwrap();
-    mk("без дат", None, None);
-
-    let plan = |s: NotifySettings| {
-        d.planned_notifications(s)
-            .unwrap()
-            .into_iter()
-            .map(|n| (n.title, n.at, n.kind))
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(
-        plan(notify()),
-        [
-            ("срок со временем".to_string(), "2026-10-05T18:15".to_string(), NotificationKind::Due),
-            ("со своим напоминанием".to_string(), "2026-10-06T12:00".to_string(), NotificationKind::Reminder),
-            ("срок на день".to_string(), "2026-10-07T09:00".to_string(), NotificationKind::Due),
-        ],
-        "past moments, completed tasks and tasks without dates produce nothing; a reminder of its own replaces the derived one"
-    );
-    // Each kind of derived reminder can be turned off; a task's own reminder stays.
-    assert_eq!(
-        plan(NotifySettings {
-            lead_minutes: vec![],
-            all_day_at: None,
-            ..notify()
-        })
-        .len(),
-        1
-    );
-    assert_eq!(
-        plan(NotifySettings {
-            lead_minutes: vec![0],
-            ..notify()
-        })[0]
-            .1,
-        "2026-10-05T18:30"
-    );
-    assert!(plan(NotifySettings {
-        enabled: false,
-        ..notify()
-    })
-    .is_empty());
-    // Several lead times give several notifications for one task; those already past are dropped.
-    let several = d
-        .planned_notifications(NotifySettings {
-            lead_minutes: vec![60, 15, 15, 1440],
-            all_day_at: None,
-            ..notify()
-        })
-        .unwrap()
-        .into_iter()
-        .filter(|n| n.title == "срок со временем")
-        .map(|n| (n.at, n.key.rsplit(':').next().unwrap_or_default().to_string()))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        several,
-        [
-            ("2026-10-05T17:30".to_string(), "60".to_string()),
-            ("2026-10-05T18:15".to_string(), "15".to_string()),
-        ]
-    );
-
-    let summary: Vec<(String, u32)> = d
-        .planned_notifications(NotifySettings {
-            lead_minutes: vec![],
-            all_day_at: None,
-            summary_at: Some("08:00".into()),
-            ..notify()
-        })
-        .unwrap()
-        .into_iter()
-        .filter(|n| n.kind == NotificationKind::Summary)
-        .map(|n| (n.at, n.count))
-        .collect();
-    assert_eq!(
-        summary[0],
-        ("2026-10-06T08:00".to_string(), 3),
-        "today's eight o'clock has passed; tomorrow counts everything due by then"
-    );
-    assert_eq!(summary[1], ("2026-10-07T08:00".to_string(), 4));
-    assert_eq!(summary.len(), 6);
-}
-
-fn due_today(d: &Device, title: &str) -> TaskItem {
-    d.create_task(NewTask {
-        title: title.into(),
-        due: Some("2026-10-05".into()),
-        ..NewTask::default()
-    })
-    .unwrap()
-}
-
-#[test]
-fn r68_a_completed_task_stays_in_place_for_the_set_time() {
-    let d = device();
-    assert_eq!(
-        d.keep_done().unwrap(),
-        KeepDone::Seconds { seconds: 5 },
-        "five seconds unless set"
-    );
-    due_today(&d, "а");
-    let b = due_today(&d, "б");
-    due_today(&d, "в");
-    d.add_tag(b.id.clone(), "дом".into()).unwrap();
-    let tag = || Scope::Tag { name: "дом".into() };
-
-    d.complete_task(b.id.clone()).unwrap();
-    d.set_now_for_tests("2026-10-05T10:00:04");
-    for scope in [Scope::Today, Scope::Inbox, Scope::All] {
-        let tasks = d.tasks(scope.clone()).unwrap();
-        assert_eq!(titles(&tasks), ["а", "б", "в"], "{scope:?}: where it was");
-        assert!(tasks[1].done.is_some(), "{scope:?}: shown as completed");
-    }
-    assert_eq!(view(&d, tag()), ["б"]);
-    let counts = d.counts().unwrap();
-    assert_eq!((counts.today, counts.inbox), (2, 2), "not counted as open");
-    assert_eq!(d.tags().unwrap().len(), 0, "nor under its tag");
-
-    // Completed at 10:00:00, kept through 10:00:05.
-    d.set_now_for_tests("2026-10-05T10:00:05");
-    assert_eq!(view(&d, Scope::Today), ["а", "б", "в"]);
-    d.set_now_for_tests("2026-10-05T10:00:06");
-    for scope in [Scope::Today, Scope::Inbox, Scope::All] {
-        assert_eq!(view(&d, scope.clone()), ["а", "в"], "{scope:?}: gone after the time");
-    }
-    assert!(view(&d, tag()).is_empty());
-    assert_eq!(view(&d, Scope::Completed), ["б"]);
-}
-
-#[test]
-fn r68_reopening_a_kept_task_leaves_it_where_it_was() {
-    let d = device();
-    due_today(&d, "а");
-    let b = due_today(&d, "б");
-    due_today(&d, "в");
-    d.complete_task(b.id.clone()).unwrap();
-    d.reopen_task(b.id).unwrap();
-    d.set_now_for_tests("2026-10-05T12:00");
-    assert_eq!(view(&d, Scope::Today), ["а", "б", "в"]);
-    assert_eq!(d.counts().unwrap().today, 3);
-}
-
-#[test]
-fn r68_the_time_is_a_setting_and_zero_removes_at_once() {
-    let d = device();
-    due_today(&d, "а");
-    let b = due_today(&d, "б");
-    d.complete_task(b.id).unwrap();
-
-    d.set_keep_done(KeepDone::Seconds { seconds: 0 }).unwrap();
-    assert_eq!(d.keep_done().unwrap(), KeepDone::Seconds { seconds: 0 });
-    assert_eq!(view(&d, Scope::Today), ["а"], "at once");
-
-    d.set_keep_done(KeepDone::Seconds { seconds: 3600 }).unwrap();
-    d.set_now_for_tests("2026-10-05T10:59");
-    assert_eq!(
-        view(&d, Scope::Today),
-        ["а", "б"],
-        "the setting applies to what is already completed"
-    );
-    d.set_now_for_tests("2026-10-05T11:01");
-    assert_eq!(view(&d, Scope::Today), ["а"]);
-
-    d.set_keep_done(KeepDone::Seconds { seconds: 6_000_000 }).unwrap();
-    assert_eq!(
-        d.keep_done().unwrap(),
-        KeepDone::Seconds { seconds: 86_400 },
-        "a day at most"
-    );
-    for choice in [
-        KeepDone::Seconds { seconds: 5 },
-        KeepDone::Seconds { seconds: 15 },
-        KeepDone::EndOfDay,
-    ] {
-        d.set_keep_done(choice).unwrap();
-        assert_eq!(d.keep_done().unwrap(), choice);
-    }
-}
-
-#[test]
-fn r68_until_the_end_of_the_day_keeps_what_was_completed_today_until_midnight() {
-    let d = device();
-    // The stamps of a device never go back, so the earlier day comes first.
-    d.set_now_for_tests("2026-10-04T23:50");
-    d.set_keep_done(KeepDone::EndOfDay).unwrap();
-    add(&d, "а");
-    let yesterday = add(&d, "вчера");
-    let b = add(&d, "б");
-    d.complete_task(yesterday.id).unwrap();
-    assert_eq!(view(&d, Scope::Inbox), ["а", "вчера", "б"], "kept on its own day");
-
-    d.set_now_for_tests("2026-10-05T10:00");
-    assert_eq!(view(&d, Scope::Inbox), ["а", "б"], "that day is over");
-    assert_eq!(d.seconds_until_kept_leaves().unwrap(), None);
-    d.complete_task(b.id).unwrap();
-    assert_eq!(d.seconds_until_kept_leaves().unwrap(), Some(14 * 3600));
-
-    d.set_now_for_tests("2026-10-05T23:59:59");
-    let tasks = d.tasks(Scope::Inbox).unwrap();
-    assert_eq!(titles(&tasks), ["а", "б"]);
-    assert!(tasks[1].done.is_some(), "shown as completed");
-    assert_eq!(d.counts().unwrap().inbox, 1, "not counted as open");
-    assert_eq!(d.seconds_until_kept_leaves().unwrap(), Some(1));
-
-    d.set_now_for_tests("2026-10-06T00:00");
-    assert_eq!(view(&d, Scope::Inbox), ["а"], "gone at midnight");
-    assert_eq!(view(&d, Scope::Completed), ["б", "вчера"]);
-    assert_eq!(d.seconds_until_kept_leaves().unwrap(), None);
-}
-
-#[test]
-fn r135_today_is_the_day_of_the_zone_the_call_is_made_in() {
-    let d = device();
-    // 22:30 UTC: 01:30 the next day three hours east, 12:30 the same day ten hours west.
-    d.set_now_for_tests("2026-10-04T22:30");
-    let (east, west) = (180, -600);
-    for (title, due) in [("четвёртое", "2026-10-04"), ("пятое", "2026-10-05")] {
-        d.create_task(NewTask {
-            title: title.into(),
-            due: Some(due.into()),
-            ..NewTask::default()
-        })
-        .unwrap();
-    }
-    let today = |zone| {
-        let mut titles = d.in_zone(zone, || view(&d, Scope::Today));
-        titles.sort();
-        titles
-    };
-    assert_eq!(today(east), ["пятое", "четвёртое"]);
-    assert_eq!(today(west), ["четвёртое"]);
-    assert_eq!(d.in_zone(east, || d.counts().unwrap().overdue), 1);
-    assert_eq!(d.in_zone(west, || d.counts().unwrap().overdue), 0);
-
-    let call = |zone| {
-        d.in_zone(zone, || {
-            d.quick_add("позвонить 9:00".into(), None, false, None).unwrap()
-        })
-    };
-    assert_eq!(call(east).due.as_deref(), Some("2026-10-05T09:00"));
-    assert_eq!(call(west).due.as_deref(), Some("2026-10-04T09:00"));
-
-    d.set_keep_done(KeepDone::EndOfDay).unwrap();
-    let task = add(&d, "полить цветы");
-    let done = d.in_zone(east, || d.complete_task(task.id.clone()).unwrap());
-    assert_eq!(
-        done.done.as_deref(),
-        Some("2026-10-05T01:30"),
-        "written on the clock of the zone"
-    );
-    assert_eq!(
-        d.in_zone(east, || d.seconds_until_kept_leaves().unwrap()),
-        Some(22 * 3600 + 30 * 60),
-        "kept until midnight of that zone"
-    );
-    assert!(
-        !view(&d, Scope::Today).contains(&"пятое".to_string()),
-        "outside, the clock is the device's again"
-    );
-}
-
-#[test]
-fn s32_the_time_is_stored_so_that_a_version_that_knows_only_minutes_can_read_it() {
-    let d = device();
-    let stored = |keep| {
-        d.set_keep_done(keep).unwrap();
-        d.setting_for_tests("keep_done").unwrap()
-    };
-    assert_eq!(stored(KeepDone::Seconds { seconds: 0 }), serde_json::json!(0));
-    assert_eq!(stored(KeepDone::Seconds { seconds: 900 }), serde_json::json!(15));
-    assert_eq!(stored(KeepDone::Seconds { seconds: 5 }), serde_json::json!("5s"));
-    assert_eq!(stored(KeepDone::Seconds { seconds: 15 }), serde_json::json!("15s"));
-    assert_eq!(stored(KeepDone::EndOfDay), serde_json::json!("day"));
-
-    // What such a version wrote, and what a later one may write.
-    let read = |value| {
-        d.set_setting_for_tests("keep_done", value);
-        d.keep_done().unwrap()
-    };
-    assert_eq!(read(serde_json::json!(15)), KeepDone::Seconds { seconds: 900 });
-    assert_eq!(read(serde_json::json!(100_000)), KeepDone::Seconds { seconds: 86_400 });
-    assert_eq!(read(serde_json::json!("90s")), KeepDone::Seconds { seconds: 90 });
-    assert_eq!(
-        read(serde_json::json!("9999999s")),
-        KeepDone::Seconds { seconds: 86_400 }
-    );
-    for unknown in [
-        serde_json::json!("week"),
-        serde_json::json!("s"),
-        serde_json::json!(-1),
-        serde_json::json!(null),
-    ] {
-        assert_eq!(
-            read(unknown.clone()),
-            KeepDone::Seconds { seconds: 5 },
-            "{unknown}: the default"
-        );
-    }
-}
-
-#[test]
-fn r68_where_completed_tasks_are_shown_a_kept_one_joins_them_later() {
-    let d = device();
-    let list = d.create_list("Дом".into()).unwrap();
-    d.set_list_show_done(list.id.clone(), true).unwrap();
-    let in_list = |title: &str| {
-        d.create_task(NewTask {
-            title: title.into(),
-            list_id: Some(list.id.clone()),
-            ..NewTask::default()
-        })
-        .unwrap()
-    };
-    in_list("а");
-    let b = in_list("б");
-    in_list("в");
-    let project = add(&d, "проект");
-    d.set_project(project.id.clone(), true).unwrap();
-    add_sub(&d, &project, "раз");
-    let two = add_sub(&d, &project, "два");
-    add_sub(&d, &project, "три");
-    let of_list = || view(&d, Scope::List { id: list.id.clone() });
-    let of_project = || view(&d, Scope::Project { id: project.id.clone() });
-    let open_and_all = |status| {
-        titles(
-            &d.preview_filter(FilterSpec {
-                list_ids: vec![list.id.clone()],
-                status,
-                ..FilterSpec::default()
-            })
-            .unwrap(),
-        )
-        .into_iter()
-        .map(str::to_string)
-        .collect::<Vec<_>>()
-    };
-
-    d.complete_task(b.id).unwrap();
-    d.complete_task(two.id).unwrap();
-    assert_eq!(of_list(), ["а", "б", "в"]);
-    assert_eq!(of_project(), ["раз", "два", "три"]);
-    assert_eq!(open_and_all(FilterStatus::Open), ["а", "б", "в"]);
-    assert_eq!(open_and_all(FilterStatus::All), ["а", "б", "в"]);
-
-    d.set_now_for_tests("2026-10-05T10:06");
-    assert_eq!(of_list(), ["а", "в", "б"]);
-    assert_eq!(of_project(), ["раз", "три", "два"]);
-    assert_eq!(open_and_all(FilterStatus::Open), ["а", "в"]);
-    assert_eq!(open_and_all(FilterStatus::All), ["а", "в", "б"]);
-}
-
-#[test]
-fn r68_a_repeating_task_moves_on_and_its_record_stays_in_place_for_the_time() {
-    let d = device();
-    due_today(&d, "а");
-    let daily = due_today(&d, "каждый день");
-    due_today(&d, "в");
-    d.set_repeat(
-        daily.id.clone(),
-        Some(Repeat {
-            freq: Freq::Daily,
-            ..weekly()
-        }),
-    )
-    .unwrap();
-    d.add_tag(daily.id.clone(), "дом".into()).unwrap();
-    let next = d.complete_task(daily.id.clone()).unwrap();
-    assert!(next.done.is_none());
-    assert_eq!(next.due.as_deref(), Some("2026-10-06"));
-
-    d.set_now_for_tests("2026-10-05T10:00:04");
-    let today = d.tasks(Scope::Today).unwrap();
-    assert_eq!(
-        titles(&today),
-        ["а", "каждый день", "в"],
-        "the record stands where the task stood"
-    );
-    assert!(today[1].is_log && today[1].done.is_some(), "shown as completed");
-    assert_eq!(
-        view(&d, Scope::Upcoming),
-        ["каждый день"],
-        "the task is at its next date at once"
-    );
-    let inbox = d.tasks(Scope::Inbox).unwrap();
-    assert_eq!(
-        titles(&inbox),
-        ["а", "каждый день", "каждый день", "в"],
-        "the task and its record"
-    );
-    assert_eq!(inbox.iter().filter(|t| t.is_log).count(), 1);
-    assert_eq!(
-        view(&d, Scope::Tag { name: "дом".into() }),
-        ["каждый день", "каждый день"]
-    );
-    assert_eq!(d.counts().unwrap().today, 2, "the record is not counted as open");
-    assert_eq!(d.seconds_until_kept_leaves().unwrap(), Some(2));
-
-    d.set_now_for_tests("2026-10-05T10:00:06");
-    assert_eq!(view(&d, Scope::Today), ["а", "в"]);
-    assert_eq!(view(&d, Scope::Inbox), ["а", "каждый день", "в"]);
-    assert_eq!(view(&d, Scope::Completed), ["каждый день"]);
-    assert_eq!(d.seconds_until_kept_leaves().unwrap(), None);
-
-    d.set_keep_done(KeepDone::Seconds { seconds: 0 }).unwrap();
-    d.set_now_for_tests("2026-10-06T10:00");
-    d.complete_task(daily.id).unwrap();
-    assert_eq!(view(&d, Scope::Today), ["а", "в"], "at once: the record is not shown");
-}
-
-#[test]
-fn r68_the_record_of_a_project_task_stands_in_the_project_only() {
-    let d = device();
-    let project = add(&d, "ремонт");
-    d.set_project(project.id.clone(), true).unwrap();
-    let t = d
-        .create_task(NewTask {
-            title: "проветрить".into(),
-            parent_id: Some(project.id.clone()),
-            due: Some("2026-10-05".into()),
-            ..NewTask::default()
-        })
-        .unwrap();
-    d.set_repeat(t.id.clone(), Some(weekly())).unwrap();
-    d.complete_task(t.id).unwrap();
-    assert_eq!(
-        view(&d, Scope::Project { id: project.id.clone() }),
-        ["проветрить", "проветрить"]
-    );
-    assert_eq!(
-        view(&d, Scope::Today),
-        ["проветрить"],
-        "the record, as the task was there"
-    );
-    assert!(view(&d, Scope::Inbox).is_empty(), "not a top-level row of the list");
-    let p = d.task(project.id.clone()).unwrap();
-    assert_eq!(
-        (p.subtasks_total, p.subtasks_done),
-        (1, 0),
-        "the record is not a task of the project"
-    );
-    d.set_now_for_tests("2026-10-05T10:00:06");
-    assert_eq!(view(&d, Scope::Project { id: project.id }), ["проветрить"]);
-}
-
-#[test]
-fn r68_a_far_clock_does_not_keep_a_task() {
-    let d = device();
-    // Completed where the clock is three hours ahead: `done` carries no time zone.
-    let far = due_today(&d, "издалека");
-    d.set_now_for_tests("2026-10-05T13:00");
-    d.complete_task(far.id).unwrap();
-    d.set_now_for_tests("2026-10-05T10:01");
-    assert!(view(&d, Scope::Today).is_empty());
-}
-
-#[test]
-fn r68_the_time_runs_to_the_second_and_the_store_tells_when_it_ends() {
-    let d = device();
-    d.set_keep_done(KeepDone::Seconds { seconds: 15 }).unwrap();
-    assert_eq!(d.seconds_until_kept_leaves().unwrap(), None, "nothing is kept");
-    due_today(&d, "а");
-    let b = due_today(&d, "б");
-
-    d.set_now_for_tests("2026-10-05T10:00:40");
-    d.complete_task(b.id).unwrap();
-    d.set_now_for_tests("2026-10-05T10:00:50");
-    assert_eq!(view(&d, Scope::Today), ["а", "б"]);
-    assert_eq!(d.seconds_until_kept_leaves().unwrap(), Some(6));
-
-    d.set_now_for_tests("2026-10-05T10:00:54");
-    assert_eq!(view(&d, Scope::Today), ["а", "б"], "a second before the time is over");
-    d.set_now_for_tests("2026-10-05T10:00:56");
-    assert_eq!(view(&d, Scope::Today), ["а"], "a second after");
-    assert_eq!(d.seconds_until_kept_leaves().unwrap(), None);
-
-    d.set_keep_done(KeepDone::Seconds { seconds: 0 }).unwrap();
-    assert_eq!(
-        d.seconds_until_kept_leaves().unwrap(),
-        None,
-        "at once: nothing to wait for"
-    );
-}
-
-#[test]
-fn r69_a_task_closed_as_wont_do_is_kept_then_logged_and_can_be_reopened() {
-    let d = device();
-    let a = add(&d, "а");
-    let b = add(&d, "б");
-    add(&d, "в");
-
-    let closed = d.wont_do_task(b.id.clone()).unwrap();
-    assert!(closed.wont && closed.done.is_some());
-    d.set_now_for_tests("2026-10-05T10:00:04");
-    let inbox = d.tasks(Scope::Inbox).unwrap();
-    assert_eq!(titles(&inbox), ["а", "б", "в"], "kept where it was (R68)");
-    assert!(inbox[1].wont);
-    assert_eq!(d.counts().unwrap().inbox, 2, "not counted as open");
-
-    d.complete_task(a.id.clone()).unwrap();
-    d.set_now_for_tests("2026-10-05T10:30");
-    assert_eq!(view(&d, Scope::Inbox), ["в"]);
-    assert_eq!(view(&d, Scope::Completed), ["а", "б"], "both outcomes are in the log");
-    assert_eq!(view(&d, Scope::WontDo), ["б"]);
-    assert!(!d.task(a.id.clone()).unwrap().wont);
-
-    // Closing a closed task either way changes nothing.
-    assert!(d.complete_task(b.id.clone()).unwrap().wont);
-    assert!(!d.wont_do_task(a.id).unwrap().wont);
-
-    d.reopen_task(b.id.clone()).unwrap();
-    let back = d.task(b.id.clone()).unwrap();
-    assert!(back.done.is_none() && !back.wont);
-    assert_eq!(view(&d, Scope::Inbox), ["б", "в"]);
-    assert!(view(&d, Scope::WontDo).is_empty());
-
-    // Completed after that, it is completed.
-    assert!(!d.complete_task(b.id).unwrap().wont);
-    assert!(view(&d, Scope::WontDo).is_empty());
-}
-
-#[test]
-fn r69_open_subtasks_get_the_same_outcome_and_completed_ones_keep_theirs() {
-    let d = device();
-    let top = add(&d, "родитель");
-    d.set_project(top.id.clone(), true).unwrap();
-    let done = add_sub(&d, &top, "сделана");
-    let open = add_sub(&d, &top, "открыта");
-    let deep = add_sub(&d, &open, "глубже");
-    d.complete_task(done.id.clone()).unwrap();
-
-    d.wont_do_task(top.id.clone()).unwrap();
-    assert!(d.task(open.id.clone()).unwrap().wont);
-    assert!(d.task(deep.id).unwrap().wont);
-    let kept = d.task(done.id).unwrap();
-    assert!(kept.done.is_some() && !kept.wont);
-    assert_eq!(view(&d, Scope::WontDo), ["родитель"], "subtasks go with their task");
-
-    // Reopening the parent leaves the subtasks alone (R11).
-    d.reopen_task(top.id).unwrap();
-    assert!(d.task(open.id).unwrap().wont);
-}
-
-#[test]
-fn r69_r11_undoing_a_close_reopens_the_subtasks_closed_with_it() {
-    for wont in [true, false] {
-        let d = device();
-        let top = add(&d, "родитель");
-        d.set_project(top.id.clone(), true).unwrap();
-        let done = add_sub(&d, &top, "сделана");
-        let open = add_sub(&d, &top, "открыта");
-        let deep = add_sub(&d, &open, "глубже");
-        d.complete_task(done.id.clone()).unwrap();
-        d.set_now_for_tests("2026-10-05T10:00:04");
-
-        if wont {
-            d.wont_do_task(top.id.clone()).unwrap();
-        } else {
-            d.complete_task(top.id.clone()).unwrap();
-        }
-        d.set_now_for_tests("2026-10-05T10:00:06");
-        d.undo_close_task(top.id.clone()).unwrap();
-
-        for id in [&top.id, &open.id, &deep.id] {
-            let back = d.task(id.clone()).unwrap();
-            assert!(
-                back.done.is_none() && !back.wont,
-                "closed by the action, reopened by its undo"
-            );
-        }
-        let kept = d.task(done.id).unwrap();
-        assert!(
-            kept.done.is_some() && !kept.wont,
-            "completed before the action, left as it was"
-        );
-
-        // Nothing to take back on an open task.
-        d.undo_close_task(top.id.clone()).unwrap();
-        assert!(d.task(top.id).unwrap().done.is_none());
-    }
-}
-
-#[test]
-fn r69_undoing_the_close_of_a_subtask_leaves_its_parent_and_neighbours_alone() {
-    let d = device();
-    let top = add(&d, "родитель");
-    let one = add_sub(&d, &top, "первая");
-    let two = add_sub(&d, &top, "вторая");
-
-    d.wont_do_task(one.id.clone()).unwrap();
-    assert!(d.task(top.id.clone()).unwrap().done.is_none(), "the parent stays open");
-    assert!(
-        d.task(two.id.clone()).unwrap().done.is_none(),
-        "the neighbour stays open"
-    );
-
-    d.undo_close_task(one.id.clone()).unwrap();
-    assert!(d.task(one.id).unwrap().done.is_none());
-    assert!(d.task(top.id).unwrap().done.is_none());
-    assert!(d.task(two.id).unwrap().done.is_none());
-}
-
-#[test]
-fn r69_r17_a_repeating_task_skips_the_occurrence() {
-    let d = device();
-    let t = add(&d, "зарядка");
-    d.set_due(t.id.clone(), Some("2026-10-05".into())).unwrap();
-    d.set_repeat(t.id.clone(), Some(weekly())).unwrap();
-    let sub = add_sub(&d, &t, "разминка");
-    d.wont_do_task(sub.id.clone()).unwrap();
-
-    let after = d.wont_do_task(t.id.clone()).unwrap();
-    assert!(after.done.is_none() && !after.wont, "the task stays open");
-    assert_eq!(after.due.as_deref(), Some("2026-10-12"));
-    let sub = d.task(sub.id).unwrap();
-    assert!(
-        sub.done.is_none() && !sub.wont,
-        "subtasks are reopened for the next round"
-    );
-
-    let log = d.tasks(Scope::WontDo).unwrap();
-    assert_eq!(titles(&log), ["зарядка"]);
-    assert!(log[0].is_log && log[0].wont);
-    assert_eq!(log[0].due.as_deref(), Some("2026-10-05"));
-    assert_eq!(view(&d, Scope::Completed), ["зарядка"]);
-
-    // The next occurrence is completed: its record is a completed one.
-    d.complete_task(t.id).unwrap();
-    assert_eq!(view(&d, Scope::Completed).len(), 2);
-    assert_eq!(view(&d, Scope::WontDo).len(), 1);
-}
-
-#[test]
-fn r69_r30_wont_do_tasks_leave_both_numbers_of_the_counter() {
-    let d = device();
-    let project = add(&d, "проект");
-    d.set_project(project.id.clone(), true).unwrap();
-    let one = add_sub(&d, &project, "раз");
-    let two = add_sub(&d, &project, "два");
-    let three = add_sub(&d, &project, "три");
-    d.complete_task(one.id).unwrap();
-    d.complete_task(two.id).unwrap();
-    assert_eq!(d.projects().unwrap()[0].subtasks_total, 3);
-
-    d.wont_do_task(three.id.clone()).unwrap();
-    let p = &d.projects().unwrap()[0];
-    assert_eq!((p.subtasks_done, p.subtasks_total), (2, 2));
-
-    d.reopen_task(three.id).unwrap();
-    let p = &d.projects().unwrap()[0];
-    assert_eq!((p.subtasks_done, p.subtasks_total), (2, 3));
-}
-
-#[test]
-fn r69_r33_a_filter_tells_the_two_outcomes_apart() {
-    let d = device();
-    add(&d, "открыта");
-    let done = add(&d, "выполнена");
-    let wont = add(&d, "не буду");
-    d.complete_task(done.id).unwrap();
-    d.wont_do_task(wont.id).unwrap();
-    d.set_now_for_tests("2026-10-05T10:30");
-
-    let show = |status: FilterStatus| {
-        let mut got = view_of(&d.preview_filter(FilterSpec { status, ..spec() }).unwrap());
-        got.sort();
-        got
-    };
-    assert_eq!(show(FilterStatus::Open), ["открыта"]);
-    assert_eq!(show(FilterStatus::Done), ["выполнена"]);
-    assert_eq!(show(FilterStatus::Wont), ["не буду"]);
-    assert_eq!(show(FilterStatus::All), ["выполнена", "не буду", "открыта"]);
-
-    // The value is stored and read back under its own name.
-    let saved = d
-        .create_filter(
-            "брошенное".into(),
-            FilterSpec {
-                status: FilterStatus::Wont,
-                ..spec()
-            },
-        )
-        .unwrap();
-    assert_eq!(view(&d, Scope::Filter { id: saved.id }), ["не буду"]);
-}
-
-fn view_of(tasks: &[TaskItem]) -> Vec<String> {
-    tasks.iter().map(|t| t.title.clone()).collect()
-}
-
-#[test]
-fn r69_r46_clearing_completed_removes_both_outcomes() {
-    let d = device();
-    d.set_now_for_tests("2026-09-01T09:00");
-    let done = add(&d, "выполнена");
-    let wont = add(&d, "не буду");
-    d.complete_task(done.id).unwrap();
-    d.wont_do_task(wont.id).unwrap();
-    d.set_now_for_tests(NOW);
-    assert_eq!(view(&d, Scope::Completed).len(), 2);
-
-    assert_eq!(d.clear_completed(Some("2026-10-01".into())).unwrap(), 2);
-    assert!(view(&d, Scope::Completed).is_empty());
-    assert!(view(&d, Scope::WontDo).is_empty());
-}
-
-/// Attaches a file with that name and content and returns the attachment as the views get it.
 fn shown_attachment(d: &Device, name: &str, content: &[u8]) -> Attachment {
-    let task = add(&d.store, name);
+    let note = add(&d.store, name);
     let src = tempfile::tempdir().unwrap();
     let file = src.path().join(name);
     std::fs::write(&file, content).unwrap();
-    d.add_attachment(task.id.clone(), file.to_string_lossy().into_owned(), None)
+    d.add_attachment(note.id.clone(), file.to_string_lossy().into_owned(), None)
         .unwrap();
-    d.attachments(task.id).unwrap().remove(0)
+    d.attachments(note.id).unwrap().remove(0)
 }
 
 #[test]
-fn r85_a_name_without_a_type_takes_the_type_of_the_content() {
+fn a_name_without_a_type_takes_the_type_of_the_content() {
     let d = device();
     let jpeg = shown_attachment(&d, "Image", &[0xFF, 0xD8, 0xFF, 0xE0, 0, 16, b'J', b'F', b'I', b'F']);
     assert_eq!((jpeg.name.as_str(), jpeg.mime.as_str()), ("Image.jpg", "image/jpeg"));
@@ -2424,7 +826,7 @@ fn r85_a_name_without_a_type_takes_the_type_of_the_content() {
 }
 
 #[test]
-fn r85_a_name_that_tells_the_type_and_content_that_tells_none_are_left_alone() {
+fn a_name_that_tells_the_type_and_content_that_tells_none_are_left_alone() {
     let d = device();
     // The name decides when it can, whatever the bytes are.
     let named = shown_attachment(&d, "notes.txt", &[0xFF, 0xD8, 0xFF, 0xE0]);
@@ -2441,13 +843,13 @@ fn r85_a_name_that_tells_the_type_and_content_that_tells_none_are_left_alone() {
 }
 
 #[test]
-fn r85_the_registers_keep_the_name_the_file_came_with() {
+fn the_registers_keep_the_name_the_file_came_with() {
     let d = device();
     let shown = shown_attachment(&d, "Image", &[0xFF, 0xD8, 0xFF, 0xE0]);
     assert_eq!(shown.name, "Image.jpg");
     // Without the content the name is what was stored: nothing was written back.
     std::fs::remove_file(shown.local_path.unwrap()).unwrap();
-    let bare = d.attachments(shown.task_id).unwrap().remove(0);
+    let bare = d.attachments(shown.note_id).unwrap().remove(0);
     assert_eq!(
         (bare.name.as_str(), bare.mime.as_str()),
         ("Image", "application/octet-stream")
@@ -2470,11 +872,11 @@ fn folder_content(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
     all
 }
 
-fn attach_named(d: &Device, task: &TaskItem, name: &str, content: &[u8]) -> Attachment {
+fn attach_named(d: &Device, note: &Note, name: &str, content: &[u8]) -> Attachment {
     let src = tempfile::tempdir().unwrap();
     let file = src.path().join("source");
     std::fs::write(&file, content).unwrap();
-    d.add_attachment(task.id.clone(), file.to_string_lossy().into_owned(), Some(name.into()))
+    d.add_attachment(note.id.clone(), file.to_string_lossy().into_owned(), Some(name.into()))
         .unwrap()
 }
 
@@ -2483,16 +885,16 @@ fn named(name: &str, content: &[u8]) -> (String, Vec<u8>) {
 }
 
 #[test]
-fn r91_every_attachment_is_saved_under_its_name() {
+fn every_attachment_of_a_note_is_saved_under_its_name() {
     let d = device();
-    let t = add(&d, "с тремя файлами");
-    attach_named(&d, &t, "a.txt", b"first");
-    attach_named(&d, &t, "b.pdf", b"%PDF-1.7 second");
-    attach_named(&d, &t, "c.png", b"third");
+    let n = add(&d, "с тремя файлами");
+    attach_named(&d, &n, "a.txt", b"first");
+    attach_named(&d, &n, "b.pdf", b"%PDF-1.7 second");
+    attach_named(&d, &n, "c.png", b"third");
     let out = tempfile::tempdir().unwrap();
 
     let report = d
-        .save_attachments(t.id.clone(), out.path().to_string_lossy().into_owned())
+        .save_attachments(n.id.clone(), out.path().to_string_lossy().into_owned())
         .unwrap();
 
     let mut saved = report.saved.clone();
@@ -2508,17 +910,17 @@ fn r91_every_attachment_is_saved_under_its_name() {
         ]
     );
     // The content behind the attachments is where it was.
-    assert!(d.attachments(t.id).unwrap().iter().all(|f| f.local_path.is_some()));
+    assert!(d.attachments(n.id).unwrap().iter().all(|f| f.local_path.is_some()));
 }
 
 #[test]
-fn r91_a_name_that_is_taken_gets_a_number_and_nothing_is_replaced() {
+fn a_name_that_is_taken_gets_a_number_and_nothing_is_replaced() {
     let d = device();
-    let t = add(&d, "с одинаковыми именами");
-    attach_named(&d, &t, "a.txt", b"one");
-    attach_named(&d, &t, "a.txt", b"two");
-    attach_named(&d, &t, "notes", b"three");
-    attach_named(&d, &t, ".env", b"four");
+    let n = add(&d, "с одинаковыми именами");
+    attach_named(&d, &n, "a.txt", b"one");
+    attach_named(&d, &n, "a.txt", b"two");
+    attach_named(&d, &n, "notes", b"three");
+    attach_named(&d, &n, ".env", b"four");
     let out = tempfile::tempdir().unwrap();
     for (name, content) in [
         ("a.txt", "was here"),
@@ -2530,7 +932,7 @@ fn r91_a_name_that_is_taken_gets_a_number_and_nothing_is_replaced() {
     }
 
     let dir = out.path().to_string_lossy().into_owned();
-    let report = d.save_attachments(t.id.clone(), dir.clone()).unwrap();
+    let report = d.save_attachments(n.id.clone(), dir.clone()).unwrap();
 
     assert!(report.failed.is_empty(), "{report:?}");
     let all = folder_content(out.path());
@@ -2555,21 +957,21 @@ fn r91_a_name_that_is_taken_gets_a_number_and_nothing_is_replaced() {
     assert_eq!(all.len(), 8);
 
     // A second run adds a second set and still replaces nothing.
-    d.save_attachments(t.id, dir).unwrap();
+    d.save_attachments(n.id, dir).unwrap();
     assert_eq!(folder_content(out.path()).len(), 12);
 }
 
 #[test]
-fn r91_a_name_from_another_device_stays_inside_the_folder() {
+fn a_name_from_another_device_stays_inside_the_folder() {
     let d = device();
-    let t = add(&d, "с чужим именем");
-    attach_named(&d, &t, "../up/and:out.txt", b"escaped");
-    attach_named(&d, &t, "plain.txt", b"plain");
+    let n = add(&d, "с чужим именем");
+    attach_named(&d, &n, "../up/and:out.txt", b"escaped");
+    attach_named(&d, &n, "plain.txt", b"plain");
     let parent = tempfile::tempdir().unwrap();
     let out = parent.path().join("chosen");
     std::fs::create_dir(&out).unwrap();
 
-    let report = d.save_attachments(t.id, out.to_string_lossy().into_owned()).unwrap();
+    let report = d.save_attachments(n.id, out.to_string_lossy().into_owned()).unwrap();
 
     assert!(report.failed.is_empty(), "{report:?}");
     assert_eq!(
@@ -2580,17 +982,17 @@ fn r91_a_name_from_another_device_stays_inside_the_folder() {
 }
 
 #[test]
-fn r91_a_file_that_cannot_be_written_is_named_and_the_rest_are_saved() {
+fn a_file_that_cannot_be_written_is_named_and_the_rest_are_saved() {
     let d = device();
-    let t = add(&d, "с потерянным файлом");
-    let lost = attach_named(&d, &t, "lost.txt", b"lost");
-    attach_named(&d, &t, "kept.txt", b"kept");
+    let n = add(&d, "с потерянным файлом");
+    let lost = attach_named(&d, &n, "lost.txt", b"lost");
+    attach_named(&d, &n, "kept.txt", b"kept");
     // The content is gone from the device and there is no storage to take it from.
     std::fs::remove_file(lost.local_path.unwrap()).unwrap();
     let out = tempfile::tempdir().unwrap();
 
     let report = d
-        .save_attachments(t.id.clone(), out.path().to_string_lossy().into_owned())
+        .save_attachments(n.id.clone(), out.path().to_string_lossy().into_owned())
         .unwrap();
 
     assert_eq!(
@@ -2601,71 +1003,75 @@ fn r91_a_file_that_cannot_be_written_is_named_and_the_rest_are_saved() {
 
     // A folder that is not there: every file is named, nothing is thrown.
     let nowhere = out.path().join("missing").to_string_lossy().into_owned();
-    let report = d.save_attachments(t.id, nowhere).unwrap();
+    let report = d.save_attachments(n.id, nowhere).unwrap();
     assert_eq!((report.saved.len(), report.failed.len()), (0, 2));
 }
 
-/// Attaches the content of `file` to a new task.
+/// Attaches the content to a new note.
 fn attach_file(d: &Device, content: &[u8]) -> std::result::Result<Attachment, AppError> {
-    let task = add(d, "с файлом");
+    let note = add(d, "с файлом");
     let src = tempfile::tempdir().unwrap();
     let file = src.path().join("file.bin");
     std::fs::write(&file, content).unwrap();
-    d.add_attachment(task.id, file.to_string_lossy().into_owned(), None)
+    d.add_attachment(note.id, file.to_string_lossy().into_owned(), None)
 }
 
 #[test]
-fn r140_a_file_above_the_limit_is_not_added() {
+fn r36_a_file_above_the_limit_is_not_added() {
     let d = device();
     d.set_attachment_limits(AttachmentLimits {
         max_file: 10,
-        max_task: 1000,
+        max_note: 1000,
     })
     .unwrap();
 
     let error = attach_file(&d, b"0123456789A").unwrap_err();
     assert!(matches!(error, AppError::TooLarge { .. }), "{error}");
 
-    // The task has no attachment and the content was not left behind.
-    let task = d.tasks(Scope::Inbox).unwrap().remove(0);
-    assert!(d.attachments(task.id).unwrap().is_empty());
+    // The note has no attachment and the content was not left behind.
+    let note = d.notes(Scope::All).unwrap().remove(0);
+    assert!(d.attachments(note.id).unwrap().is_empty());
     assert_eq!(std::fs::read_dir(d.dir().join("blobs")).unwrap().count(), 0);
 }
 
 #[test]
-fn r140_the_task_limit_counts_the_live_attachments() {
+fn r36_the_note_limit_counts_the_live_attachments_of_that_note_only() {
     let d = device();
     d.set_attachment_limits(AttachmentLimits {
         max_file: 100,
-        max_task: 10,
+        max_note: 10,
     })
     .unwrap();
-    let task = add(&d, "с двумя файлами");
+    let note = add(&d, "с двумя файлами");
     let src = tempfile::tempdir().unwrap();
     let file = src.path().join("six.bin");
     std::fs::write(&file, b"123456").unwrap();
     let path = file.to_string_lossy().into_owned();
-    let first = d.add_attachment(task.id.clone(), path.clone(), None).unwrap();
+    let first = d.add_attachment(note.id.clone(), path.clone(), None).unwrap();
 
-    let error = d.add_attachment(task.id.clone(), path.clone(), None).unwrap_err();
+    let error = d.add_attachment(note.id.clone(), path.clone(), None).unwrap_err();
     assert!(matches!(error, AppError::TooLarge { .. }), "{error}");
-    assert_eq!(d.attachments(task.id.clone()).unwrap().len(), 1);
+    assert_eq!(d.attachments(note.id.clone()).unwrap().len(), 1);
+
+    // Another note has room of its own.
+    let other = add(&d, "другая");
+    d.add_attachment(other.id, path.clone(), None).unwrap();
 
     // A removed attachment no longer counts, and the same content goes in.
     d.remove_attachment(first.id).unwrap();
-    let second = d.add_attachment(task.id.clone(), path, None).unwrap();
+    let second = d.add_attachment(note.id.clone(), path, None).unwrap();
     assert_eq!(second.size, 6);
 }
 
 #[test]
-fn r140_a_large_file_is_copied_in_pieces() {
+fn r36_a_large_file_is_copied_in_pieces() {
     let d = device();
     d.set_attachment_limits(AttachmentLimits {
         max_file: 64 * 1024 * 1024,
-        max_task: 128 * 1024 * 1024,
+        max_note: 128 * 1024 * 1024,
     })
     .unwrap();
-    let task = add(&d, "с большим файлом");
+    let note = add(&d, "с большим файлом");
     let src = tempfile::tempdir().unwrap();
     let file = src.path().join("large.bin");
     // Sparse: the file is large, the disk keeps only the marker at its end.
@@ -2678,7 +1084,7 @@ fn r140_a_large_file_is_copied_in_pieces() {
     }
 
     let added = d
-        .add_attachment(task.id, file.to_string_lossy().into_owned(), None)
+        .add_attachment(note.id, file.to_string_lossy().into_owned(), None)
         .unwrap();
     assert_eq!(added.size, 16 * 1024 * 1024);
     let stored = added.local_path.clone().unwrap();
@@ -2699,26 +1105,26 @@ fn r140_a_large_file_is_copied_in_pieces() {
 }
 
 #[test]
-fn r140_a_failed_add_does_not_leave_content() {
+fn r36_a_failed_add_does_not_leave_content() {
     let d = device();
     let src = tempfile::tempdir().unwrap();
     let file = src.path().join("file.bin");
     std::fs::write(&file, b"content nobody kept").unwrap();
 
     let error = d
-        .add_attachment("no-such-task".into(), file.to_string_lossy().into_owned(), None)
+        .add_attachment("no-such-note".into(), file.to_string_lossy().into_owned(), None)
         .unwrap_err();
     assert!(matches!(error, AppError::NotFound { .. }), "{error}");
     assert_eq!(std::fs::read_dir(d.dir().join("blobs")).unwrap().count(), 0);
 }
 
 #[test]
-fn r140_the_limits_belong_to_the_device_and_stay() {
+fn r36_the_limits_belong_to_the_device_and_stay() {
     let d = device();
     let dir = d.dir().to_path_buf();
     d.set_attachment_limits(AttachmentLimits {
         max_file: 3,
-        max_task: 4,
+        max_note: 4,
     })
     .unwrap();
 
@@ -2728,14 +1134,14 @@ fn r140_the_limits_belong_to_the_device_and_stay() {
         again.attachment_limits(),
         AttachmentLimits {
             max_file: 3,
-            max_task: 4
+            max_note: 4
         }
     );
 }
 
 #[cfg(unix)]
 #[test]
-fn r142_the_data_folder_is_for_its_owner_alone() {
+fn the_data_folder_is_for_its_owner_alone() {
     use std::os::unix::fs::PermissionsExt;
     let mode = |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
     let d = device();
@@ -2743,12 +1149,12 @@ fn r142_the_data_folder_is_for_its_owner_alone() {
     assert_eq!(mode(&d.dir().join("blobs")), 0o700);
     assert_eq!(mode(&d.dir().join("notes.sqlite")), 0o600);
 
-    let task = add(&d, "с файлом");
+    let note = add(&d, "с файлом");
     let src = tempfile::tempdir().unwrap();
     let file = src.path().join("file.bin");
     std::fs::write(&file, b"content").unwrap();
     let added = d
-        .add_attachment(task.id, file.to_string_lossy().into_owned(), None)
+        .add_attachment(note.id, file.to_string_lossy().into_owned(), None)
         .unwrap();
     assert_eq!(mode(std::path::Path::new(added.local_path.as_ref().unwrap())), 0o600);
 
@@ -2756,434 +1162,529 @@ fn r142_the_data_folder_is_for_its_owner_alone() {
     assert_eq!(mode(&d.dir().join("log.txt")), 0o600);
 }
 
-/// A project with tasks, all in Inbox: (project, tasks by title).
-fn project_with(d: &Device, dates: &[(&str, Option<&str>, Option<&str>)]) -> (TaskItem, Vec<TaskItem>) {
-    let project = add(d, "Ремонт");
-    d.set_project(project.id.clone(), true).unwrap();
-    let tasks = dates
-        .iter()
-        .map(|(title, start, due)| {
-            d.create_task(NewTask {
-                title: (*title).into(),
-                parent_id: Some(project.id.clone()),
-                start: start.map(str::to_string),
-                due: due.map(str::to_string),
-                ..NewTask::default()
-            })
-            .unwrap()
-        })
+// ---- views, counts and filters ----
+
+#[test]
+fn r44_the_system_views_and_their_counts() {
+    let d = device();
+    let folder = new_folder(&d, "Папка", None);
+    let plain = add(&d, "обычная");
+    let starred = add_in(&d, "со звездой", &folder);
+    let archived = add(&d, "в архиве");
+    let trashed = add(&d, "в корзине");
+    let tagged = add(&d, "с тегом");
+    d.set_starred(starred.id.clone(), true).unwrap();
+    d.set_archived(archived.id.clone(), true).unwrap();
+    d.delete_note(trashed.id.clone()).unwrap();
+    d.add_tag(tagged.id.clone(), "тег".into()).unwrap();
+
+    let mut all = view(&d, Scope::All);
+    all.sort();
+    assert_eq!(all, ["обычная", "с тегом", "со звездой"]);
+    assert_eq!(view(&d, Scope::Starred), ["со звездой"]);
+    assert_eq!(view(&d, Scope::Archived), ["в архиве"]);
+    assert_eq!(view(&d, Scope::Trash), ["в корзине"]);
+    let mut untagged = view(&d, Scope::Untagged);
+    untagged.sort();
+    assert_eq!(untagged, ["обычная", "со звездой"]);
+    let mut root = view(&d, Scope::NoFolder);
+    root.sort();
+    assert_eq!(root, ["обычная", "с тегом"]);
+    assert_eq!(
+        d.counts().unwrap(),
+        Counts {
+            all: 3,
+            starred: 1,
+            archived: 1,
+            trash: 1,
+            untagged: 2,
+            no_folder: 2
+        }
+    );
+    let _ = plain;
+}
+
+fn query(join: FilterJoin, conditions: Vec<Condition>) -> FilterQuery {
+    FilterQuery { join, conditions }
+}
+
+fn selected(d: &Device, q: FilterQuery) -> Vec<String> {
+    let mut titles: Vec<String> = d.preview_filter(q).unwrap().into_iter().map(|n| n.title).collect();
+    titles.sort();
+    titles
+}
+
+#[test]
+fn r45_a_filter_selects_by_folder_tag_flag_attachment_and_title() {
+    let d = device();
+    let top = new_folder(&d, "Верх", None);
+    let sub = new_folder(&d, "Низ", Some(&top));
+    let a = add_in(&d, "Алфавит", &top);
+    let b = add_in(&d, "Бета", &sub);
+    let c = add(&d, "Гамма");
+    d.add_tag(a.id.clone(), "Работа".into()).unwrap();
+    d.add_tag(b.id.clone(), "дом".into()).unwrap();
+    d.add_tag(b.id.clone(), "работа".into()).unwrap();
+    d.set_pinned(c.id.clone(), true).unwrap();
+    d.set_starred(a.id.clone(), true).unwrap();
+    let src = tempfile::tempdir().unwrap();
+    let file = src.path().join("f.txt");
+    std::fs::write(&file, b"f").unwrap();
+    d.add_attachment(b.id.clone(), file.to_string_lossy().into_owned(), None)
+        .unwrap();
+    let all = FilterJoin::All;
+
+    let in_folder = |subfolders| Condition::InFolder {
+        folder_id: top.id.clone(),
+        subfolders,
+    };
+    assert_eq!(selected(&d, query(all, vec![in_folder(false)])), ["Алфавит"]);
+    assert_eq!(selected(&d, query(all, vec![in_folder(true)])), ["Алфавит", "Бета"]);
+    let tag = |name: &str| Condition::HasTag { name: name.into() };
+    assert_eq!(
+        selected(&d, query(all, vec![tag("РАБОТА")])),
+        ["Алфавит", "Бета"],
+        "case does not matter"
+    );
+    assert_eq!(selected(&d, query(all, vec![tag("работа"), tag("дом")])), ["Бета"]);
+    assert_eq!(selected(&d, query(all, vec![Condition::NoTags])), ["Гамма"]);
+    assert_eq!(
+        selected(
+            &d,
+            query(
+                all,
+                vec![Condition::NoneOfTags {
+                    names: vec!["дом".into()]
+                }]
+            )
+        ),
+        ["Алфавит", "Гамма"]
+    );
+    assert_eq!(selected(&d, query(all, vec![Condition::Pinned])), ["Гамма"]);
+    assert_eq!(selected(&d, query(all, vec![Condition::Starred])), ["Алфавит"]);
+    assert_eq!(selected(&d, query(all, vec![Condition::HasAttachments])), ["Бета"]);
+    assert_eq!(
+        selected(
+            &d,
+            query(
+                all,
+                vec![Condition::TitleIs {
+                    text: "бета".into()
+                }]
+            )
+        ),
+        ["Бета"]
+    );
+    assert!(selected(&d, query(all, vec![Condition::TitleIs { text: "бет".into() }])).is_empty());
+    assert_eq!(
+        selected(&d, query(all, vec![Condition::TitleContains { text: "ЛФ".into() }])),
+        ["Алфавит"]
+    );
+    // Any of, and none at all.
+    assert_eq!(
+        selected(&d, query(FilterJoin::Any, vec![Condition::Pinned, Condition::Starred])),
+        ["Алфавит", "Гамма"]
+    );
+    assert_eq!(selected(&d, query(all, vec![])).len(), 3);
+}
+
+#[test]
+fn r45_r27_a_filter_leaves_out_the_archived_and_the_trash_unless_it_asks_for_archived() {
+    let d = device();
+    let kept = add(&d, "в работе");
+    let shelved = add(&d, "в архиве");
+    let gone = add(&d, "в корзине");
+    d.set_pinned(shelved.id.clone(), true).unwrap();
+    d.set_archived(shelved.id.clone(), true).unwrap();
+    d.set_pinned(gone.id.clone(), true).unwrap();
+    d.delete_note(gone.id).unwrap();
+    d.set_pinned(kept.id, true).unwrap();
+
+    assert_eq!(
+        selected(&d, query(FilterJoin::All, vec![Condition::Pinned])),
+        ["в работе"]
+    );
+    assert_eq!(
+        selected(&d, query(FilterJoin::All, vec![Condition::Pinned, Condition::Archived])),
+        ["в архиве"]
+    );
+    assert_eq!(
+        selected(&d, query(FilterJoin::Any, vec![Condition::Pinned, Condition::Archived])),
+        ["в архиве", "в работе"]
+    );
+}
+
+#[test]
+fn r45_a_filter_selects_by_the_moments_of_creation_and_edit() {
+    let d = device();
+    d.set_now_for_tests("2026-09-20T10:00");
+    add(&d, "старая");
+    d.set_now_for_tests("2026-10-01T10:00");
+    let middle = add(&d, "средняя");
+    d.set_now_for_tests("2026-10-04T09:00");
+    d.set_pinned(middle.id, true).unwrap();
+    d.set_now_for_tests("2026-10-05T10:00");
+    add(&d, "новая");
+    let all = FilterJoin::All;
+    let date = |d: &str| d.to_string();
+
+    let created = |when| selected(&d, query(all, vec![Condition::Created { when }]));
+    assert_eq!(
+        created(DateTest::Before {
+            date: date("2026-10-01")
+        }),
+        ["старая"]
+    );
+    assert_eq!(
+        created(DateTest::After {
+            date: date("2026-10-01")
+        }),
+        ["новая"],
+        "after the day is over: the notes of that day are not after it"
+    );
+    assert_eq!(created(DateTest::Within { days: 3 }), ["новая"]);
+    assert_eq!(created(DateTest::Within { days: 10 }), ["новая", "средняя"]);
+
+    let edited = |when| selected(&d, query(all, vec![Condition::Edited { when }]));
+    assert_eq!(
+        edited(DateTest::Within { days: 2 }),
+        ["новая", "средняя"],
+        "the edit of 4 October counts"
+    );
+    assert_eq!(
+        edited(DateTest::Before {
+            date: date("2026-10-04")
+        }),
+        ["старая"].map(String::from).to_vec()
+    );
+
+    // A date that is not one is refused where the filter is saved.
+    let bad = query(
+        all,
+        vec![Condition::Created {
+            when: DateTest::Before {
+                date: date("вчера")
+            },
+        }],
+    );
+    assert!(matches!(d.preview_filter(bad.clone()), Err(AppError::Invalid { .. })));
+    assert!(d.create_filter("плохой".into(), String::new(), bad).is_err());
+}
+
+#[test]
+fn r45_a_saved_filter_is_named_ordered_counted_and_shown_as_a_view() {
+    let d = device();
+    let a = add(&d, "a");
+    add(&d, "b");
+    d.set_pinned(a.id.clone(), true).unwrap();
+    let pinned = d
+        .create_filter(
+            "Закреплённые".into(),
+            "pin".into(),
+            query(FilterJoin::All, vec![Condition::Pinned]),
+        )
+        .unwrap();
+    let everything = d
+        .create_filter("Все".into(), String::new(), query(FilterJoin::All, vec![]))
+        .unwrap();
+    assert_eq!((pinned.count, everything.count), (1, 2));
+    assert_eq!(pinned.icon, "pin");
+    assert_eq!(view(&d, Scope::Filter { id: pinned.id.clone() }), ["a"]);
+
+    let names = |d: &Device| d.filters().unwrap().into_iter().map(|f| f.name).collect::<Vec<_>>();
+    assert_eq!(names(&d), ["Закреплённые", "Все"], "in the order they were made");
+    d.move_filter(everything.id.clone(), None).unwrap();
+    assert_eq!(names(&d), ["Все", "Закреплённые"]);
+    d.move_filter(everything.id.clone(), Some(pinned.id.clone())).unwrap();
+    assert_eq!(names(&d), ["Закреплённые", "Все"]);
+
+    d.update_filter(
+        pinned.id.clone(),
+        "Важные".into(),
+        "star".into(),
+        query(FilterJoin::All, vec![Condition::Starred]),
+    )
+    .unwrap();
+    let updated = d.filters().unwrap().remove(0);
+    assert_eq!(
+        (updated.name.as_str(), updated.icon.as_str(), updated.count),
+        ("Важные", "star", 0)
+    );
+
+    assert!(d
+        .create_filter("  ".into(), String::new(), FilterQuery::default())
+        .is_err());
+    d.delete_filter(everything.id.clone()).unwrap();
+    assert_eq!(names(&d), ["Важные"]);
+    assert!(d.notes(Scope::Filter { id: everything.id }).is_err());
+}
+
+// ---- order of folders and filters ----
+
+#[test]
+fn s11_folders_and_filters_are_ordered_by_pos_and_a_move_puts_one_between_two() {
+    let d = device();
+    let a = new_folder(&d, "A", None);
+    let b = new_folder(&d, "B", None);
+    let c = new_folder(&d, "C", None);
+    let names = |d: &Device| d.folders().unwrap().into_iter().map(|f| f.name).collect::<Vec<_>>();
+    assert_eq!(names(&d), ["A", "B", "C"]);
+
+    d.move_folder(c.id.clone(), None, Some(a.id.clone())).unwrap();
+    assert_eq!(names(&d), ["A", "C", "B"], "right after A");
+    d.move_folder(b.id.clone(), None, None).unwrap();
+    assert_eq!(names(&d), ["B", "A", "C"], "first without an anchor");
+    // Between the same two, again and again: a key always exists.
+    for _ in 0..30 {
+        d.move_folder(c.id.clone(), None, Some(b.id.clone())).unwrap();
+        d.move_folder(a.id.clone(), None, Some(b.id.clone())).unwrap();
+    }
+    assert_eq!(names(&d), ["B", "A", "C"]);
+
+    // Within a parent: the order of the brothers only.
+    let child1 = new_folder(&d, "в A 1", Some(&a));
+    let child2 = new_folder(&d, "в A 2", Some(&a));
+    d.move_folder(child2.id.clone(), Some(a.id.clone()), None).unwrap();
+    let kids: Vec<String> = d
+        .folders()
+        .unwrap()
+        .into_iter()
+        .filter(|f| f.parent_id.as_deref() == Some(a.id.as_str()))
+        .map(|f| f.name)
         .collect();
-    (project, tasks)
-}
-
-fn task_named(d: &Device, scope: Scope, title: &str) -> TaskItem {
-    d.tasks(scope).unwrap().into_iter().find(|t| t.title == title).unwrap()
+    assert_eq!(kids, ["в A 2", "в A 1"]);
+    let _ = child1;
 }
 
 #[test]
-fn r125_a_task_without_a_due_date_takes_the_projects() {
-    let d = device(); // today is 2026-10-05
-    let (project, tasks) = project_with(&d, &[("а", None, None), ("б", None, Some("2026-10-20"))]);
-    d.set_due(project.id.clone(), Some("2026-10-10".into())).unwrap();
-
-    let upcoming = d.tasks(Scope::Upcoming).unwrap();
-    assert_eq!(titles(&upcoming), ["а", "б"], "ordered by the effective due date");
-    let a = &upcoming[0];
-    assert_eq!(
-        (a.due.as_deref(), a.effective_due.as_deref()),
-        (None, Some("2026-10-10")),
-        "the task keeps only its own date"
-    );
-    let b = &upcoming[1];
-    assert_eq!(
-        (b.due.as_deref(), b.effective_due.as_deref()),
-        (Some("2026-10-20"), Some("2026-10-20")),
-        "an own due date later than the project's is kept"
-    );
-    assert_eq!(d.counts().unwrap().upcoming, 2);
-
-    // Moving the project moves its task at once, and the data of the task stays as it was.
-    d.set_due(project.id.clone(), Some("2026-10-03".into())).unwrap();
-    assert_eq!(view(&d, Scope::Today), ["а"]);
-    let counts = d.counts().unwrap();
-    assert_eq!((counts.today, counts.overdue, counts.upcoming), (1, 1, 1));
-    assert_eq!(d.task(tasks[0].id.clone()).unwrap().due, None);
-    assert_eq!(
-        d.task(tasks[0].id.clone()).unwrap().effective_due.as_deref(),
-        Some("2026-10-03"),
-        "a single task is read with its effective dates too"
-    );
-
-    // A project without a due date gives none.
-    d.set_due(project.id.clone(), None).unwrap();
-    assert_eq!(view(&d, Scope::Upcoming), ["б"]);
-    assert_eq!(view(&d, Scope::Today), Vec::<String>::new());
-}
-
-#[test]
-fn r125_a_task_does_not_start_before_its_project() {
-    let d = device(); // today is 2026-10-05
-    let (project, _) = project_with(
-        &d,
+fn s11_with_equal_pos_the_identifier_decides() {
+    let d = device();
+    let seed = new_folder(&d, "seed", None);
+    let d = plant(
+        d,
         &[
-            ("свой срок", None, Some("2026-10-05")),
-            ("своё начало", Some("2026-10-04"), None),
-            ("позже проекта", Some("2026-10-12"), None),
-            ("без дат", None, None),
+            ("folder", "fb", "name", json!("second by id")),
+            ("folder", "fb", "pos", json!("m")),
+            ("folder", "fa", "name", json!("first by id")),
+            ("folder", "fa", "pos", json!("m")),
+            ("filter", "xb", "name", json!("filter second")),
+            ("filter", "xb", "pos", json!("m")),
+            ("filter", "xa", "name", json!("filter first")),
+            ("filter", "xa", "pos", json!("m")),
         ],
     );
-    assert_eq!(view(&d, Scope::Today), ["своё начало", "свой срок"]);
+    let folders: Vec<String> = d.folders().unwrap().into_iter().map(|f| f.name).collect();
+    let position = |name: &str| folders.iter().position(|f| f == name).unwrap();
+    assert!(position("first by id") < position("second by id"), "{folders:?}");
+    let filters: Vec<String> = d.filters().unwrap().into_iter().map(|f| f.name).collect();
+    assert_eq!(filters, ["filter first", "filter second"]);
+    let _ = seed;
+}
 
-    d.set_start(project.id.clone(), Some("2026-10-08".into())).unwrap();
-    assert_eq!(
-        view(&d, Scope::Today),
-        Vec::<String>::new(),
-        "nothing starts before the project"
+#[test]
+fn s9_a_cycle_of_stored_parents_is_read_the_same_way_and_the_next_move_writes_the_cut() {
+    let d = device();
+    let a = new_folder(&d, "A", None);
+    let b = new_folder(&d, "B", None);
+    let c = new_folder(&d, "C", None);
+    // Two devices moved A into B and B into A while apart; the later `parent` register is B's.
+    let d = plant(
+        d,
+        &[
+            ("folder", &a.id, "parent", json!(b.id)),
+            ("folder", &b.id, "parent", json!(a.id)),
+        ],
     );
-    let upcoming = d.tasks(Scope::Upcoming).unwrap();
-    assert_eq!(titles(&upcoming), ["свой срок", "своё начало", "позже проекта"]);
-    let start = |title: &str| {
-        let t = upcoming.iter().find(|t| t.title == title).unwrap();
-        (t.start.clone(), t.effective_start.clone())
+    let parent = |id: &str| d.folder(id.into()).unwrap().parent_id;
+    assert_eq!(
+        parent(&b.id),
+        None,
+        "B has the greatest stamp: its parent counts as empty"
+    );
+    assert_eq!(parent(&a.id), Some(b.id.clone()));
+
+    // The stored field is not rewritten by the merge.
+    let stored = |id: &str| -> String {
+        rusqlite::Connection::open(d.dir().join("notes.sqlite"))
+            .unwrap()
+            .query_row(
+                "SELECT value FROM fields WHERE kind = 'folder' AND id = ?1 AND field = 'parent'",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
     };
-    assert_eq!(start("свой срок"), (None, Some("2026-10-08".into())));
-    assert_eq!(
-        start("своё начало"),
-        (Some("2026-10-04".into()), Some("2026-10-08".into()))
-    );
-    assert_eq!(
-        start("позже проекта"),
-        (Some("2026-10-12".into()), Some("2026-10-12".into()))
-    );
-    assert_eq!(d.counts().unwrap().today, 0);
+    assert_eq!(stored(&b.id), json!(a.id).to_string());
 
-    // The start of the project gives no dates to a task that has none.
-    let none = d.tasks(Scope::Project { id: project.id.clone() }).unwrap();
-    let none = none.iter().find(|t| t.title == "без дат").unwrap();
-    assert_eq!(
-        (none.effective_start.as_deref(), none.effective_due.as_deref()),
-        (None, None)
-    );
-
-    // With a due date the project dates every task, and its start holds them back.
-    d.set_due(project.id.clone(), Some("2026-10-09".into())).unwrap();
-    let t = task_named(&d, Scope::Upcoming, "без дат");
-    assert_eq!(
-        (t.effective_start.as_deref(), t.effective_due.as_deref()),
-        (Some("2026-10-08"), Some("2026-10-09"))
-    );
-
-    // A due date puts the task in Today by its day, as an own due date does (R21).
-    d.set_now_for_tests("2026-10-08T09:00");
-    assert_eq!(view(&d, Scope::Today), ["свой срок"]);
-    d.set_now_for_tests("2026-10-09T09:00");
-    assert_eq!(view(&d, Scope::Today), ["свой срок", "своё начало", "без дат"]);
+    // The next move of any folder writes the cut down, so that moving A away does not bring B's parent back.
+    d.move_folder(c.id.clone(), None, None).unwrap();
+    assert_eq!(stored(&b.id), "null");
+    d.move_folder(a.id.clone(), None, None).unwrap();
+    assert_eq!((parent(&a.id), parent(&b.id)), (None, None));
 }
 
+// ---- the shared settings ----
+
 #[test]
-fn r125_filters_select_a_task_by_its_effective_dates() {
-    let d = device(); // today is 2026-10-05
-    let (project, _) = project_with(&d, &[("а", None, None)]);
-    let by = |due: DueWindow| {
-        titles(&d.preview_filter(FilterSpec { due, ..spec() }).unwrap())
-            .into_iter()
-            .map(str::to_string)
-            .collect::<Vec<_>>()
+fn s12_the_settings_have_defaults_and_keep_what_is_saved() {
+    let d = device();
+    let defaults = d.settings().unwrap();
+    assert_eq!(defaults, AppSettings::default());
+    assert_eq!(defaults.trash_days, 30);
+    assert_eq!(defaults.new_note_folder, "root");
+    assert_eq!(defaults.spell_language, "auto");
+    assert!(defaults.smart_typography && defaults.spellcheck && !defaults.hyphenate);
+
+    let changed = AppSettings {
+        trash_days: 7,
+        font_body: "Literata".into(),
+        font_mono: "JetBrains Mono".into(),
+        line_height: 1.7,
+        paragraph_spacing: 0.75,
+        align: TextAlign::Justify,
+        hyphenate: true,
+        smart_typography: false,
+        spellcheck: false,
+        spell_language: "ru".into(),
+        new_note_folder: "last".into(),
     };
-    assert_eq!(by(DueWindow::NoDate), ["а"]);
-
-    d.set_due(project.id.clone(), Some("2026-10-03".into())).unwrap();
-    assert_eq!(by(DueWindow::Overdue), ["а"]);
-    assert_eq!(by(DueWindow::NoDate), Vec::<String>::new());
-    assert_eq!(by(DueWindow::Next { days: 7 }), ["а"]);
-
-    d.set_due(project.id.clone(), Some("2026-10-05".into())).unwrap();
-    assert_eq!(by(DueWindow::Today), ["а"]);
-    assert_eq!(by(DueWindow::Overdue), Vec::<String>::new());
+    d.set_settings(changed.clone()).unwrap();
+    assert_eq!(d.settings().unwrap(), changed);
+    let d = reopen(d);
+    assert_eq!(d.settings().unwrap(), changed, "kept across a start");
 }
 
 #[test]
-fn r125_reminders_fire_on_the_inherited_due_date() {
-    let d = device(); // now is 2026-10-05T10:00
-    let (project, tasks) = project_with(&d, &[("а", None, None)]);
-    d.set_due(project.id.clone(), Some("2026-10-07T18:00".into())).unwrap();
-
-    let plan = d
-        .planned_notifications(NotifySettings {
-            summary_at: Some("08:00".into()),
-            ..notify()
-        })
-        .unwrap();
-    let a = plan
-        .iter()
-        .find(|n| n.task_id.as_deref() == Some(tasks[0].id.as_str()))
-        .expect("the task of the project is reminded of");
+fn s12_only_the_fields_that_changed_are_written() {
+    let d = device();
+    d.set_settings(AppSettings::default()).unwrap();
     assert_eq!(
-        (a.kind, a.at.as_str(), a.due.as_deref()),
-        (NotificationKind::Due, "2026-10-07T17:45", Some("2026-10-07T18:00"))
+        d.setting_for_tests("trash_days"),
+        None,
+        "nothing differs from what is in force"
     );
-    let summary: Vec<(String, u32)> = plan
-        .iter()
-        .filter(|n| n.kind == NotificationKind::Summary && n.at.starts_with("2026-10-07"))
-        .map(|n| (n.at.clone(), n.count))
-        .collect();
-    assert_eq!(
-        summary,
-        [("2026-10-07T08:00".to_string(), 1)],
-        "the summary counts the task, not the project"
-    );
-}
-
-#[test]
-fn r129_a_task_goes_into_a_project_at_its_end_and_out_of_it_into_a_list() {
-    let d = device();
-    let home = d.create_list("Дом".into()).unwrap();
-    let project = d
-        .create_task(NewTask {
-            title: "Ремонт".into(),
-            list_id: Some(home.id.clone()),
-            ..NewTask::default()
-        })
-        .unwrap();
-    d.set_project(project.id.clone(), true).unwrap();
-    d.quick_add_under("р".into(), project.id.clone(), false, None).unwrap();
-    let a = add(&d, "а");
-    d.set_due(a.id.clone(), Some("2026-10-07".into())).unwrap();
-
-    d.move_to_project(a.id.clone(), project.id.clone()).unwrap();
-    assert_eq!(
-        view(&d, Scope::Project { id: project.id.clone() }),
-        ["р", "а"],
-        "at the end"
-    );
-    let moved = d.task(a.id.clone()).unwrap();
-    assert_eq!(
-        (moved.parent_id.as_deref(), moved.list_id.as_str(), moved.due.as_deref()),
-        (Some(project.id.as_str()), home.id.as_str(), Some("2026-10-07")),
-        "a task of the project, in the project's list, with its fields"
-    );
-    // Again into the same project: nothing changes.
-    d.move_to_project(a.id.clone(), project.id.clone()).unwrap();
-    assert_eq!(view(&d, Scope::Project { id: project.id.clone() }), ["р", "а"]);
-
-    // A list out of the same picker takes it out of the project, also the project's own list.
-    d.move_to_list(a.id.clone(), home.id.clone()).unwrap();
-    let out = d.task(a.id.clone()).unwrap();
-    assert_eq!((out.parent_id, out.list_id), (None, home.id.clone()));
-    assert_eq!(view(&d, Scope::Project { id: project.id.clone() }), ["р"]);
-
-    // Refused: a project, a task with subtasks, a subtask, a task that is not a project as the target.
-    let other = add(&d, "Отпуск");
-    d.set_project(other.id.clone(), true).unwrap();
-    assert!(d.move_to_project(other.id.clone(), project.id.clone()).is_err());
-    let holder = add(&d, "с подзадачей");
-    let line = add_sub(&d, &holder, "строка");
-    assert!(d.move_to_project(holder.id.clone(), project.id.clone()).is_err());
-    assert!(d.move_to_project(line.id.clone(), project.id.clone()).is_err());
-    assert!(d.move_to_project(a.id.clone(), holder.id.clone()).is_err());
-    assert_eq!(d.task(holder.id).unwrap().parent_id, None);
-    assert_eq!(d.task(line.id).unwrap().title, "строка");
-}
-
-fn placed(store: &Store, title: &str, first: bool, after: Option<&TaskItem>) -> TaskItem {
-    store
-        .create_task(NewTask {
-            title: title.into(),
-            first,
-            after: after.map(|t| t.id.clone()),
-            ..NewTask::default()
-        })
-        .unwrap()
-}
-
-#[test]
-fn r130_a_new_task_goes_first_or_right_under_the_task_it_is_placed_after() {
-    let d = device();
-    let a = add(&d, "а");
-    add(&d, "б");
-    add(&d, "в");
-    placed(&d, "г", true, None);
-    assert_eq!(view(&d, Scope::Inbox), ["г", "а", "б", "в"]);
-    placed(&d, "д", false, Some(&a));
-    assert_eq!(view(&d, Scope::Inbox), ["г", "а", "д", "б", "в"]);
-    // Without either a task still goes last, as everything that does not ask for a place.
-    add(&d, "е");
-    assert_eq!(view(&d, Scope::Inbox), ["г", "а", "д", "б", "в", "е"]);
-}
-
-#[test]
-fn r130_placed_under_a_subtask_the_new_task_goes_under_its_parent() {
-    let d = device();
-    let a = add(&d, "а");
-    add(&d, "б");
-    let sub = add_sub(&d, &a, "подзадача");
-    placed(&d, "в", false, Some(&sub));
-    assert_eq!(view(&d, Scope::Inbox), ["а", "в", "б"]);
-    assert_eq!(titles(&d.subtasks(a.id).unwrap()), ["подзадача"]);
-}
-
-#[test]
-fn r130_placed_under_a_task_of_another_list_the_new_task_goes_first() {
-    let d = device();
-    let home = d.create_list("дом".into()).unwrap();
-    let other = d
-        .create_task(NewTask {
-            title: "чужая".into(),
-            list_id: Some(home.id.clone()),
-            ..NewTask::default()
-        })
-        .unwrap();
-    add(&d, "а");
-    add(&d, "б");
-    placed(&d, "в", false, Some(&other));
-    assert_eq!(view(&d, Scope::Inbox), ["в", "а", "б"]);
-    assert_eq!(view(&d, Scope::List { id: home.id }), ["чужая"]);
-}
-
-#[test]
-fn r130_a_task_of_a_project_goes_first_or_under_a_task_of_the_project() {
-    let d = device();
-    let project = d.create_project("проект".into(), None).unwrap();
-    let p1 = d.quick_add_under("п1".into(), project.id.clone(), false, None).unwrap();
-    d.quick_add_under("п2".into(), project.id.clone(), false, None).unwrap();
-    d.quick_add_under("п0".into(), project.id.clone(), true, None).unwrap();
-    d.quick_add_under("п3".into(), project.id.clone(), false, Some(p1.id))
-        .unwrap();
-    assert_eq!(view(&d, Scope::Project { id: project.id }), ["п0", "п1", "п3", "п2"]);
-}
-
-#[test]
-fn r130_quick_add_places_the_task_too() {
-    let d = device();
-    let a = add(&d, "а");
-    add(&d, "б");
-    d.quick_add("в !!".into(), None, true, None).unwrap();
-    d.quick_add("г".into(), None, false, Some(a.id)).unwrap();
-    assert_eq!(view(&d, Scope::Inbox), ["в", "а", "г", "б"]);
-}
-
-#[test]
-fn r130_another_sort_order_places_the_new_task_by_itself() {
-    let d = device();
-    let list = d.create_list("сроки".into()).unwrap();
-    d.set_list_sort(list.id.clone(), SortMode::Due).unwrap();
-    let new = |title: &str, due: &str, first: bool| {
-        d.create_task(NewTask {
-            title: title.into(),
-            list_id: Some(list.id.clone()),
-            due: Some(due.into()),
-            first,
-            ..NewTask::default()
-        })
-        .unwrap()
-    };
-    new("позже", "2026-10-20", false);
-    new("раньше", "2026-10-10", false);
-    new("посередине", "2026-10-15", true);
-    assert_eq!(view(&d, Scope::List { id: list.id }), ["раньше", "посередине", "позже"]);
-}
-
-#[test]
-fn r130_a_subtask_goes_last_whatever_it_asks_for() {
-    let d = device();
-    let a = add(&d, "а");
-    add_sub(&d, &a, "w");
-    d.quick_add_under("x".into(), a.id.clone(), true, None).unwrap();
-    d.create_task(NewTask {
-        title: "y".into(),
-        parent_id: Some(a.id.clone()),
-        first: true,
-        ..NewTask::default()
+    d.set_settings(AppSettings {
+        trash_days: 10,
+        ..AppSettings::default()
     })
     .unwrap();
-    assert_eq!(titles(&d.subtasks(a.id).unwrap()), ["w", "x", "y"]);
+    assert_eq!(d.setting_for_tests("trash_days"), Some(json!(10)));
+    assert_eq!(
+        d.setting_for_tests("font_body"),
+        None,
+        "a field not touched is not taken from this device"
+    );
 }
 
 #[test]
-fn r146_due_notifications_are_those_of_the_window() {
-    let d = device(); // now is 2026-10-05T10:00
-    let mk = |title: &str, due: Option<&str>, remind: Option<&str>| {
-        let t = d
-            .create_task(NewTask {
-                title: title.into(),
-                due: due.map(str::to_string),
-                ..NewTask::default()
+fn s12_a_value_the_version_cannot_read_applies_the_default() {
+    let d = device();
+    for (field, value) in [
+        ("trash_days", json!("many")),
+        ("trash_days", json!(0)),
+        ("trash_days", json!(3651)),
+        ("trash_days", json!(2.5)),
+        ("align", json!("center")),
+        ("hyphenate", json!("yes")),
+        ("line_height", json!("tall")),
+        ("font_body", json!(7)),
+        ("spell_language", json!("")),
+        ("new_note_folder", json!(null)),
+    ] {
+        d.set_setting_for_tests(field, value.clone());
+        assert_eq!(d.settings().unwrap(), AppSettings::default(), "{field} = {value}");
+    }
+    d.set_setting_for_tests("trash_days", json!(3650));
+    assert_eq!(d.settings().unwrap().trash_days, 3650);
+    d.set_setting_for_tests("trash_days", json!(1));
+    assert_eq!(d.settings().unwrap().trash_days, 1);
+}
+
+#[test]
+fn s12_the_days_in_the_trash_are_checked_where_they_are_set() {
+    let d = device();
+    for days in [0, 3651] {
+        let error = d
+            .set_settings(AppSettings {
+                trash_days: days,
+                ..AppSettings::default()
+            })
+            .unwrap_err();
+        assert!(matches!(error, AppError::Invalid { .. }), "{error}");
+    }
+    let error = d
+        .set_settings(AppSettings {
+            line_height: f64::NAN,
+            ..AppSettings::default()
+        })
+        .unwrap_err();
+    assert!(matches!(error, AppError::Invalid { .. }), "{error}");
+    let error = d
+        .set_settings(AppSettings {
+            font_body: String::new(),
+            ..AppSettings::default()
+        })
+        .unwrap_err();
+    assert!(matches!(error, AppError::Invalid { .. }), "{error}");
+    d.set_settings(AppSettings {
+        trash_days: 3650,
+        ..AppSettings::default()
+    })
+    .unwrap();
+}
+
+// ---- the store itself ----
+
+#[test]
+fn data_survives_reopening() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_string_lossy().into_owned();
+    let id = {
+        let store = Store::open(path.clone()).unwrap();
+        store
+            .create_note(NewNote {
+                title: "помнить".into(),
+                ..NewNote::default()
+            })
+            .unwrap()
+            .id
+    };
+    let store = Store::open(path).unwrap();
+    assert_eq!(store.get_note(id.clone()).unwrap().title, "помнить");
+    // The clock continues past what is stored, so a new edit wins over the old value.
+    store.set_title(id.clone(), "помнить всё".into()).unwrap();
+    assert_eq!(store.get_note(id).unwrap().title, "помнить всё");
+}
+
+#[test]
+fn derived_tables_are_rebuilt_when_their_shape_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_string_lossy().into_owned();
+    let (note, folder) = {
+        let store = Store::open(path.clone()).unwrap();
+        let folder = store.create_folder("папка".into(), None).unwrap();
+        let note = store
+            .create_note(NewNote {
+                title: "переживёт".into(),
+                folder_id: Some(folder.id.clone()),
+                ..NewNote::default()
             })
             .unwrap();
-        if let Some(r) = remind {
-            d.set_remind(t.id, Some(r.into())).unwrap();
-        }
+        store.add_tag(note.id.clone(), "тег".into()).unwrap();
+        (note.id, folder.id)
     };
-    mk("а", None, Some("2026-10-05T10:01"));
-    mk("б", Some("2026-10-05T10:02"), None);
-    mk("в", Some("2026-10-06"), None);
-    mk("г", Some("2026-10-05T11:00"), None);
-    let settings = NotifySettings {
-        enabled: true,
-        lead_minutes: vec![0, 15],
-        all_day_at: Some("09:00".into()),
-        summary_at: Some("08:00".into()),
-    };
-    let due = |now: &str, since: &str, s: NotifySettings| {
-        d.set_now_for_tests(now);
-        d.due_notifications(s, since, now)
-            .unwrap()
-            .into_iter()
-            .map(|n| (n.key.split(':').next().unwrap().to_string(), n.title, n.at, n.count))
-            .collect::<Vec<_>>()
-    };
-    let one = |title: &str, at: &str| vec![("task".to_string(), title.to_string(), at.to_string(), 0)];
-    assert_eq!(
-        due("2026-10-05T10:01:30", "2026-10-05T10:00:00", settings.clone()),
-        one("а", "2026-10-05T10:01")
-    );
-    assert!(
-        due("2026-10-05T10:01:30", "2026-10-05T10:01:30", settings.clone()).is_empty(),
-        "a moment before the window is not sent again"
-    );
-    assert_eq!(
-        due("2026-10-05T10:02:00", "2026-10-05T10:01:30", settings.clone()),
-        one("б", "2026-10-05T10:02"),
-        "the end of the window is in it; the lead of 15 minutes was before the window"
-    );
-    assert_eq!(
-        due("2026-10-05T10:45:10", "2026-10-05T10:44:40", settings.clone()),
-        one("г", "2026-10-05T10:45")
-    );
-    assert_eq!(
-        due("2026-10-06T08:00:20", "2026-10-06T07:59:50", settings.clone()),
-        vec![("summary".to_string(), String::new(), "2026-10-06T08:00".to_string(), 3)]
-    );
-    assert_eq!(
-        due("2026-10-06T09:00:05", "2026-10-06T08:59:35", settings.clone()),
-        one("в", "2026-10-06T09:00")
-    );
-    assert_eq!(
-        due(
-            "2026-10-06T00:00:10",
-            "2026-10-05T23:59:40",
-            NotifySettings {
-                summary_at: Some("00:00".into()),
-                ..settings.clone()
-            }
-        ),
-        vec![("summary".to_string(), String::new(), "2026-10-06T00:00".to_string(), 3)],
-        "a window across midnight takes the summary of the new day"
-    );
-    assert!(due(
-        "2026-10-05T10:01:30",
-        "2026-10-05T10:00:00",
-        NotifySettings {
-            enabled: false,
-            ..settings.clone()
-        }
-    )
-    .is_empty());
-    assert!(due("2026-10-05T10:01:30", "yesterday", settings.clone()).is_empty());
-    // The end of the window is the caller's, not the clock's.
-    d.set_now_for_tests("2026-10-05T10:05");
-    assert!(d
-        .due_notifications(settings, "2026-10-05T10:00:00", "2026-10-05T10:00:59")
-        .unwrap()
-        .is_empty());
+    // What an older version of the app left behind: derived tables of another shape.
+    {
+        let conn = rusqlite::Connection::open(dir.path().join("notes.sqlite")).unwrap();
+        conn.execute_batch(
+            "DROP TABLE notes; CREATE TABLE notes (id TEXT PRIMARY KEY, title TEXT);
+             UPDATE meta SET value = '0' WHERE key = 'derived_version';",
+        )
+        .unwrap();
+    }
+    let store = Store::open(path).unwrap();
+    let got = store.get_note(note).unwrap();
+    assert_eq!(got.title, "переживёт");
+    assert_eq!(got.tags, ["тег"]);
+    assert_eq!(got.folder_id.as_deref(), Some(folder.as_str()));
 }

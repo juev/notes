@@ -75,24 +75,21 @@ fn two_devices_converge_through_webdav() {
     let down = b.sync_now().unwrap();
     assert!(down.pulled > 0);
     assert_eq!(b.sync_attachments().unwrap().downloaded, 1);
-    assert_eq!(view(&b, Scope::Inbox), ["через WebDAV"]);
+    assert_eq!(oldest_first(&b), ["через WebDAV"]);
     let files = b.attachments(t.id.clone()).unwrap();
     assert_eq!(
         std::fs::read_to_string(files[0].local_path.as_ref().unwrap()).unwrap(),
         "вложение"
     );
 
-    b.set_due(t.id.clone(), Some("2026-10-07".into())).unwrap();
+    b.set_starred(t.id.clone(), true).unwrap();
     a.set_title(t.id.clone(), "переименовано".into()).unwrap();
     b.sync_now().unwrap();
     a.sync_now().unwrap();
     b.sync_now().unwrap();
     for d in [&a, &b] {
-        let got = d.task(t.id.clone()).unwrap();
-        assert_eq!(
-            (got.title.as_str(), got.due.as_deref()),
-            ("переименовано", Some("2026-10-07"))
-        );
+        let got = d.get_note(t.id.clone()).unwrap();
+        assert_eq!((got.title.as_str(), got.starred), ("переименовано", true));
     }
     assert_eq!(a.sync_now().unwrap(), SyncReport::default());
 }
@@ -116,7 +113,7 @@ fn compaction_works_over_webdav() {
         .count();
     assert!(logs <= 2, "old log files were deleted over HTTP, {logs} left");
     b.sync_now().unwrap();
-    assert_eq!(view(&b, Scope::Inbox).len(), 5);
+    assert_eq!(oldest_first(&b).len(), 5);
 }
 
 #[test]
@@ -241,9 +238,9 @@ fn password_is_kept_out_of_the_database_and_asked_for_again_after_restart() {
             .unwrap();
         store.set_sync_password(Some("secret".into()));
         store
-            .create_task(NewTask {
+            .create_note(NewNote {
                 title: "задача".into(),
-                ..NewTask::default()
+                ..NewNote::default()
             })
             .unwrap();
         assert!(store.sync_now().unwrap().pushed > 0);
@@ -314,7 +311,7 @@ fn s17_device_left_behind_by_compaction_catches_up_without_listing_snapshots() {
         "{seen:?}"
     );
     assert!(!seen.contains(&SNAP.to_string()), "{seen:?}");
-    assert_eq!(view(&b, Scope::Inbox).len(), 3);
+    assert_eq!(oldest_first(&b).len(), 3);
 }
 
 #[test]
@@ -334,7 +331,7 @@ fn s17_snapshot_written_without_a_mark_is_found_by_listing() {
         b.sync_now().unwrap();
     });
     assert!(seen.contains(&SNAP.to_string()), "{seen:?}");
-    assert_eq!(view(&b, Scope::Inbox).len(), 2);
+    assert_eq!(oldest_first(&b).len(), 2);
 }
 
 /// A WebDAV server that, like one written in Go, refuses a PUT into a missing
@@ -420,7 +417,7 @@ impl EarlyRefusal {
 const BLOB: usize = 1_089_495;
 
 #[test]
-fn s43_put_creates_the_missing_folder_when_the_server_refuses_without_reading_the_body() {
+fn s18_put_creates_the_missing_folder_when_the_server_refuses_without_reading_the_body() {
     use notes_core::sync::remote::Remote;
     let server = early_refusal(&["/dav/", "/dav/blobs/"], false);
     server.remote().put("blobs/c2/blob", &vec![7; BLOB]).unwrap();
@@ -438,7 +435,7 @@ fn s43_put_creates_the_missing_folder_when_the_server_refuses_without_reading_th
 }
 
 #[test]
-fn s43_a_broken_connection_into_an_existing_folder_stays_an_error() {
+fn s18_a_broken_connection_into_an_existing_folder_stays_an_error() {
     use notes_core::sync::remote::Remote;
     let server = early_refusal(&["/dav/", "/dav/blobs/", "/dav/blobs/c2/"], true);
     let error = server.remote().put("blobs/c2/blob", &vec![7; BLOB]).unwrap_err();
@@ -447,7 +444,7 @@ fn s43_a_broken_connection_into_an_existing_folder_stays_an_error() {
 }
 
 #[test]
-fn s43_put_creates_the_missing_folder_after_a_409_without_asking_for_it() {
+fn s18_put_creates_the_missing_folder_after_a_409_without_asking_for_it() {
     use notes_core::sync::remote::Remote;
     let dav = start();
     let remote = notes_core::sync::webdav::WebDavRemote::new(&dav.url, "user", "secret").unwrap();
@@ -467,7 +464,7 @@ fn s43_put_creates_the_missing_folder_after_a_409_without_asking_for_it() {
 /// S54–S56 over HTTP: the storage is encrypted from the settings, the other
 /// device enters the passphrase, and nothing on the server reads in the clear.
 #[test]
-fn s54_two_devices_converge_through_an_encrypted_webdav_storage() {
+fn s28_s30_two_devices_converge_through_an_encrypted_webdav_storage() {
     let dav = start();
     let (a, b) = (device(), device());
     connect(&a, &dav, "secret");
@@ -494,7 +491,7 @@ fn s54_two_devices_converge_through_an_encrypted_webdav_storage() {
     let u = add(&b, "ответ с B");
     b.sync_now().unwrap();
     a.sync_now().unwrap();
-    assert_eq!(a.task(u.id.clone()).unwrap().title, "ответ с B");
+    assert_eq!(a.get_note(u.id.clone()).unwrap().title, "ответ с B");
 
     let mut stack = vec![dav.storage()];
     let mut seen = 0;

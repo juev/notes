@@ -60,7 +60,7 @@ fn nudges_follow_uploads(a: &Device, b: &Device, inbox: &Inbox) {
     inbox.take();
 
     // S19: an upload nudges the others, not the sender.
-    let task = add(a, "от A");
+    let note = add(a, "от A");
     a.sync_now().unwrap();
     assert_eq!(inbox.take(), ["POST /b sync"]);
 
@@ -68,27 +68,27 @@ fn nudges_follow_uploads(a: &Device, b: &Device, inbox: &Inbox) {
     b.sync_now().unwrap();
     a.sync_now().unwrap();
     b.sync_now().unwrap();
-    assert_eq!(view(b, Scope::Inbox), ["от A"]);
+    assert_eq!(oldest_first(b), ["от A"]);
     assert_eq!(inbox.take(), Vec::<String>::new());
 
     // S18: a device that stops listening is no longer nudged.
     b.set_push_endpoint(None).unwrap();
     b.sync_now().unwrap();
-    a.set_title(task.id.clone(), "от A, изменено".into()).unwrap();
+    a.set_title(note.id.clone(), "от A, изменено".into()).unwrap();
     a.sync_now().unwrap();
     assert_eq!(inbox.take(), Vec::<String>::new());
 
     // S20: an address nobody listens at does not get in the way.
     b.set_push_endpoint(Some("http://127.0.0.1:9/nobody".into())).unwrap();
     b.sync_now().unwrap();
-    a.set_title(task.id.clone(), "от A, ещё раз".into()).unwrap();
+    a.set_title(note.id.clone(), "от A, ещё раз".into()).unwrap();
     assert!(a.sync_now().unwrap().pushed > 0);
     b.sync_now().unwrap();
-    assert_eq!(b.task(task.id).unwrap().title, "от A, ещё раз");
+    assert_eq!(b.get_note(note.id).unwrap().title, "от A, ещё раз");
 }
 
 #[test]
-fn s18_s21_through_a_folder() {
+fn s41_through_a_folder() {
     let storage = tempfile::tempdir().unwrap();
     let inbox = Inbox::start();
     let (a, b) = (device(), device());
@@ -98,7 +98,7 @@ fn s18_s21_through_a_folder() {
 }
 
 #[test]
-fn s34_uploaded_content_nudges_the_others_once_more() {
+fn s24_uploaded_content_nudges_the_others_once_more() {
     let storage = tempfile::tempdir().unwrap();
     let inbox = Inbox::start();
     let (a, b) = (device(), device());
@@ -111,11 +111,11 @@ fn s34_uploaded_content_nudges_the_others_once_more() {
     a.sync_now().unwrap();
     inbox.take();
 
-    let task = add(&a, "с файлом");
+    let note = add(&a, "с файлом");
     let src = tempfile::tempdir().unwrap();
     let file = src.path().join("a.txt");
     std::fs::write(&file, b"content").unwrap();
-    a.add_attachment(task.id, file.to_string_lossy().into_owned(), None)
+    a.add_attachment(note.id, file.to_string_lossy().into_owned(), None)
         .unwrap();
     a.sync_now().unwrap();
     assert_eq!(inbox.take(), ["POST /b sync"]);
@@ -130,7 +130,7 @@ fn s34_uploaded_content_nudges_the_others_once_more() {
 }
 
 #[test]
-fn s18_record_in_the_storage_follows_the_address() {
+fn s41_record_in_the_storage_follows_the_address() {
     let storage = tempfile::tempdir().unwrap();
     let a = device();
     a.set_sync_config(folder(&storage)).unwrap();
@@ -324,7 +324,7 @@ fn waiting(d: &Device) -> std::sync::mpsc::Receiver<bool> {
 const SOON: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[test]
-fn s22_an_edit_elsewhere_wakes_the_waiting_device() {
+fn s42_an_edit_elsewhere_wakes_the_waiting_device() {
     let storage = tempfile::tempdir().unwrap();
     let ntfy = Ntfy::start();
     let (a, b) = (device(), device());
@@ -345,7 +345,7 @@ fn s22_an_edit_elsewhere_wakes_the_waiting_device() {
     a.sync_now().unwrap();
     assert!(woken.recv_timeout(SOON).unwrap(), "the nudge arrives at once");
     b.sync_now().unwrap();
-    assert_eq!(view(&b, Scope::Inbox), ["от A"]);
+    assert_eq!(oldest_first(&b), ["от A"]);
 
     // The topic is chosen once: turning the setting off and on keeps the address.
     b.set_push_server(None).unwrap();
@@ -355,7 +355,7 @@ fn s22_an_edit_elsewhere_wakes_the_waiting_device() {
 }
 
 #[test]
-fn s23_a_broken_subscription_counts_as_a_nudge_and_a_missing_server_as_none() {
+fn s43_a_broken_subscription_counts_as_a_nudge_and_a_missing_server_as_none() {
     let ntfy = Ntfy::start();
     let b = device();
     b.set_push_retry_for_tests(50);
@@ -392,7 +392,7 @@ fn path_of(address: Option<String>) -> String {
 }
 
 #[test]
-fn s27_a_token_opens_a_server_that_requires_sign_in() {
+fn s45_a_token_opens_a_server_that_requires_sign_in() {
     let storage = tempfile::tempdir().unwrap();
     let ntfy = Ntfy::start();
     ntfy.require(TOKEN);
@@ -436,7 +436,7 @@ fn s27_a_token_opens_a_server_that_requires_sign_in() {
 }
 
 #[test]
-fn s28_the_token_goes_to_the_own_server_only() {
+fn s45_the_token_goes_to_the_own_server_only() {
     let storage = tempfile::tempdir().unwrap();
     let (home, other) = (Ntfy::start(), Ntfy::start());
     let (a, b, c) = (device(), device(), device());
@@ -489,7 +489,7 @@ fn s28_the_token_goes_to_the_own_server_only() {
 }
 
 #[test]
-fn s30_a_refusal_is_reported_until_the_server_lets_the_device_in() {
+fn s45_a_refusal_is_reported_until_the_server_lets_the_device_in() {
     let ntfy = Ntfy::start();
     ntfy.require(TOKEN);
     let b = device();
@@ -519,7 +519,7 @@ fn s30_a_refusal_is_reported_until_the_server_lets_the_device_in() {
 }
 
 #[test]
-fn s29_a_device_that_only_sends_names_its_server() {
+fn s43_a_device_that_only_sends_names_its_server() {
     let storage = tempfile::tempdir().unwrap();
     let ntfy = Ntfy::start();
     ntfy.require(TOKEN);
@@ -583,7 +583,7 @@ fn slow_inbox() -> (String, Arc<Mutex<Vec<std::time::Instant>>>) {
 }
 
 #[test]
-fn s19_nudges_leave_together_and_the_run_does_not_wait_for_them() {
+fn s41_nudges_leave_together_and_the_run_does_not_wait_for_them() {
     let storage = tempfile::tempdir().unwrap();
     let (base, came) = slow_inbox();
     let (a, b, c) = (device(), device(), device());
@@ -646,7 +646,7 @@ fn sharers(ntfy: &Ntfy, config: impl Fn(&Device)) -> (Device, Device, String, St
 }
 
 #[test]
-fn s41_devices_on_one_server_come_to_one_topic() {
+fn s43_devices_on_one_server_come_to_one_topic() {
     let storage = tempfile::tempdir().unwrap();
     let ntfy = Ntfy::start();
     let (a, b, first, second) = sharers(&ntfy, |d| d.set_sync_config(folder(&storage)).unwrap());
@@ -674,7 +674,7 @@ fn s41_devices_on_one_server_come_to_one_topic() {
 }
 
 #[test]
-fn s41_an_address_of_another_kind_keeps_to_itself() {
+fn s43_an_address_of_another_kind_keeps_to_itself() {
     let storage = tempfile::tempdir().unwrap();
     let ntfy = Ntfy::start();
     let (a, b, first, second) = sharers(&ntfy, |d| d.set_sync_config(folder(&storage)).unwrap());
@@ -712,7 +712,7 @@ fn s41_an_address_of_another_kind_keeps_to_itself() {
 }
 
 #[test]
-fn s41_a_device_on_another_server_keeps_its_topic() {
+fn s43_a_device_on_another_server_keeps_its_topic() {
     let storage = tempfile::tempdir().unwrap();
     let (here, there) = (Ntfy::start(), Ntfy::start());
     let (a, b) = (device(), device());

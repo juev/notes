@@ -64,6 +64,11 @@ fn parse(stamp: &str) -> Option<(u64, u32)> {
     Some((ms, counter))
 }
 
+/// The milliseconds a stamp was issued at; zero for a string that is not a stamp.
+pub fn stamp_ms(stamp: &str) -> u64 {
+    parse(stamp).map_or(0, |(ms, _)| ms)
+}
+
 /// A stamp is accepted from the network only in its canonical form; anything
 /// else would break string comparison.
 pub fn is_valid(stamp: &str) -> bool {

@@ -8,7 +8,7 @@ pub enum AppError {
     Storage { msg: String },
     #[error("sync: {msg}")]
     Sync { msg: String },
-    /// R140: the content is above what this device takes, or all attachments of the task are.
+    /// R36: the content is above what this device takes, or all attachments of the note are.
     #[error("too large: {msg}")]
     TooLarge { msg: String },
 }

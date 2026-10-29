@@ -23,11 +23,11 @@ fn sync_files(d: &Device, storage: &TempDir) -> AttachmentReport {
     d.sync_attachments_with(&DirRemote::new(storage.path())).unwrap()
 }
 
-fn attach(d: &Device, task: &TaskItem, name: &str, content: &[u8]) -> Attachment {
+fn attach(d: &Device, note: &Note, name: &str, content: &[u8]) -> Attachment {
     let src = tempfile::tempdir().unwrap();
     let file = src.path().join(name);
     std::fs::write(&file, content).unwrap();
-    d.add_attachment(task.id.clone(), file.to_string_lossy().into_owned(), None)
+    d.add_attachment(note.id.clone(), file.to_string_lossy().into_owned(), None)
         .unwrap()
 }
 
@@ -104,68 +104,22 @@ fn files(storage: &TempDir, dir: &str) -> Vec<String> {
     names
 }
 
-/// Everything a user can see, in a form two devices can compare.
-fn dump(d: &Device) -> Vec<String> {
-    fn walk(d: &Device, tasks: Vec<TaskItem>, depth: usize, out: &mut Vec<String>) {
-        for t in tasks {
-            out.push(format!(
-                "{}{} | {} | due={:?} start={:?} prio={:?} done={} tags={:?} repeat={} notes={:?} files={}",
-                "  ".repeat(depth),
-                t.id,
-                t.title,
-                t.due,
-                t.start,
-                t.priority,
-                t.done.is_some(),
-                t.tags,
-                t.repeat.is_some(),
-                t.notes,
-                t.attachments
-            ));
-            walk(d, d.subtasks(t.id).unwrap(), depth + 1, out);
-        }
-    }
-    let mut out = Vec::new();
-    for list in d.lists().unwrap() {
-        out.push(format!(
-            "# {} | {} | {} | {:?} | {}",
-            list.id, list.name, list.color, list.sort, list.archived
-        ));
-        walk(d, d.tasks(Scope::List { id: list.id }).unwrap(), 1, &mut out);
-    }
-    out.push("# trash".into());
-    out.extend(
-        d.tasks(Scope::Trash)
-            .unwrap()
-            .into_iter()
-            .map(|t| format!("  {} | {}", t.id, t.title)),
-    );
-    out.push("# completed".into());
-    out.extend(
-        d.tasks(Scope::Completed)
-            .unwrap()
-            .into_iter()
-            .map(|t| format!("  {} | {} | log={}", t.id, t.title, t.is_log)),
-    );
-    out
-}
-
 #[test]
 fn s2_edits_of_different_fields_are_both_kept() {
     let storage = tempfile::tempdir().unwrap();
     let (a, b) = (device(), device());
     let t = add(&a, "исходное");
     settle(&a, &b, &storage);
-    assert_eq!(b.task(t.id.clone()).unwrap().title, "исходное");
+    assert_eq!(b.get_note(t.id.clone()).unwrap().title, "исходное");
 
     a.set_title(t.id.clone(), "новое название".into()).unwrap();
-    b.set_due(t.id.clone(), Some("2026-10-09".into())).unwrap();
+    b.set_starred(t.id.clone(), true).unwrap();
     settle(&a, &b, &storage);
 
     for d in [&a, &b] {
-        let got = d.task(t.id.clone()).unwrap();
+        let got = d.get_note(t.id.clone()).unwrap();
         assert_eq!(got.title, "новое название");
-        assert_eq!(got.due.as_deref(), Some("2026-10-09"));
+        assert!(got.starred);
     }
 }
 
@@ -184,8 +138,8 @@ fn s2_same_field_later_write_wins_and_resync_is_a_no_op() {
     sync(&a, &storage);
     sync(&b, &storage);
 
-    assert_eq!(a.task(t.id.clone()).unwrap().title, "от B, позже");
-    assert_eq!(b.task(t.id).unwrap().title, "от B, позже");
+    assert_eq!(a.get_note(t.id.clone()).unwrap().title, "от B, позже");
+    assert_eq!(b.get_note(t.id).unwrap().title, "от B, позже");
     assert_eq!(sync(&a, &storage), SyncReport::default());
     assert_eq!(sync(&b, &storage), SyncReport::default());
 }
@@ -201,354 +155,11 @@ fn s1_edit_made_after_seeing_a_future_stamp_still_wins() {
 
     a.set_title(t.id.clone(), "исправлено на A".into()).unwrap();
     settle(&a, &b, &storage);
-    assert_eq!(b.task(t.id).unwrap().title, "исправлено на A");
+    assert_eq!(b.get_note(t.id).unwrap().title, "исправлено на A");
 }
 
 #[test]
-fn s3_delete_and_concurrent_edit() {
-    let storage = tempfile::tempdir().unwrap();
-    let (a, b) = (device(), device());
-    let t = add(&a, "задача");
-    settle(&a, &b, &storage);
-
-    a.delete_task(t.id.clone()).unwrap();
-    b.set_notes(t.id.clone(), "заметка от B".into()).unwrap();
-    settle(&a, &b, &storage);
-    for d in [&a, &b] {
-        assert!(view(d, Scope::Inbox).is_empty());
-        assert_eq!(view(d, Scope::Trash), ["задача"]);
-    }
-
-    a.restore_task(t.id.clone()).unwrap();
-    settle(&a, &b, &storage);
-    assert_eq!(b.task(t.id).unwrap().notes, "заметка от B");
-    assert_eq!(view(&b, Scope::Inbox), ["задача"]);
-}
-
-#[test]
-fn s4_concurrent_inserts_end_up_in_the_same_order() {
-    let storage = tempfile::tempdir().unwrap();
-    let (a, b) = (device(), device());
-    add(&a, "первая");
-    settle(&a, &b, &storage);
-    // Both append "at the end": the keys collide and the id breaks the tie.
-    add(&a, "от A");
-    add(&b, "от B");
-    settle(&a, &b, &storage);
-    assert_eq!(view(&a, Scope::Inbox).len(), 3);
-    assert_eq!(view(&a, Scope::Inbox), view(&b, Scope::Inbox));
-}
-
-#[test]
-fn s5_concurrent_moves_into_each_other_do_not_leave_a_cycle() {
-    let storage = tempfile::tempdir().unwrap();
-    let (a, b) = (device(), device());
-    let x = add(&a, "X");
-    let y = add(&a, "Y");
-    settle(&a, &b, &storage);
-
-    // R10: the apps no longer put a task under another one, so the two moves come from devices of an
-    // earlier version. The one of the second device is the later.
-    let later = 0x7fff_ffff_0000_u64;
-    for (device, ms, id, parent) in [
-        ("cccccccccccc", later, &x.id, &y.id),
-        ("dddddddddddd", later + 1, &y.id, &x.id),
-    ] {
-        let lines = [
-            serde_json::json!({"v": 1, "device": device, "seq": 1, "count": 1}).to_string(),
-            serde_json::json!({"k": "task", "i": id, "f": "parent", "v": parent, "t": format!("{ms:012x}-0000-{device}")})
-                .to_string(),
-        ];
-        std::fs::write(
-            storage.path().join(format!("{ROOT}/log/{device}-0000000001.jsonl")),
-            lines.join("\n") + "\n",
-        )
-        .unwrap();
-    }
-    settle(&a, &b, &storage);
-
-    // The later move is the one undone: Y stays on top, X under it.
-    for d in [&a, &b] {
-        assert_eq!(view(d, Scope::Inbox), ["Y"]);
-        assert_eq!(titles(&d.subtasks(y.id.clone()).unwrap()), ["X"]);
-        assert!(d.subtasks(x.id.clone()).unwrap().is_empty());
-    }
-    assert_eq!(dump(&a), dump(&b));
-}
-
-#[test]
-fn s42_what_an_earlier_version_sends_is_brought_to_the_rule_of_subtasks() {
-    let storage = tempfile::tempdir().unwrap();
-    let (a, b) = (device(), device());
-    let top = add(&a, "а");
-    let sub = add_sub(&a, &top, "б");
-    settle(&a, &b, &storage);
-
-    // A device of an earlier version: a due date and a tag on the subtask, and a subtask under it.
-    let later = 0x7fff_ffff_0000_u64;
-    let line = |n: u32, id: &str, field: &str, value: serde_json::Value| {
-        serde_json::json!({"k": "task", "i": id, "f": field, "v": value, "t": format!("{later:012x}-{n:04x}-cccccccccccc")})
-            .to_string()
-    };
-    let lines = [
-        serde_json::json!({"v": 1, "device": "cccccccccccc", "seq": 1, "count": 6}).to_string(),
-        line(0, &sub.id, "due", "2026-10-05".into()),
-        line(1, &sub.id, "tag:дом", true.into()),
-        line(2, "deep", "title", "в".into()),
-        line(3, "deep", "list", INBOX_ID.into()),
-        line(4, "deep", "parent", sub.id.clone().into()),
-        line(5, "deep", "pos", "m".into()),
-    ];
-    std::fs::write(
-        storage.path().join(ROOT).join("log/cccccccccccc-0000000001.jsonl"),
-        lines.join("\n") + "\n",
-    )
-    .unwrap();
-
-    settle(&a, &b, &storage);
-    for d in [&a, &b] {
-        assert_eq!(titles(&d.subtasks(top.id.clone()).unwrap()), ["б", "в"]);
-        let got = d.task(sub.id.clone()).unwrap();
-        assert_eq!((got.due, got.tags.len()), (None, 0));
-        assert!(view(d, Scope::Today).is_empty());
-    }
-    assert_eq!(dump(&a), dump(&b));
-}
-
-#[test]
-fn s42_a_task_of_a_project_read_before_the_mark_of_its_project_keeps_its_fields() {
-    let storage = tempfile::tempdir().unwrap();
-    // Three devices wrote in turn: the task, then its mark of a project, then a task of the project
-    // with a due date. Their files are read in the order of the names, the task of the project first.
-    let file = |device: &str, changes: &[(&str, &str, serde_json::Value)], whole: bool| {
-        let mut lines =
-            vec![serde_json::json!({"v": 1, "device": device, "seq": 1, "count": changes.len()}).to_string()];
-        for (n, (id, field, value)) in changes.iter().enumerate() {
-            let stamp = format!("{:012x}-{n:04x}-{device}", 0x0100_0000_0000_u64);
-            lines.push(serde_json::json!({"k": "task", "i": id, "f": field, "v": value, "t": stamp}).to_string());
-        }
-        let text = lines.join("\n") + if whole { "\n" } else { "" };
-        std::fs::write(
-            storage.path().join(format!("{ROOT}/log/{device}-0000000001.jsonl")),
-            text,
-        )
-        .unwrap();
-    };
-    let seed = device();
-    seed.set_sync_config(folder(&storage)).unwrap();
-    sync(&seed, &storage);
-    file(
-        "aaaaaaaaaaaa",
-        &[
-            ("t", "title", "т".into()),
-            ("t", "list", INBOX_ID.into()),
-            ("t", "pos", "m".into()),
-            ("t", "parent", "p".into()),
-            ("t", "due", "2026-10-05".into()),
-            ("t", "notes", "заметка".into()),
-        ],
-        true,
-    );
-    file(
-        "bbbbbbbbbbbb",
-        &[
-            ("p", "title", "п".into()),
-            ("p", "list", INBOX_ID.into()),
-            ("p", "pos", "m".into()),
-        ],
-        true,
-    );
-    // The file with the mark is cut short at first: the run cannot tell what it holds.
-    file("cccccccccccc", &[("p", "project", true.into())], false);
-
-    let d = device();
-    d.set_sync_config(folder(&storage)).unwrap();
-    sync(&d, &storage);
-    let got = d.task("t".into()).unwrap();
-    assert_eq!(
-        (got.due.as_deref(), got.notes.as_str()),
-        (Some("2026-10-05"), "заметка"),
-        "nothing is removed halfway"
-    );
-
-    file("cccccccccccc", &[("p", "project", true.into())], true);
-    sync(&d, &storage);
-    let got = d.task("t".into()).unwrap();
-    assert_eq!(
-        (got.due.as_deref(), got.notes.as_str()),
-        (Some("2026-10-05"), "заметка")
-    );
-    assert!(d.task("p".into()).unwrap().is_project);
-
-    // A device that reads the three whole files in one run keeps the fields as well.
-    let fresh = device();
-    fresh.set_sync_config(folder(&storage)).unwrap();
-    sync(&fresh, &storage);
-    assert_eq!(fresh.task("t".into()).unwrap().due.as_deref(), Some("2026-10-05"));
-    assert_eq!(view(&fresh, Scope::Today), ["т"]);
-}
-
-#[test]
-fn s6_task_added_to_a_list_deleted_elsewhere_lands_in_the_inbox() {
-    let storage = tempfile::tempdir().unwrap();
-    let (a, b) = (device(), device());
-    let list = a.create_list("Временный".into()).unwrap();
-    settle(&a, &b, &storage);
-
-    a.delete_list(list.id.clone()).unwrap();
-    b.create_task(NewTask {
-        title: "поздняя".into(),
-        list_id: Some(list.id),
-        ..NewTask::default()
-    })
-    .unwrap();
-    settle(&a, &b, &storage);
-    for d in [&a, &b] {
-        assert_eq!(view(d, Scope::Inbox), ["поздняя"]);
-        assert_eq!(d.lists().unwrap().len(), 1);
-    }
-}
-
-#[test]
-fn s7_same_occurrence_completed_on_two_devices_is_recorded_once() {
-    let storage = tempfile::tempdir().unwrap();
-    let (a, b) = (device(), device());
-    let t = add(&a, "зарядка");
-    a.set_due(t.id.clone(), Some("2026-10-05".into())).unwrap();
-    a.set_repeat(
-        t.id.clone(),
-        Some(Repeat {
-            freq: Freq::Daily,
-            interval: 1,
-            weekdays: vec![],
-            monthday: None,
-            nth: None,
-            nth_weekday: None,
-            from_done: false,
-            count: None,
-            until: None,
-        }),
-    )
-    .unwrap();
-    settle(&a, &b, &storage);
-
-    a.complete_task(t.id.clone()).unwrap();
-    b.set_now_for_tests("2026-10-05T21:00");
-    b.complete_task(t.id.clone()).unwrap();
-    settle(&a, &b, &storage);
-
-    for d in [&a, &b] {
-        assert_eq!(view(d, Scope::Completed), ["зарядка"], "one record, not two");
-        let got = d.task(t.id.clone()).unwrap();
-        assert_eq!(got.due.as_deref(), Some("2026-10-06"), "moved forward once, not twice");
-        assert!(got.done.is_none());
-    }
-}
-
-#[test]
-fn r131_undo_leaves_a_task_changed_on_another_device_and_reaches_it() {
-    let storage = tempfile::tempdir().unwrap();
-    let (a, b) = (device(), device());
-    let tasks: Vec<TaskItem> = ["а", "б", "в"].iter().map(|t| add(&a, t)).collect();
-    a.begin_group();
-    for t in &tasks {
-        a.set_due(t.id.clone(), Some("2026-10-12".into())).unwrap();
-    }
-    a.end_group();
-    settle(&a, &b, &storage);
-    assert!(!b.can_undo(), "the history stays on its device");
-    b.set_due(tasks[1].id.clone(), Some("2026-11-01".into())).unwrap();
-    settle(&a, &b, &storage);
-
-    assert_eq!(a.undo().unwrap(), 2);
-    settle(&a, &b, &storage);
-    for d in [&a, &b] {
-        let due = |i: usize| d.task(tasks[i].id.clone()).unwrap().due;
-        assert_eq!((due(0), due(1), due(2)), (None, Some("2026-11-01".into()), None));
-    }
-}
-
-#[test]
-fn s44_undo_of_a_completed_repeat_reaches_the_other_device() {
-    let storage = tempfile::tempdir().unwrap();
-    let (a, b) = (device(), device());
-    let t = add(&a, "зарядка");
-    a.set_due(t.id.clone(), Some("2026-10-05".into())).unwrap();
-    a.set_repeat(
-        t.id.clone(),
-        Some(Repeat {
-            freq: Freq::Daily,
-            interval: 1,
-            weekdays: vec![],
-            monthday: None,
-            nth: None,
-            nth_weekday: None,
-            from_done: false,
-            count: None,
-            until: None,
-        }),
-    )
-    .unwrap();
-    let sub = a
-        .create_task(NewTask {
-            title: "разминка".into(),
-            parent_id: Some(t.id.clone()),
-            ..NewTask::default()
-        })
-        .unwrap();
-    a.complete_task(sub.id.clone()).unwrap();
-    a.complete_task(t.id.clone()).unwrap();
-    settle(&a, &b, &storage);
-    assert_eq!(view(&b, Scope::Completed), ["зарядка"]);
-
-    a.undo_close_task(t.id.clone()).unwrap();
-    settle(&a, &b, &storage);
-    for d in [&a, &b] {
-        assert_eq!(d.task(t.id.clone()).unwrap().due.as_deref(), Some("2026-10-05"));
-        assert!(
-            d.task(sub.id.clone()).unwrap().done.is_some(),
-            "the subtask is completed again"
-        );
-        assert!(view(d, Scope::Completed).is_empty());
-    }
-}
-
-#[test]
-fn s25_clearing_completed_reaches_the_other_device_and_outlives_a_reopen() {
-    let storage = tempfile::tempdir().unwrap();
-    let (a, b) = (device(), device());
-    let mut ids = Vec::new();
-    for (day, title) in [
-        ("2026-08-01", "давняя"),
-        ("2026-09-20", "сентябрьская"),
-        ("2026-10-05", "свежая"),
-    ] {
-        a.set_now_for_tests(&format!("{day}T09:00"));
-        let t = add(&a, title);
-        a.complete_task(t.id.clone()).unwrap();
-        ids.push(t.id);
-    }
-    // Past the time a completed task stays among the open ones (R68).
-    a.set_now_for_tests(NOW);
-    settle(&a, &b, &storage);
-    assert_eq!(view(&b, Scope::Completed), ["свежая", "сентябрьская", "давняя"]);
-
-    assert_eq!(a.clear_completed(Some("2026-09-05".into())).unwrap(), 1);
-    b.reopen_task(ids[0].clone()).unwrap();
-    settle(&a, &b, &storage);
-    for d in [&a, &b] {
-        assert_eq!(view(d, Scope::Completed), ["свежая", "сентябрьская"]);
-        assert!(
-            view(d, Scope::Inbox).is_empty(),
-            "a reopen made without knowing does not bring it back"
-        );
-        assert!(view(d, Scope::Trash).is_empty());
-    }
-    assert_eq!(dump(&a), dump(&b));
-}
-
-#[test]
-fn s8_truncated_log_file_is_retried_not_skipped() {
+fn s13_truncated_log_file_is_retried_not_skipped() {
     let storage = tempfile::tempdir().unwrap();
     let (a, b) = (device(), device());
     add(&a, "первая");
@@ -562,17 +173,17 @@ fn s8_truncated_log_file_is_retried_not_skipped() {
 
     assert_eq!(sync(&b, &storage).pulled, 0);
     assert!(
-        view(&b, Scope::Inbox).is_empty(),
+        oldest_first(&b).is_empty(),
         "nothing from a half-written file is applied"
     );
 
     std::fs::write(&path, &whole).unwrap();
     assert!(sync(&b, &storage).pulled > 0);
-    assert_eq!(view(&b, Scope::Inbox), ["первая", "вторая"]);
+    assert_eq!(oldest_first(&b), ["первая", "вторая"]);
 }
 
 #[test]
-fn s9_upload_interrupted_before_confirmation_is_repeated_identically() {
+fn s14_upload_interrupted_before_confirmation_is_repeated_identically() {
     let storage = tempfile::tempdir().unwrap();
     let (a, b) = (device(), device());
     add(&a, "задача");
@@ -586,11 +197,11 @@ fn s9_upload_interrupted_before_confirmation_is_repeated_identically() {
     assert_eq!(files(&storage, "log"), [name]);
     assert_eq!(std::fs::read(&path).unwrap(), first);
     sync(&b, &storage);
-    assert_eq!(view(&b, Scope::Inbox), ["задача"]);
+    assert_eq!(oldest_first(&b), ["задача"]);
 }
 
 #[test]
-fn s10_s11_compaction_keeps_late_and_new_devices_complete() {
+fn s15_compaction_keeps_late_and_new_devices_complete() {
     let storage = tempfile::tempdir().unwrap();
     let (a, b, c) = (device(), device(), device());
     a.set_compact_after_for_tests(3);
@@ -598,7 +209,7 @@ fn s10_s11_compaction_keeps_late_and_new_devices_complete() {
     add(&a, "t1");
     sync(&a, &storage);
     sync(&b, &storage); // B has read A's first file and then falls behind.
-    assert_eq!(view(&b, Scope::Inbox), ["t1"]);
+    assert_eq!(oldest_first(&b), ["t1"]);
     let from_b = add(&b, "от B");
     sync(&b, &storage);
 
@@ -621,7 +232,7 @@ fn s10_s11_compaction_keeps_late_and_new_devices_complete() {
     sync(&b, &storage);
     sync(&c, &storage);
     for d in [&b, &c] {
-        let mut got = view(d, Scope::Inbox);
+        let mut got = oldest_first(d);
         got.sort();
         assert_eq!(got, ["t1", "t2", "t3", "t4", "t5", "t6", "от B"]);
     }
@@ -630,12 +241,12 @@ fn s10_s11_compaction_keeps_late_and_new_devices_complete() {
     sync(&b, &storage);
     sync(&c, &storage);
     sync(&a, &storage);
-    assert_eq!(c.task(from_b.id.clone()).unwrap().title, "от B, изменено");
-    assert_eq!(a.task(from_b.id).unwrap().title, "от B, изменено");
+    assert_eq!(c.get_note(from_b.id.clone()).unwrap().title, "от B, изменено");
+    assert_eq!(a.get_note(from_b.id).unwrap().title, "от B, изменено");
 }
 
 #[test]
-fn s11_device_whose_logs_are_all_compacted_is_still_readable() {
+fn s15_device_whose_logs_are_all_compacted_is_still_readable() {
     let storage = tempfile::tempdir().unwrap();
     let (a, c) = (device(), device());
     a.set_compact_after_for_tests(0);
@@ -646,7 +257,7 @@ fn s11_device_whose_logs_are_all_compacted_is_still_readable() {
     assert!(matches!(&left[..], [mark] if mark.ends_with(".snap")), "{left:?}");
 
     sync(&c, &storage);
-    assert_eq!(view(&c, Scope::Inbox), ["единственная"]);
+    assert_eq!(oldest_first(&c), ["единственная"]);
 }
 
 /// Files of one device in a folder of the storage, with their sizes in bytes.
@@ -677,66 +288,7 @@ fn noise(len: usize, seed: u64) -> String {
 }
 
 #[test]
-fn s45_a_snapshot_follows_the_weight_of_the_log() {
-    let storage = tempfile::tempdir().unwrap();
-    let (a, b) = (device(), device());
-    let me = a.device_id();
-    let log = || {
-        own_files(&storage, "log", &me, ".jsonl")
-            .iter()
-            .map(|(_, n)| n)
-            .sum::<u64>()
-    };
-    let snaps = || own_files(&storage, "snap", &me, ".jsonl");
-    let task = add(&a, "задача");
-    sync(&a, &storage);
-
-    // Before its first snapshot the device takes one to weigh 16 KB.
-    let big = 8000; // bytes of notes in one edit
-    let mut runs = 0;
-    while snaps().is_empty() {
-        let before = log();
-        assert!(before <= 16 * 1024, "the log grew to {before} bytes without a snapshot");
-        runs += 1;
-        a.set_notes(task.id.clone(), noise(big, runs)).unwrap();
-        sync(&a, &storage);
-        if !snaps().is_empty() {
-            assert!(
-                before + big as u64 > 16 * 1024,
-                "a snapshot came at {before} bytes of log"
-            );
-        }
-    }
-    assert!(runs > 1);
-    let [(first, weight)] = &snaps()[..] else {
-        panic!("{:?}", snaps())
-    };
-
-    // Small edits do not make a new one while the log since the snapshot is lighter than it.
-    for i in 0..5 {
-        a.set_title(task.id.clone(), format!("задача {i}")).unwrap();
-        sync(&a, &storage);
-    }
-    assert!(log() < *weight, "{} bytes of log against a snapshot of {weight}", log());
-    assert_eq!(own_files(&storage, "log", &me, ".jsonl").len(), 5);
-    assert_eq!(&snaps()[0].0, first);
-
-    // One upload heavier than the snapshot makes one in the same run.
-    a.set_notes(task.id.clone(), "ж".repeat(*weight as usize)).unwrap();
-    sync(&a, &storage);
-    assert_ne!(&snaps()[0].0, first);
-    assert!(own_files(&storage, "log", &me, ".jsonl").is_empty());
-
-    sync(&b, &storage);
-    let got = b.task(task.id).unwrap();
-    assert_eq!(
-        (got.title.as_str(), got.notes.len()),
-        ("задача 4", "ж".len() * *weight as usize)
-    );
-}
-
-#[test]
-fn s50_a_compressed_snapshot_carries_the_time_it_was_written() {
+fn s15_a_compressed_snapshot_carries_the_time_it_was_written() {
     let storage = tempfile::tempdir().unwrap();
     let b = device();
     b.set_compact_after_for_tests(0);
@@ -765,7 +317,7 @@ fn s50_a_compressed_snapshot_carries_the_time_it_was_written() {
 }
 
 #[test]
-fn s12_joining_a_used_storage_merges_instead_of_replacing() {
+fn s16_joining_a_used_storage_merges_instead_of_replacing() {
     let storage = tempfile::tempdir().unwrap();
     let (a, c) = (device(), device());
     add(&a, "с A");
@@ -773,14 +325,14 @@ fn s12_joining_a_used_storage_merges_instead_of_replacing() {
     add(&c, "с C");
     settle(&c, &a, &storage);
     for d in [&a, &c] {
-        let mut got = view(d, Scope::Inbox);
+        let mut got = oldest_first(d);
         got.sort();
         assert_eq!(got, ["с A", "с C"]);
     }
 }
 
 #[test]
-fn s13_attachment_content_follows_the_record() {
+fn s23_attachment_content_follows_the_record() {
     let storage = tempfile::tempdir().unwrap();
     let (a, b) = (device(), device());
     let t = add(&a, "с фото");
@@ -816,7 +368,7 @@ fn s13_attachment_content_follows_the_record() {
 }
 
 #[test]
-fn s13_corrupted_attachment_content_is_not_stored() {
+fn s23_corrupted_attachment_content_is_not_stored() {
     let storage = tempfile::tempdir().unwrap();
     let (a, b) = (device(), device());
     let t = add(&a, "с файлом");
@@ -843,7 +395,7 @@ fn s13_corrupted_attachment_content_is_not_stored() {
 }
 
 #[test]
-fn s34_the_fields_arrive_before_the_content() {
+fn s24_the_fields_arrive_before_the_content() {
     let storage = tempfile::tempdir().unwrap();
     let (a, b) = (device(), device());
     for d in [&a, &b] {
@@ -860,10 +412,10 @@ fn s34_the_fields_arrive_before_the_content() {
     assert!(!storage.path().join(ROOT).join("blobs").exists());
     let down = b.sync_now().unwrap();
     assert_eq!((down.blobs_uploaded, down.blobs_downloaded), (0, 0));
-    assert_eq!(view(&b, Scope::Inbox), ["с файлом"]);
+    assert_eq!(oldest_first(&b), ["с файлом"]);
     let got = b.attachments(t.id.clone()).unwrap();
     assert_eq!((got.len(), got[0].local_path.as_ref()), (1, None));
-    assert_eq!(b.task(t.id.clone()).unwrap().attachments, 1);
+    assert_eq!(b.get_note(t.id.clone()).unwrap().attachments, 1);
     assert_eq!(b.sync_status().unwrap().attachments_waiting, 1);
 
     // B asks before A has uploaded: nothing to take yet, and no failure.
@@ -899,7 +451,7 @@ fn s34_the_fields_arrive_before_the_content() {
 }
 
 #[test]
-fn s34_refused_content_holds_back_neither_the_task_nor_the_other_files() {
+fn s24_refused_content_holds_back_neither_the_note_nor_the_other_files() {
     let storage = tempfile::tempdir().unwrap();
     let (a, b) = (device(), device());
     let t = add(&a, "с двумя файлами");
@@ -912,7 +464,7 @@ fn s34_refused_content_holds_back_neither_the_task_nor_the_other_files() {
     assert_eq!((up.uploaded, up.waiting), (1, 1));
 
     assert!(b.sync_with(&refusing).unwrap().pulled > 0);
-    assert_eq!(view(&b, Scope::Inbox), ["с двумя файлами"]);
+    assert_eq!(oldest_first(&b), ["с двумя файлами"]);
     let down = b.sync_attachments_with(&refusing).unwrap();
     assert_eq!((down.downloaded, down.waiting), (1, 1));
     let present: Vec<String> = b
@@ -964,7 +516,7 @@ impl Remote for Held {
 }
 
 #[test]
-fn s34_s35_a_pass_under_way_holds_back_neither_the_fields_nor_a_request() {
+fn s24_s25_a_pass_under_way_holds_back_neither_the_fields_nor_a_request() {
     let storage = tempfile::tempdir().unwrap();
     let (a, b) = (device(), device());
     b.set_sync_config(folder(&storage)).unwrap();
@@ -990,7 +542,7 @@ fn s34_s35_a_pass_under_way_holds_back_neither_the_fields_nor_a_request() {
     a.set_title(t.id.clone(), "переименовано".into()).unwrap();
     sync(&a, &storage);
     assert!(sync(&b, &storage).pulled > 0);
-    assert_eq!(view(&b, Scope::Inbox), ["переименовано"]);
+    assert_eq!(oldest_first(&b), ["переименовано"]);
     // A second pass does not queue behind the first.
     let second = sync_files(&b, &storage);
     assert_eq!((second.downloaded, second.waiting), (0, 2));
@@ -1007,7 +559,7 @@ fn s34_s35_a_pass_under_way_holds_back_neither_the_fields_nor_a_request() {
 }
 
 #[test]
-fn s34_content_that_cannot_move_does_not_fail_configured_sync() {
+fn s24_content_that_cannot_move_does_not_fail_configured_sync() {
     let storage = tempfile::tempdir().unwrap();
     let a = device();
     a.set_sync_config(folder(&storage)).unwrap();
@@ -1027,7 +579,7 @@ fn s34_content_that_cannot_move_does_not_fail_configured_sync() {
 }
 
 #[test]
-fn s34_attachments_of_deleted_tasks_and_removed_attachments_do_not_wait() {
+fn s24_attachments_of_purged_notes_and_removed_attachments_do_not_wait() {
     let storage = tempfile::tempdir().unwrap();
     let a = device();
     a.set_sync_config(folder(&storage)).unwrap();
@@ -1046,7 +598,7 @@ fn s34_attachments_of_deleted_tasks_and_removed_attachments_do_not_wait() {
 }
 
 #[test]
-fn s35_one_attachment_is_fetched_on_request() {
+fn s25_one_attachment_is_fetched_on_request() {
     let storage = tempfile::tempdir().unwrap();
     let (a, b) = (device(), device());
     for d in [&a, &b] {
@@ -1081,7 +633,7 @@ fn s35_one_attachment_is_fetched_on_request() {
 }
 
 #[test]
-fn s35_content_that_does_not_match_its_hash_is_not_fetched() {
+fn s25_content_that_does_not_match_its_hash_is_not_fetched() {
     let storage = tempfile::tempdir().unwrap();
     let (a, b) = (device(), device());
     for d in [&a, &b] {
@@ -1164,7 +716,7 @@ impl Remote for Streams {
 }
 
 #[test]
-fn s52_content_goes_through_the_files_on_disk() {
+fn s25_content_goes_through_the_files_on_disk() {
     let storage = tempfile::tempdir().unwrap();
     let remote = Streams::new(&storage);
     let (a, b) = (device(), device());
@@ -1187,7 +739,7 @@ fn s52_content_goes_through_the_files_on_disk() {
 }
 
 #[test]
-fn s52_content_above_the_limit_is_not_downloaded() {
+fn s25_content_above_the_limit_is_not_downloaded() {
     let storage = tempfile::tempdir().unwrap();
     let remote = DirRemote::new(storage.path());
     let (a, b) = (device(), device());
@@ -1201,7 +753,7 @@ fn s52_content_above_the_limit_is_not_downloaded() {
 
     b.set_attachment_limits(AttachmentLimits {
         max_file: 10,
-        max_task: 1000,
+        max_note: 1000,
     })
     .unwrap();
     b.sync_with(&remote).unwrap();
@@ -1218,7 +770,7 @@ fn s52_content_above_the_limit_is_not_downloaded() {
     // With room for the file, the same content arrives on the next pass.
     b.set_attachment_limits(AttachmentLimits {
         max_file: 1000,
-        max_task: 2000,
+        max_note: 2000,
     })
     .unwrap();
     let report = b.sync_attachments_with(&remote).unwrap();
@@ -1231,7 +783,7 @@ fn s52_content_above_the_limit_is_not_downloaded() {
 }
 
 #[test]
-fn r91_content_that_has_not_arrived_is_fetched_before_everything_is_saved() {
+fn r35_content_that_has_not_arrived_is_fetched_before_everything_is_saved() {
     let storage = tempfile::tempdir().unwrap();
     let (a, b) = (device(), device());
     for d in [&a, &b] {
@@ -1290,7 +842,7 @@ fn r91_content_that_has_not_arrived_is_fetched_before_everything_is_saved() {
 }
 
 #[test]
-fn s14_newer_storage_format_stops_sync_but_not_local_work() {
+fn s17_newer_storage_format_stops_sync_but_not_local_work() {
     let storage = tempfile::tempdir().unwrap();
     let a = device();
     std::fs::create_dir_all(storage.path().join(ROOT)).unwrap();
@@ -1303,11 +855,11 @@ fn s14_newer_storage_format_stops_sync_but_not_local_work() {
     let err = a.sync_with(&DirRemote::new(storage.path())).unwrap_err();
     assert!(err.to_string().contains("format 3"), "{err}");
     add(&a, "локально");
-    assert_eq!(view(&a, Scope::Inbox), ["локально"]);
+    assert_eq!(oldest_first(&a), ["локально"]);
 }
 
 #[test]
-fn s14_format_raised_while_the_app_runs_is_noticed_at_the_first_unreadable_file() {
+fn s17_format_raised_while_the_app_runs_is_noticed_at_the_first_unreadable_file() {
     let storage = tempfile::tempdir().unwrap();
     let (a, b) = (device(), device());
     add(&a, "t1");
@@ -1327,7 +879,7 @@ fn s14_format_raised_while_the_app_runs_is_noticed_at_the_first_unreadable_file(
 }
 
 #[test]
-fn s16_configured_sync_reports_status_and_keeps_changes_after_a_failure() {
+fn s19_configured_sync_reports_status_and_keeps_changes_after_a_failure() {
     let storage = tempfile::tempdir().unwrap();
     let (a, b) = (device(), device());
     assert_eq!(
@@ -1361,11 +913,11 @@ fn s16_configured_sync_reports_status_and_keeps_changes_after_a_failure() {
 
     b.set_sync_config(good).unwrap();
     b.sync_now().unwrap();
-    assert_eq!(view(&b, Scope::Inbox), ["не потеряется"]);
+    assert_eq!(oldest_first(&b), ["не потеряется"]);
 }
 
 #[test]
-fn s15_a_file_brought_into_the_sync_folder_is_noticed_once() {
+fn s39_a_file_brought_into_the_sync_folder_is_noticed_once() {
     let storage = tempfile::tempdir().unwrap();
     let folder = SyncConfig::Folder {
         path: storage.path().to_string_lossy().into_owned(),
@@ -1396,7 +948,7 @@ fn s15_a_file_brought_into_the_sync_folder_is_noticed_once() {
 }
 
 #[test]
-fn switching_storage_publishes_the_whole_state_there() {
+fn s16_switching_storage_publishes_the_whole_state_there() {
     let (old, new) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let folder = |d: &TempDir| SyncConfig::Folder {
         path: d.path().to_string_lossy().into_owned(),
@@ -1410,12 +962,12 @@ fn switching_storage_publishes_the_whole_state_there() {
     b.sync_now().unwrap();
     a.sync_now().unwrap();
 
-    // A moves to a new storage: it must carry B's task along, not only its own writes.
+    // A moves to a new storage: it must carry B's note along, not only its own writes.
     a.set_sync_config(folder(&new)).unwrap();
     a.sync_now().unwrap();
     c.set_sync_config(folder(&new)).unwrap();
     c.sync_now().unwrap();
-    let mut got = view(&c, Scope::Inbox);
+    let mut got = oldest_first(&c);
     got.sort();
     assert_eq!(got, ["от A", "от B"]);
 
@@ -1424,77 +976,11 @@ fn switching_storage_publishes_the_whole_state_there() {
     a.set_sync_config(folder(&old)).unwrap();
     a.sync_now().unwrap();
     b.sync_now().unwrap();
-    assert!(view(&b, Scope::Inbox).contains(&"после возврата".to_string()));
-}
-
-/// Three devices make random edits and sync in random order; once everyone has
-/// synced twice with no edits in between, all three must show the same data.
-#[test]
-fn devices_converge_whatever_the_order_of_edits_and_syncs() {
-    for seed in 1..=8u64 {
-        let storage = tempfile::tempdir().unwrap();
-        let devices = [device(), device(), device()];
-        devices[1].set_compact_after_for_tests(4);
-        let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        let mut rnd = |n: usize| {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            (state % n as u64) as usize
-        };
-        let mut ids: Vec<String> = Vec::new();
-        let mut minute = 0;
-        for step in 0..160 {
-            let d = &devices[rnd(3)];
-            minute += 1;
-            d.set_now_for_tests(&format!("2026-10-05T{:02}:{:02}", 10 + minute / 60, minute % 60));
-            let known = |d: &Device, id: &String| d.task(id.clone()).is_ok();
-            let pick = if ids.is_empty() {
-                None
-            } else {
-                Some(ids[rnd(ids.len())].clone())
-            };
-            match (rnd(12), pick) {
-                (0..=2, _) | (_, None) => ids.push(add(d, &format!("task {step}")).id),
-                (3, Some(id)) if known(d, &id) => d.set_title(id, format!("renamed {step}")).unwrap(),
-                (4, Some(id)) if known(d, &id) => d.set_due(id, Some(format!("2026-10-{:02}", 1 + rnd(28)))).unwrap(),
-                (5, Some(id)) if known(d, &id) => d.set_priority(id, Priority::from_i64(rnd(4) as i64)).unwrap(),
-                (6, Some(id)) if known(d, &id) => drop(d.complete_task(id).unwrap()),
-                (7, Some(id)) if known(d, &id) => d.delete_task(id).unwrap(),
-                (8, Some(id)) if known(d, &id) => d.add_tag(id, format!("t{}", rnd(3))).unwrap(),
-                (9, Some(id)) if known(d, &id) => {
-                    let other = ids[rnd(ids.len())].clone();
-                    if known(d, &other) {
-                        // Rejected when it would create a cycle locally; that is fine.
-                        d.move_task(id, None, Some(other), None).ok();
-                    }
-                }
-                (10, Some(id)) if known(d, &id) => d.move_task(id, None, None, None).unwrap(),
-                _ => drop(sync(d, &storage)),
-            }
-        }
-        for _ in 0..2 {
-            for d in &devices {
-                sync(d, &storage);
-            }
-        }
-        // What a view shows depends on the clock (R68): compare the devices at one and the same moment.
-        for d in &devices {
-            d.set_now_for_tests("2026-10-06T10:00");
-        }
-        let reference = dump(&devices[0]);
-        assert!(reference.len() > 5, "seed {seed}: the run produced data");
-        for (i, d) in devices.iter().enumerate().skip(1) {
-            assert_eq!(dump(d), reference, "seed {seed}: device {i} differs");
-        }
-        for d in &devices {
-            assert_eq!(sync(d, &storage).pulled, 0, "seed {seed}: nothing left to pull");
-        }
-    }
+    assert!(oldest_first(&b).contains(&"после возврата".to_string()));
 }
 
 #[test]
-fn s13_attachment_hash_from_the_storage_never_becomes_a_path() {
+fn s23_attachment_hash_from_the_storage_never_becomes_a_path() {
     let storage = tempfile::tempdir().unwrap();
     let (a, b) = (device(), device());
     let t = add(&a, "с файлом");
@@ -1522,171 +1008,6 @@ fn s13_attachment_hash_from_the_storage_never_becomes_a_path() {
     assert_eq!(got[0].sha256, "", "a value that is not a hash is dropped");
     assert_eq!(got[0].local_path, None);
     assert!(b.fetch_attachment(got[0].id.clone()).is_err());
-}
-
-#[test]
-fn projects_and_saved_filters_sync_like_everything_else() {
-    let storage = tempfile::tempdir().unwrap();
-    let (a, b) = (device(), device());
-    let p = add(&a, "проект");
-    a.set_project(p.id.clone(), true).unwrap();
-    a.quick_add_under("шаг".into(), p.id.clone(), false, None).unwrap();
-    let f = a
-        .create_filter(
-            "Неделя".into(),
-            FilterSpec {
-                due: DueWindow::Next { days: 7 },
-                ..FilterSpec::default()
-            },
-        )
-        .unwrap();
-    settle(&a, &b, &storage);
-
-    assert_eq!(titles(&b.projects().unwrap()), ["проект"]);
-    assert_eq!(view(&b, Scope::Project { id: p.id }), ["шаг"]);
-    assert_eq!(b.filters().unwrap()[0].spec.due, DueWindow::Next { days: 7 });
-
-    // A rename on one device and a new condition on the other are both kept.
-    a.update_filter(f.id.clone(), "Ближайшее".into(), f.spec.clone())
-        .unwrap();
-    b.set_now_for_tests("2026-10-05T10:05");
-    b.update_filter(
-        f.id.clone(),
-        "Неделя".into(),
-        FilterSpec {
-            due: DueWindow::Next { days: 7 },
-            min_priority: Priority::High,
-            ..FilterSpec::default()
-        },
-    )
-    .unwrap();
-    settle(&a, &b, &storage);
-    for d in [&a, &b] {
-        let got = &d.filters().unwrap()[0];
-        assert_eq!(
-            (got.name.as_str(), got.spec.min_priority),
-            ("Ближайшее", Priority::High)
-        );
-    }
-    b.delete_filter(f.id).unwrap();
-    settle(&b, &a, &storage);
-    assert!(a.filters().unwrap().is_empty());
-}
-
-#[test]
-fn s32_hidden_inbox_and_the_default_list_reach_the_other_device() {
-    let storage = tempfile::tempdir().unwrap();
-    let (a, b) = (device(), device());
-    let home = a.create_list("Дом".into()).unwrap();
-    let task = add(&a, "а");
-    settle(&a, &b, &storage);
-
-    a.hide_inbox(home.id.clone(), true).unwrap();
-    settle(&a, &b, &storage);
-    assert!(b.inbox_hidden().unwrap());
-    assert_eq!(b.new_task_list().unwrap(), "last");
-    assert_eq!(b.task(task.id).unwrap().list_id, home.id);
-    assert_eq!(b.default_list_id(None).unwrap(), home.id);
-
-    b.set_now_for_tests("2026-10-05T10:01");
-    b.set_new_task_list(home.id.clone()).unwrap();
-    settle(&a, &b, &storage);
-    assert_eq!(
-        (a.new_task_list().unwrap(), b.new_task_list().unwrap()),
-        (home.id.clone(), home.id.clone())
-    );
-
-    b.show_inbox().unwrap();
-    settle(&b, &a, &storage);
-    assert!(!a.inbox_hidden().unwrap());
-}
-
-#[test]
-fn s32_the_shared_setting_merges_like_any_field_and_reaches_a_new_device() {
-    let storage = tempfile::tempdir().unwrap();
-    let (a, b) = (device(), device());
-    settle(&a, &b, &storage);
-
-    let at_once = KeepDone::Seconds { seconds: 0 };
-    a.set_keep_done(KeepDone::Seconds { seconds: 15 }).unwrap();
-    b.set_now_for_tests("2026-10-05T10:01");
-    b.set_keep_done(at_once).unwrap();
-    settle(&a, &b, &storage);
-    assert_eq!((a.keep_done().unwrap(), b.keep_done().unwrap()), (at_once, at_once));
-
-    let c = device();
-    sync(&c, &storage);
-    assert_eq!(c.keep_done().unwrap(), at_once);
-
-    // What it means on the device that did not set it: completed there, gone at once here.
-    let t = add(&b, "задача");
-    b.complete_task(t.id).unwrap();
-    settle(&b, &a, &storage);
-    assert!(view(&a, Scope::Inbox).is_empty());
-
-    let everywhere = |keep: KeepDone| {
-        settle(&a, &b, &storage);
-        sync(&c, &storage);
-        for device in [&a, &b, &c] {
-            assert_eq!(device.keep_done().unwrap(), keep);
-        }
-    };
-    a.set_now_for_tests("2026-10-05T10:02");
-    a.set_keep_done(KeepDone::EndOfDay).unwrap();
-    everywhere(KeepDone::EndOfDay);
-
-    // A version that knows only minutes chooses fifteen of them.
-    b.set_now_for_tests("2026-10-05T10:03");
-    b.set_setting_for_tests("keep_done", serde_json::json!(15));
-    everywhere(KeepDone::Seconds { seconds: 900 });
-}
-
-#[test]
-fn s33_the_wont_do_outcome_merges_with_completion_and_survives_an_unaware_version() {
-    let storage = tempfile::tempdir().unwrap();
-    let (a, b) = (device(), device());
-    let plain = add(&a, "брошенная");
-    let first = add(&a, "сначала выполнена");
-    let second = add(&a, "сначала брошена");
-    settle(&a, &b, &storage);
-
-    a.wont_do_task(plain.id.clone()).unwrap();
-    // Both close the same task offline: the later `done` decides.
-    a.complete_task(first.id.clone()).unwrap();
-    a.wont_do_task(second.id.clone()).unwrap();
-    b.set_now_for_tests("2026-10-05T11:00");
-    b.wont_do_task(first.id.clone()).unwrap();
-    b.complete_task(second.id.clone()).unwrap();
-    settle(&a, &b, &storage);
-    for d in [&a, &b] {
-        assert!(d.task(plain.id.clone()).unwrap().wont);
-        assert!(d.task(first.id.clone()).unwrap().wont, "marked later");
-        let got = d.task(second.id.clone()).unwrap();
-        assert!(got.done.is_some() && !got.wont, "completed later");
-        assert_eq!(view(d, Scope::WontDo).len(), 2);
-    }
-
-    // A version that does not know `wont` reopens by clearing `done` alone.
-    b.set_now_for_tests("2026-10-05T12:00");
-    b.set_task_field_for_tests(&plain.id, "done", serde_json::Value::Null);
-    settle(&a, &b, &storage);
-    for d in [&a, &b] {
-        let got = d.task(plain.id.clone()).unwrap();
-        assert!(got.done.is_none() && !got.wont, "open again");
-    }
-    // It completes the task in another minute: the moments differ.
-    b.set_task_field_for_tests(&plain.id, "done", serde_json::json!("2026-10-05T12:00"));
-    settle(&a, &b, &storage);
-    for d in [&a, &b] {
-        let got = d.task(plain.id.clone()).unwrap();
-        assert!(got.done.is_some() && !got.wont, "completed");
-    }
-    // Reopened and completed here in the minute the mark was made at: the
-    // leftover `wont` is cleared, so the task is completed all the same.
-    a.set_now_for_tests("2026-10-05T12:30");
-    a.set_task_field_for_tests(&plain.id, "done", serde_json::Value::Null);
-    a.set_now_for_tests("2026-10-05T10:00");
-    assert!(!a.complete_task(plain.id.clone()).unwrap().wont);
 }
 
 /// A storage that cannot be reached while `down` is set.
@@ -1744,216 +1065,6 @@ fn sorted(mut titles: Vec<String>) -> Vec<String> {
     titles
 }
 
-#[test]
-fn s36_there_is_a_side_to_choose_only_when_both_hold_data() {
-    let storage = tempfile::tempdir().unwrap();
-    let empty = tempfile::tempdir().unwrap();
-    let (a, c, fresh) = (device(), device(), device());
-    add(&a, "с A");
-    sync(&a, &storage);
-    let t = add(&c, "с C");
-
-    let before = (files(&storage, "log"), dump(&c));
-    assert!(c.sync_conflict(folder(&storage), String::new()).unwrap());
-    assert!(!c.sync_conflict(folder(&empty), String::new()).unwrap());
-    assert!(!fresh.sync_conflict(folder(&storage), String::new()).unwrap());
-    assert!(!c.sync_conflict(SyncConfig::Off, String::new()).unwrap());
-    assert_eq!((files(&storage, "log"), dump(&c)), before, "the check writes nothing");
-    assert!(files(&empty, "log").is_empty());
-
-    // A list of its own is data as well; tasks in the trash are not.
-    c.delete_task(t.id).unwrap();
-    assert!(!c.sync_conflict(folder(&storage), String::new()).unwrap());
-    c.create_list("Работа".into()).unwrap();
-    assert!(c.sync_conflict(folder(&storage), String::new()).unwrap());
-}
-
-#[test]
-fn s37_taking_the_storage_drops_what_the_device_held() {
-    let storage = tempfile::tempdir().unwrap();
-    let (a, c) = (device(), device());
-    let shared = add(&a, "общая");
-    sync(&a, &storage);
-    add(&c, "в");
-    let was = c.device_id();
-
-    c.replace_local_with_remote().unwrap();
-    assert!(view(&c, Scope::All).is_empty(), "empty until the first run");
-    assert_ne!(c.device_id(), was);
-    settle(&c, &a, &storage);
-    for d in [&a, &c] {
-        assert_eq!(view(d, Scope::All), ["общая"]);
-        assert!(view(d, Scope::Trash).is_empty());
-    }
-
-    // An edit that was not uploaded is lost, and what the device uploaded before comes back.
-    add(&c, "выгруженная");
-    settle(&c, &a, &storage);
-    c.set_title(shared.id.clone(), "изменено без связи".into()).unwrap();
-    c.replace_local_with_remote().unwrap();
-    settle(&c, &a, &storage);
-    for d in [&a, &c] {
-        assert_eq!(sorted(view(d, Scope::All)), ["выгруженная", "общая"]);
-    }
-
-    // The device goes on as a new one: its next change reaches the others.
-    add(&c, "после");
-    settle(&c, &a, &storage);
-    assert_eq!(sorted(view(&a, Scope::All)), ["выгруженная", "общая", "после"]);
-    assert_eq!(dump(&a), dump(&c));
-}
-
-#[test]
-fn s38_sending_the_device_puts_the_rest_into_the_trash_everywhere() {
-    let storage = tempfile::tempdir().unwrap();
-    let (a, b, c) = (device(), device(), device());
-    let a1 = add(&a, "а1");
-    add(&a, "а2");
-    let work = a.create_list("Работа".into()).unwrap();
-    settle(&a, &b, &storage);
-    add(&c, "в");
-
-    c.replace_remote_with_local().unwrap();
-    sync(&c, &storage);
-    sync(&a, &storage);
-    sync(&b, &storage);
-    for d in [&a, &b, &c] {
-        assert_eq!(view(d, Scope::All), ["в"]);
-        assert_eq!(sorted(view(d, Scope::Trash)), ["а1", "а2"]);
-        assert!(d.lists().unwrap().iter().all(|l| l.id != work.id), "the list is gone");
-    }
-    assert_eq!(dump(&a), dump(&c));
-    assert_eq!(dump(&b), dump(&c));
-    // Nothing waits any more: the next run is an ordinary one.
-    assert_eq!(sync(&c, &storage), SyncReport::default());
-
-    // What went to the trash can be taken back.
-    a.restore_task(a1.id).unwrap();
-    settle(&a, &c, &storage);
-    sync(&b, &storage);
-    for d in [&a, &b, &c] {
-        assert_eq!(sorted(view(d, Scope::All)), ["а1", "в"]);
-    }
-}
-
-#[test]
-fn s38_sending_the_device_undoes_what_it_has_not_seen() {
-    let storage = tempfile::tempdir().unwrap();
-    let (a, b) = (device(), device());
-    let t = add(&a, "один");
-    let cleared = add(&a, "очищенная");
-    settle(&a, &b, &storage);
-
-    // A goes on: a rename, a tag, a task deleted for good, a new task.
-    a.set_title(t.id.clone(), "два".into()).unwrap();
-    a.add_tag(t.id.clone(), "дом".into()).unwrap();
-    a.delete_task(cleared.id.clone()).unwrap();
-    a.empty_trash().unwrap();
-    add(&a, "новая на A");
-    sync(&a, &storage);
-
-    // B holds the earlier state, like a device restored from a backup.
-    b.replace_remote_with_local().unwrap();
-    sync(&b, &storage);
-    sync(&a, &storage);
-    for d in [&a, &b] {
-        let task = d.task(t.id.clone()).unwrap();
-        assert_eq!(task.title, "один");
-        assert!(task.tags.is_empty());
-        assert_eq!(sorted(view(d, Scope::All)), ["один", "очищенная"]);
-        assert_eq!(view(d, Scope::Trash), ["новая на A"]);
-    }
-    assert_eq!(dump(&a), dump(&b));
-}
-
-#[test]
-fn s38_an_edit_made_before_and_uploaded_after_loses() {
-    let storage = tempfile::tempdir().unwrap();
-    let (a, b) = (device(), device());
-    let t = add(&a, "один");
-    settle(&a, &b, &storage);
-
-    a.set_title(t.id.clone(), "правка без связи".into()).unwrap();
-    add(&a, "создана без связи");
-    b.replace_remote_with_local().unwrap();
-    sync(&b, &storage);
-    settle(&a, &b, &storage);
-    for d in [&a, &b] {
-        assert_eq!(d.task(t.id.clone()).unwrap().title, "один");
-        // A task the device could not see is not its to delete.
-        assert_eq!(sorted(view(d, Scope::All)), ["один", "создана без связи"]);
-    }
-}
-
-#[test]
-fn s39_a_failed_run_leaves_the_replacement_waiting() {
-    let storage = tempfile::tempdir().unwrap();
-    let (a, c) = (device(), device());
-    add(&a, "с A");
-    sync(&a, &storage);
-    add(&c, "в");
-
-    let remote = Flaky::new(&storage);
-    c.replace_remote_with_local().unwrap();
-    assert!(c.sync_with(&remote).is_err());
-    assert_eq!(view(&c, Scope::All), ["в"]);
-    // What is edited while the storage is away belongs to the device's data.
-    add(&c, "г");
-    assert!(c.sync_with(&remote).is_err());
-
-    remote.down.store(false, std::sync::atomic::Ordering::Relaxed);
-    c.sync_with(&remote).unwrap();
-    sync(&a, &storage);
-    for d in [&a, &c] {
-        assert_eq!(sorted(view(d, Scope::All)), ["в", "г"]);
-        assert_eq!(view(d, Scope::Trash), ["с A"]);
-    }
-}
-
-#[test]
-fn s38_another_storage_cancels_a_waiting_replacement() {
-    let storage = tempfile::tempdir().unwrap();
-    let (a, c) = (device(), device());
-    add(&a, "с A");
-    sync(&a, &storage);
-    add(&c, "в");
-
-    c.replace_remote_with_local().unwrap();
-    c.set_sync_config(folder(&storage)).unwrap();
-    c.sync_now().unwrap();
-    assert_eq!(sorted(view(&c, Scope::All)), ["в", "с A"]);
-}
-
-#[test]
-fn s36_joining_a_storage_and_choosing_a_side_is_one_step() {
-    let storage = tempfile::tempdir().unwrap();
-    let (a, c, d) = (device(), device(), device());
-    add(&a, "с A");
-    a.set_sync_config(folder(&storage)).unwrap();
-    a.sync_now().unwrap();
-
-    add(&c, "в");
-    c.join_storage(folder(&storage), SyncSide::Storage).unwrap();
-    c.sync_now().unwrap();
-    assert_eq!(view(&c, Scope::All), ["с A"]);
-
-    add(&d, "г");
-    d.join_storage(folder(&storage), SyncSide::Device).unwrap();
-    d.sync_now().unwrap();
-    a.sync_now().unwrap();
-    c.sync_now().unwrap();
-    for device in [&a, &c, &d] {
-        assert_eq!(view(device, Scope::All), ["г"]);
-        assert_eq!(view(device, Scope::Trash), ["с A"]);
-    }
-
-    // The same storage again: the side still applies.
-    add(&c, "без связи");
-    c.join_storage(folder(&storage), SyncSide::Storage).unwrap();
-    c.sync_now().unwrap();
-    assert_eq!(view(&c, Scope::All), ["г"]);
-}
-
 /// Where a device keeps attachment content, and where the storage does.
 fn on_device(d: &Device, sha256: &str) -> bool {
     d.dir().join("blobs").join(sha256).exists()
@@ -1973,82 +1084,6 @@ fn in_storage(storage: &TempDir, sha256: &str) -> bool {
 fn sync_all(d: &Device, storage: &TempDir) {
     sync(d, storage);
     sync_files(d, storage);
-}
-
-#[test]
-fn s47_content_stays_while_its_task_can_come_back_and_goes_after() {
-    let storage = tempfile::tempdir().unwrap();
-    let (a, b) = (device(), device());
-    let trashed = add(&a, "в корзину");
-    let purged = attach(&a, &trashed, "1.txt", b"one");
-    let kept = add(&a, "живая");
-    let removed = attach(&a, &kept, "2.txt", b"two");
-    let (v, w) = (add(&a, "v"), add(&a, "w"));
-    let shared = attach(&a, &v, "3.txt", b"three");
-    attach(&a, &w, "3.txt", b"three");
-    sync_all(&a, &storage);
-    sync_all(&b, &storage);
-    let all = [&purged.sha256, &removed.sha256, &shared.sha256];
-    assert!(all.iter().all(|h| on_device(&b, h) && in_storage(&storage, h)));
-
-    // A task in the trash keeps its content everywhere.
-    a.delete_task(trashed.id.clone()).unwrap();
-    sync_all(&a, &storage);
-    sync_all(&b, &storage);
-    assert!(all
-        .iter()
-        .all(|h| on_device(&a, h) && on_device(&b, h) && in_storage(&storage, h)));
-
-    // Deleted for good, or taken off a task: gone; content another attachment refers to stays.
-    a.empty_trash().unwrap();
-    a.remove_attachment(removed.id.clone()).unwrap();
-    a.remove_attachment(shared.id.clone()).unwrap();
-    sync_all(&a, &storage);
-    sync_all(&b, &storage);
-    for gone in [&purged.sha256, &removed.sha256] {
-        assert!(!on_device(&a, gone) && !on_device(&b, gone) && !in_storage(&storage, gone));
-    }
-    assert!(on_device(&a, &shared.sha256) && on_device(&b, &shared.sha256) && in_storage(&storage, &shared.sha256));
-}
-
-#[test]
-fn s47_a_run_that_did_not_read_everything_removes_nothing() {
-    let storage = tempfile::tempdir().unwrap();
-    let (a, b) = (device(), device());
-    let t = add(&a, "с файлом");
-    let att = attach(&a, &t, "1.txt", b"one");
-    sync_all(&a, &storage);
-    sync_all(&b, &storage);
-
-    // A file of A's log that B cannot read yet.
-    add(&a, "ещё");
-    sync(&a, &storage);
-    let name = files(&storage, "log")
-        .into_iter()
-        .rfind(|n| n.starts_with(&a.device_id()))
-        .unwrap();
-    let path = storage.path().join(ROOT).join("log").join(&name);
-    let whole = std::fs::read(&path).unwrap();
-    std::fs::write(&path, &whole[..whole.len() / 2]).unwrap();
-
-    b.remove_attachment(att.id.clone()).unwrap();
-    sync_all(&b, &storage);
-    assert!(on_device(&b, &att.sha256) && in_storage(&storage, &att.sha256));
-
-    std::fs::write(&path, &whole).unwrap();
-    sync_all(&b, &storage);
-    assert!(!on_device(&b, &att.sha256) && !in_storage(&storage, &att.sha256));
-}
-
-#[test]
-fn s47_a_device_without_sync_removes_unneeded_content_when_it_starts() {
-    let a = device();
-    let t = add(&a, "с файлом");
-    let att = attach(&a, &t, "1.txt", b"one");
-    a.remove_attachment(att.id).unwrap();
-    assert!(on_device(&a, &att.sha256));
-    Store::open(a.dir().to_string_lossy().into_owned()).unwrap();
-    assert!(!on_device(&a, &att.sha256));
 }
 
 /// A storage that counts what is deleted from `blobs/`.
@@ -2081,26 +1116,961 @@ impl Remote for Counting {
     }
 }
 
+/// Everything a user can see, in a form two devices can compare.
+fn dump(d: &Device) -> Vec<String> {
+    let mut out = Vec::new();
+    for f in d.folders().unwrap() {
+        out.push(format!(
+            "# {} | {} | parent={:?} icon={} daily={} sort={:?} {}/{} count={}",
+            f.id, f.name, f.parent_id, f.icon, f.daily, f.sort, f.show_preview, f.show_date, f.note_count
+        ));
+    }
+    for scope in [Scope::All, Scope::Archived, Scope::Trash] {
+        out.push(format!("# {scope:?}"));
+        for n in d.notes(scope).unwrap() {
+            out.push(format!(
+                "  {} | {} | folder={:?} tags={:?} pinned={} starred={} archived={} locked={} deleted={:?} files={}",
+                n.id,
+                n.title,
+                n.folder_id,
+                n.tags,
+                n.pinned,
+                n.starred,
+                n.archived,
+                n.locked,
+                n.deleted_ms,
+                n.attachments
+            ));
+        }
+    }
+    for f in d.filters().unwrap() {
+        out.push(format!("# filter {} | {} | {:?} | {}", f.id, f.name, f.query, f.count));
+    }
+    out.push(format!("# settings {:?}", d.settings().unwrap()));
+    out
+}
+
+// ---- merge: notes, the Trash, folders (S6-S11) ----
+
 #[test]
-fn s48_content_attached_again_without_a_connection_comes_back_to_the_storage() {
+fn s6_a_note_deleted_on_one_device_and_edited_on_another_stays_deleted_and_the_edit_is_kept() {
+    let storage = tempfile::tempdir().unwrap();
+    let (a, b) = (device(), device());
+    let n = add(&a, "заметка");
+    settle(&a, &b, &storage);
+
+    a.delete_note(n.id.clone()).unwrap();
+    b.set_title(n.id.clone(), "заголовок от B".into()).unwrap();
+    settle(&a, &b, &storage);
+    let moment = a.get_note(n.id.clone()).unwrap().deleted_ms;
+    assert!(moment.is_some());
+    for d in [&a, &b] {
+        assert!(view(d, Scope::All).is_empty());
+        assert_eq!(view(d, Scope::Trash), ["заголовок от B"]);
+        assert_eq!(
+            d.get_note(n.id.clone()).unwrap().deleted_ms,
+            moment,
+            "the moment of deletion travels"
+        );
+    }
+
+    a.restore_note(n.id.clone()).unwrap();
+    settle(&a, &b, &storage);
+    assert_eq!(b.get_note(n.id).unwrap().title, "заголовок от B");
+    assert_eq!(view(&b, Scope::All), ["заголовок от B"]);
+    assert_eq!(dump(&a), dump(&b));
+}
+
+#[test]
+fn s7_a_note_purged_on_one_device_and_restored_on_another_while_offline_stays_purged() {
+    let storage = tempfile::tempdir().unwrap();
+    let (a, b) = (device(), device());
+    let n = add(&a, "навсегда");
+    a.delete_note(n.id.clone()).unwrap();
+    settle(&a, &b, &storage);
+
+    a.purge_note(n.id.clone()).unwrap();
+    b.set_now_for_tests("2026-10-05T10:30");
+    b.restore_note(n.id.clone()).unwrap();
+    assert_eq!(view(&b, Scope::All), ["навсегда"]);
+    settle(&a, &b, &storage);
+    settle(&b, &a, &storage);
+    for d in [&a, &b] {
+        assert!(matches!(d.get_note(n.id.clone()), Err(AppError::NotFound { .. })));
+        assert!(view(d, Scope::All).is_empty());
+        assert!(view(d, Scope::Trash).is_empty());
+        assert!(d.counts().unwrap().all == 0 && d.counts().unwrap().trash == 0);
+    }
+    assert_eq!(dump(&a), dump(&b));
+}
+
+#[test]
+fn s8_a_note_in_the_trash_longer_than_trash_days_is_purged_at_the_end_of_a_pass_that_read_everything() {
+    let storage = tempfile::tempdir().unwrap();
+    let (a, b) = (device(), device());
+    let n = add(&a, "старая");
+    a.delete_note(n.id.clone()).unwrap();
+    settle(&a, &b, &storage);
+
+    // 29 days later: still in the Trash. 31 days later: purged by the pass, and the purge goes out in it.
+    a.set_now_for_tests("2026-11-03T10:00");
+    sync(&a, &storage);
+    assert!(a.get_note(n.id.clone()).unwrap().deleted);
+    a.set_now_for_tests("2026-11-05T10:01");
+    sync(&a, &storage);
+    assert!(matches!(a.get_note(n.id.clone()), Err(AppError::NotFound { .. })));
+    b.set_now_for_tests("2026-10-05T10:30");
+    sync(&b, &storage);
+    assert!(matches!(b.get_note(n.id), Err(AppError::NotFound { .. })));
+}
+
+#[test]
+fn s8_the_days_in_the_trash_are_those_of_the_setting_as_it_arrives() {
+    let storage = tempfile::tempdir().unwrap();
+    let (a, b) = (device(), device());
+    let n = add(&a, "в корзине");
+    a.delete_note(n.id.clone()).unwrap();
+    settle(&a, &b, &storage);
+
+    b.set_settings(AppSettings {
+        trash_days: 60,
+        ..AppSettings::default()
+    })
+    .unwrap();
+    settle(&b, &a, &storage);
+    a.set_now_for_tests("2026-11-10T10:00");
+    sync(&a, &storage);
+    assert!(a.get_note(n.id.clone()).unwrap().deleted, "36 days with a limit of 60");
+
+    b.set_now_for_tests("2026-11-10T10:00");
+    b.set_settings(AppSettings {
+        trash_days: 7,
+        ..AppSettings::default()
+    })
+    .unwrap();
+    sync(&b, &storage);
+    assert!(
+        matches!(b.get_note(n.id.clone()), Err(AppError::NotFound { .. })),
+        "the device that set it purges at once"
+    );
+    sync(&a, &storage);
+    assert!(
+        matches!(a.get_note(n.id), Err(AppError::NotFound { .. })),
+        "and the other as the setting arrives"
+    );
+}
+
+#[test]
+fn s8_a_run_that_did_not_read_everything_purges_nothing() {
+    let storage = tempfile::tempdir().unwrap();
+    let (a, b) = (device(), device());
+    let n = add(&a, "старая");
+    a.delete_note(n.id.clone()).unwrap();
+    settle(&a, &b, &storage);
+
+    // A file of B's log that A cannot read yet: it may hold the edit that brings the note back.
+    b.set_now_for_tests("2026-11-10T09:00");
+    b.restore_note(n.id.clone()).unwrap();
+    sync(&b, &storage);
+    let name = files(&storage, "log")
+        .into_iter()
+        .rfind(|f| f.starts_with(&b.device_id()))
+        .unwrap();
+    let path = storage.path().join(ROOT).join("log").join(&name);
+    let whole = std::fs::read(&path).unwrap();
+    std::fs::write(&path, &whole[..whole.len() / 2]).unwrap();
+
+    a.set_now_for_tests("2026-11-10T10:00");
+    sync(&a, &storage);
+    assert!(
+        a.get_note(n.id.clone()).unwrap().deleted,
+        "36 days in the Trash, and still there"
+    );
+
+    std::fs::write(&path, &whole).unwrap();
+    sync(&a, &storage);
+    let got = a.get_note(n.id).unwrap();
+    assert!(!got.deleted, "the restore arrived first");
+}
+
+#[test]
+fn s9_concurrent_moves_into_each_other_leave_no_cycle_and_every_device_shows_the_same_tree() {
     let storage = tempfile::tempdir().unwrap();
     let (a, b, c) = (device(), device(), device());
-    let t = add(&a, "у A");
-    let att = attach(&a, &t, "1.txt", b"one");
+    let x = new_folder(&a, "X", None);
+    let y = new_folder(&a, "Y", None);
+    let inside = add_in(&a, "в X", &x);
+    settle(&a, &b, &storage);
+
+    a.move_folder(x.id.clone(), Some(y.id.clone()), None).unwrap();
+    b.set_now_for_tests("2026-10-05T10:05");
+    b.move_folder(y.id.clone(), Some(x.id.clone()), None).unwrap();
+    settle(&a, &b, &storage);
+    sync(&c, &storage);
+
+    // The later move is the one undone: Y stays on top, X under it.
+    for d in [&a, &b, &c] {
+        assert_eq!(d.folder(y.id.clone()).unwrap().parent_id, None);
+        assert_eq!(
+            d.folder(x.id.clone()).unwrap().parent_id.as_deref(),
+            Some(y.id.as_str())
+        );
+        assert_eq!(
+            d.get_note(inside.id.clone()).unwrap().folder_id.as_deref(),
+            Some(x.id.as_str())
+        );
+    }
+    assert_eq!(dump(&a), dump(&b));
+    assert_eq!(dump(&a), dump(&c));
+
+    // The cut is written into the field by the next local move of any folder, and that reaches the others.
+    let z = new_folder(&b, "Z", None);
+    b.move_folder(z.id, None, None).unwrap();
+    settle(&b, &a, &storage);
+    sync(&c, &storage);
+    assert_eq!(dump(&a), dump(&b));
+    assert_eq!(dump(&a), dump(&c));
+}
+
+#[test]
+fn s9_a_longer_cycle_is_cut_at_the_same_folder_whatever_the_order_the_files_are_read_in() {
+    let storage = tempfile::tempdir().unwrap();
+    let (a, b, c) = (device(), device(), device());
+    let folders: Vec<Folder> = ["X", "Y", "Z"].iter().map(|n| new_folder(&a, n, None)).collect();
+    settle(&a, &b, &storage);
+    sync(&c, &storage);
+
+    // X into Y on A, Y into Z on B, Z into X on C: each device sees only its own move.
+    a.move_folder(folders[0].id.clone(), Some(folders[1].id.clone()), None)
+        .unwrap();
+    b.set_now_for_tests("2026-10-05T10:01");
+    b.move_folder(folders[1].id.clone(), Some(folders[2].id.clone()), None)
+        .unwrap();
+    c.set_now_for_tests("2026-10-05T10:02");
+    c.move_folder(folders[2].id.clone(), Some(folders[0].id.clone()), None)
+        .unwrap();
+
+    // Delivered in different orders.
+    sync(&c, &storage);
+    sync(&b, &storage);
+    sync(&a, &storage);
+    sync(&c, &storage);
+    sync(&b, &storage);
+    let parents = |d: &Device| {
+        folders
+            .iter()
+            .map(|f| d.folder(f.id.clone()).unwrap().parent_id)
+            .collect::<Vec<_>>()
+    };
+    // The move of C is the latest: Z is at the root, Y under Z, X under Y.
+    for d in [&a, &b, &c] {
+        assert_eq!(
+            parents(d),
+            [Some(folders[1].id.clone()), Some(folders[2].id.clone()), None]
+        );
+    }
+    assert_eq!(dump(&a), dump(&b));
+    assert_eq!(dump(&a), dump(&c));
+}
+
+#[test]
+fn s10_a_note_added_to_a_folder_deleted_elsewhere_is_shown_at_the_root_everywhere() {
+    let storage = tempfile::tempdir().unwrap();
+    let (a, b) = (device(), device());
+    let folder = new_folder(&a, "Временная", None);
+    settle(&a, &b, &storage);
+
+    a.delete_folder(folder.id.clone()).unwrap();
+    add_in(&b, "поздняя", &folder);
+    settle(&a, &b, &storage);
+    for d in [&a, &b] {
+        assert_eq!(view(d, Scope::NoFolder), ["поздняя"]);
+        assert!(d.folders().unwrap().is_empty());
+        assert_eq!(
+            d.get_note(d.notes(Scope::All).unwrap()[0].id.clone())
+                .unwrap()
+                .folder_id,
+            None
+        );
+    }
+    assert_eq!(dump(&a), dump(&b));
+}
+
+#[test]
+fn s10_deleting_a_folder_reaches_the_other_device_and_restoring_a_note_there_restores_its_chain() {
+    let storage = tempfile::tempdir().unwrap();
+    let (a, b) = (device(), device());
+    let x = new_folder(&a, "X", None);
+    let y = new_folder(&a, "Y", Some(&x));
+    let n1 = add_in(&a, "n1", &x);
+    let n2 = add_in(&a, "n2", &y);
+    let n3 = add_in(&a, "n3", &y);
+    settle(&a, &b, &storage);
+
+    a.delete_folder(x.id.clone()).unwrap();
+    settle(&a, &b, &storage);
+    assert!(b.folders().unwrap().is_empty());
+    assert_eq!(sorted(view(&b, Scope::Trash)), ["n1", "n2", "n3"]);
+
+    b.restore_note(n2.id.clone()).unwrap();
+    settle(&b, &a, &storage);
+    sync(&b, &storage);
+    for d in [&a, &b] {
+        let names: Vec<String> = sorted(d.folders().unwrap().into_iter().map(|f| f.name).collect());
+        assert_eq!(names, ["X", "Y"], "the chain is back");
+        assert_eq!(view(d, Scope::Folder { id: y.id.clone() }), ["n2"]);
+        assert_eq!(sorted(view(d, Scope::Trash)), ["n1", "n3"]);
+    }
+    let _ = (n1, n3);
+    assert_eq!(dump(&a), dump(&b));
+}
+
+#[test]
+fn s11_folders_and_filters_made_at_the_same_time_come_in_the_same_order_on_every_device() {
+    let storage = tempfile::tempdir().unwrap();
+    let (a, b) = (device(), device());
+    settle(&a, &b, &storage);
+    // Both append to an empty list: the keys are the same and the identifier decides.
+    new_folder(&a, "от A", None);
+    new_folder(&b, "от B", None);
+    a.create_filter("фильтр A".into(), String::new(), FilterQuery::default())
+        .unwrap();
+    b.create_filter("фильтр B".into(), String::new(), FilterQuery::default())
+        .unwrap();
+    settle(&a, &b, &storage);
+    let folders = |d: &Device| d.folders().unwrap().into_iter().map(|f| f.name).collect::<Vec<_>>();
+    let filters = |d: &Device| d.filters().unwrap().into_iter().map(|f| f.name).collect::<Vec<_>>();
+    assert_eq!(folders(&a).len(), 2);
+    assert_eq!(folders(&a), folders(&b));
+    assert_eq!(filters(&a), filters(&b));
+
+    // A move on one device puts the folder first on the other.
+    let last = a.folders().unwrap().pop().unwrap();
+    a.move_folder(last.id.clone(), None, None).unwrap();
+    let first = a.filters().unwrap().pop().unwrap();
+    a.move_filter(first.id, None).unwrap();
+    settle(&a, &b, &storage);
+    assert_eq!(b.folders().unwrap()[0].id, last.id);
+    assert_eq!(folders(&a), folders(&b));
+    assert_eq!(filters(&a), filters(&b));
+}
+
+#[test]
+fn s11_filters_and_folder_settings_sync_like_everything_else() {
+    let storage = tempfile::tempdir().unwrap();
+    let (a, b) = (device(), device());
+    let folder = new_folder(&a, "Дневник", None);
+    a.set_folder_daily(folder.id.clone(), true).unwrap();
+    a.set_folder_sort(
+        folder.id.clone(),
+        FolderSort {
+            by: SortBy::Title,
+            descending: false,
+        },
+    )
+    .unwrap();
+    let query = FilterQuery {
+        join: FilterJoin::Any,
+        conditions: vec![Condition::Pinned, Condition::HasTag { name: "дом".into() }],
+    };
+    let f = a.create_filter("Неделя".into(), "star".into(), query.clone()).unwrap();
+    settle(&a, &b, &storage);
+
+    let got = b.folder(folder.id.clone()).unwrap();
+    assert!(got.daily);
+    assert_eq!(got.sort.by, SortBy::Title);
+    assert_eq!(b.filters().unwrap()[0].query, query);
+
+    // A rename on one device and a new condition on the other are both kept.
+    a.update_filter(f.id.clone(), "Ближайшее".into(), "star".into(), query.clone())
+        .unwrap();
+    b.set_now_for_tests("2026-10-05T10:05");
+    let wider = FilterQuery {
+        join: FilterJoin::All,
+        conditions: vec![Condition::Starred],
+    };
+    b.update_filter(f.id.clone(), "Неделя".into(), "star".into(), wider.clone())
+        .unwrap();
+    settle(&a, &b, &storage);
+    for d in [&a, &b] {
+        let got = &d.filters().unwrap()[0];
+        assert_eq!((got.name.as_str(), &got.query), ("Ближайшее", &wider));
+    }
+    b.delete_filter(f.id).unwrap();
+    settle(&b, &a, &storage);
+    assert!(a.filters().unwrap().is_empty());
+}
+
+// ---- the shared settings (S12) ----
+
+#[test]
+fn s12_the_shared_settings_merge_field_by_field_and_reach_a_new_device() {
+    let storage = tempfile::tempdir().unwrap();
+    let (a, b) = (device(), device());
+    settle(&a, &b, &storage);
+
+    a.set_settings(AppSettings {
+        trash_days: 15,
+        font_body: "Literata".into(),
+        ..AppSettings::default()
+    })
+    .unwrap();
+    b.set_now_for_tests("2026-10-05T10:01");
+    b.set_settings(AppSettings {
+        trash_days: 45,
+        align: TextAlign::Justify,
+        ..AppSettings::default()
+    })
+    .unwrap();
+    settle(&a, &b, &storage);
+    let expected = AppSettings {
+        trash_days: 45,
+        font_body: "Literata".into(),
+        align: TextAlign::Justify,
+        ..AppSettings::default()
+    };
+    assert_eq!(
+        (a.settings().unwrap(), b.settings().unwrap()),
+        (expected.clone(), expected.clone())
+    );
+
+    let c = device();
+    sync(&c, &storage);
+    assert_eq!(c.settings().unwrap(), expected);
+
+    // A device that saves what it shows does not take the other fields from its defaults.
+    c.set_now_for_tests("2026-10-05T10:02");
+    c.set_settings(AppSettings {
+        spellcheck: false,
+        ..c.settings().unwrap()
+    })
+    .unwrap();
+    settle(&c, &a, &storage);
+    sync(&b, &storage);
+    for d in [&a, &b, &c] {
+        assert_eq!(
+            d.settings().unwrap(),
+            AppSettings {
+                spellcheck: false,
+                ..expected.clone()
+            }
+        );
+    }
+}
+
+#[test]
+fn s12_a_field_a_version_does_not_know_is_kept_and_passed_on_and_a_value_it_cannot_read_gives_the_default() {
+    let storage = tempfile::tempdir().unwrap();
+    let (a, b, c) = (device(), device(), device());
+    a.set_compact_after_for_tests(0);
+    b.set_setting_for_tests("future_option", serde_json::json!({"depth": 3}));
+    b.set_setting_for_tests("trash_days", serde_json::json!("soon"));
+    sync(&b, &storage);
+    // A writes something of its own, which makes it publish a snapshot of everything it holds.
+    add(&a, "заметка");
+    sync(&a, &storage);
+    assert_eq!(a.settings().unwrap().trash_days, 30, "unreadable: the default");
+    assert_eq!(
+        a.setting_for_tests("future_option"),
+        Some(serde_json::json!({"depth": 3}))
+    );
+
+    // Only the snapshot of A is left to read: the field comes from it.
+    for dir in ["log", "snap"] {
+        for name in files(&storage, dir) {
+            if name.starts_with(&b.device_id()) {
+                std::fs::remove_file(storage.path().join(ROOT).join(dir).join(name)).unwrap();
+            }
+        }
+    }
+    sync(&c, &storage);
+    assert_eq!(
+        c.setting_for_tests("future_option"),
+        Some(serde_json::json!({"depth": 3}))
+    );
+    assert_eq!(c.setting_for_tests("trash_days"), Some(serde_json::json!("soon")));
+    assert_eq!(c.settings().unwrap(), AppSettings::default());
+}
+
+#[test]
+fn s5_a_tag_at_the_limit_syncs_and_a_longer_one_from_before_is_not_shown() {
+    let storage = tempfile::tempdir().unwrap();
+    let (a, b) = (device(), device());
+    let n = add(&a, "заметка");
+    // Both scripts at the byte limit: 196 Latin letters and 98 Cyrillic ones.
+    let latin = "a".repeat(196);
+    let cyrillic = "я".repeat(98);
+    a.add_tag(n.id.clone(), latin.clone()).unwrap();
+    a.add_tag(n.id.clone(), cyrillic.clone()).unwrap();
+    let long = "b".repeat(197);
+
+    // A key of 201 bytes is stored in the database all the same, as an earlier version could leave it.
+    let a = plant(a, &[("note", &n.id, &format!("tag:{long}"), serde_json::json!(true))]);
+    let shown = vec![latin, cyrillic];
+    assert_eq!(
+        a.get_note(n.id.clone()).unwrap().tags,
+        shown,
+        "a tag no register can carry is not shown"
+    );
+
+    sync(&a, &storage);
+    sync(&b, &storage);
+    assert_eq!(
+        b.get_note(n.id.clone()).unwrap().tags,
+        shown,
+        "and no other device takes it"
+    );
+    assert_eq!(a.get_note(n.id).unwrap().tags, shown);
+}
+
+#[test]
+fn s5_a_change_with_a_key_over_the_limit_is_not_applied() {
+    let storage = tempfile::tempdir().unwrap();
+    let (a, b) = (device(), device());
+    let n = add(&a, "заметка");
+    settle(&a, &b, &storage);
+    let stamp = "7fffffff0000-0000-cccccccccccc";
+    let lines = [
+        serde_json::json!({"v": 1, "device": "cccccccccccc", "seq": 1, "count": 3}).to_string(),
+        serde_json::json!({"k": "note", "i": n.id, "f": "f".repeat(201), "v": 1, "t": stamp}).to_string(),
+        serde_json::json!({"k": "note", "i": "", "f": "title", "v": "пустой", "t": stamp}).to_string(),
+        serde_json::json!({"k": "note", "i": n.id, "f": "title", "v": "принято", "t": stamp}).to_string(),
+    ];
+    std::fs::write(
+        storage.path().join(ROOT).join("log/cccccccccccc-0000000001.jsonl"),
+        lines.join("\n") + "\n",
+    )
+    .unwrap();
+    sync(&b, &storage);
+    assert_eq!(
+        b.get_note(n.id).unwrap().title,
+        "принято",
+        "the well-formed change of the file applies"
+    );
+    assert_eq!(view(&b, Scope::All), ["принято"], "and the other two made nothing");
+}
+
+// ---- compaction: the weight of the log (S15) ----
+
+#[test]
+fn s15_a_snapshot_follows_the_weight_of_the_log() {
+    let storage = tempfile::tempdir().unwrap();
+    let (a, b) = (device(), device());
+    let me = a.device_id();
+    let log = || {
+        own_files(&storage, "log", &me, ".jsonl")
+            .iter()
+            .map(|(_, n)| n)
+            .sum::<u64>()
+    };
+    let snaps = || own_files(&storage, "snap", &me, ".jsonl");
+    let note = add(&a, "заметка");
+    sync(&a, &storage);
+
+    // Before its first snapshot the device takes one to weigh 16 KB.
+    let big = 8000; // bytes of a title in one edit
+    let mut runs = 0;
+    while snaps().is_empty() {
+        let before = log();
+        assert!(before <= 16 * 1024, "the log grew to {before} bytes without a snapshot");
+        runs += 1;
+        a.set_title(note.id.clone(), noise(big, runs)).unwrap();
+        sync(&a, &storage);
+        if !snaps().is_empty() {
+            assert!(
+                before + big as u64 > 16 * 1024,
+                "a snapshot came at {before} bytes of log"
+            );
+        }
+    }
+    assert!(runs > 1);
+    let [(first, weight)] = &snaps()[..] else {
+        panic!("{:?}", snaps())
+    };
+
+    // Small edits do not make a new one while the log since the snapshot is lighter than it.
+    for i in 0..5 {
+        a.set_pinned(note.id.clone(), i % 2 == 0).unwrap();
+        sync(&a, &storage);
+    }
+    assert!(log() < *weight, "{} bytes of log against a snapshot of {weight}", log());
+    assert_eq!(own_files(&storage, "log", &me, ".jsonl").len(), 5);
+    assert_eq!(&snaps()[0].0, first);
+
+    // One upload heavier than the snapshot makes one in the same run.
+    a.set_title(note.id.clone(), "ж".repeat(*weight as usize)).unwrap();
+    sync(&a, &storage);
+    assert_ne!(&snaps()[0].0, first);
+    assert!(own_files(&storage, "log", &me, ".jsonl").is_empty());
+
+    sync(&b, &storage);
+    let got = b.get_note(note.id).unwrap();
+    assert_eq!((got.pinned, got.title.len()), (true, "ж".len() * *weight as usize));
+}
+
+// ---- undo reaches the other device (R75) ----
+
+#[test]
+fn r75_undo_leaves_a_note_changed_on_another_device_and_reaches_it() {
+    let storage = tempfile::tempdir().unwrap();
+    let (a, b) = (device(), device());
+    let notes: Vec<Note> = ["а", "б", "в"].iter().map(|t| add(&a, t)).collect();
+    a.begin_group();
+    for n in &notes {
+        a.set_title(n.id.clone(), format!("{} от A", n.title)).unwrap();
+    }
+    a.end_group();
+    settle(&a, &b, &storage);
+    assert!(!b.can_undo(), "the history stays on its device");
+    b.set_title(notes[1].id.clone(), "от B".into()).unwrap();
+    settle(&a, &b, &storage);
+
+    assert_eq!(a.undo().unwrap(), 2);
+    settle(&a, &b, &storage);
+    for d in [&a, &b] {
+        let title = |i: usize| d.get_note(notes[i].id.clone()).unwrap().title;
+        assert_eq!(
+            (title(0), title(1), title(2)),
+            ("а".to_string(), "от B".to_string(), "в".to_string())
+        );
+    }
+}
+
+// ---- which side to keep (S33-S37) ----
+
+#[test]
+fn s33_s34_there_is_a_side_to_choose_only_when_both_hold_data() {
+    let storage = tempfile::tempdir().unwrap();
+    let empty = tempfile::tempdir().unwrap();
+    let (a, c, fresh) = (device(), device(), device());
+    add(&a, "с A");
+    sync(&a, &storage);
+    let n = add(&c, "с C");
+
+    let before = (files(&storage, "log"), dump(&c));
+    assert!(c.sync_conflict(folder(&storage), String::new()).unwrap());
+    assert!(!c.sync_conflict(folder(&empty), String::new()).unwrap());
+    assert!(!fresh.sync_conflict(folder(&storage), String::new()).unwrap());
+    assert!(!c.sync_conflict(SyncConfig::Off, String::new()).unwrap());
+    assert_eq!((files(&storage, "log"), dump(&c)), before, "the check writes nothing");
+    assert!(files(&empty, "log").is_empty());
+
+    // A folder of its own is data as well; a note in the Trash is not.
+    c.delete_note(n.id).unwrap();
+    assert!(!c.sync_conflict(folder(&storage), String::new()).unwrap());
+    new_folder(&c, "Работа", None);
+    assert!(c.sync_conflict(folder(&storage), String::new()).unwrap());
+}
+
+#[test]
+fn s36_taking_the_storage_drops_what_the_device_held() {
+    let storage = tempfile::tempdir().unwrap();
+    let (a, c) = (device(), device());
+    let shared = add(&a, "общая");
+    sync(&a, &storage);
+    let held = add(&c, "в");
+    new_folder(&c, "своя папка", None);
+    c.create_filter("свой фильтр".into(), String::new(), FilterQuery::default())
+        .unwrap();
+    c.set_settings(AppSettings {
+        trash_days: 9,
+        ..AppSettings::default()
+    })
+    .unwrap();
+    let was = c.device_id();
+
+    c.replace_local_with_remote().unwrap();
+    assert!(view(&c, Scope::All).is_empty(), "empty until the first run");
+    assert!(c.folders().unwrap().is_empty() && c.filters().unwrap().is_empty());
+    assert_eq!(c.settings().unwrap(), AppSettings::default());
+    assert_ne!(c.device_id(), was);
+    settle(&c, &a, &storage);
+    for d in [&a, &c] {
+        assert_eq!(view(d, Scope::All), ["общая"]);
+        assert!(view(d, Scope::Trash).is_empty());
+        assert!(d.get_note(held.id.clone()).is_err());
+    }
+
+    // An edit that was not uploaded is lost, and what the device uploaded before comes back.
+    add(&c, "выгруженная");
+    settle(&c, &a, &storage);
+    c.set_title(shared.id.clone(), "изменено без связи".into()).unwrap();
+    c.replace_local_with_remote().unwrap();
+    settle(&c, &a, &storage);
+    for d in [&a, &c] {
+        assert_eq!(sorted(oldest_first(d)), ["выгруженная", "общая"]);
+    }
+
+    // The device goes on as a new one: its next change reaches the others.
+    add(&c, "после");
+    settle(&c, &a, &storage);
+    assert_eq!(sorted(oldest_first(&a)), ["выгруженная", "общая", "после"]);
+    assert_eq!(dump(&a), dump(&c));
+}
+
+#[test]
+fn s37_sending_the_device_puts_the_rest_into_the_trash_everywhere() {
+    let storage = tempfile::tempdir().unwrap();
+    let (a, b, c) = (device(), device(), device());
+    let a1 = add(&a, "а1");
+    attach(&a, &a1, "a.txt", b"content");
+    let work = new_folder(&a, "Работа", None);
+    let sub = new_folder(&a, "Вложенная", Some(&work));
+    add_in(&a, "а2", &sub);
+    a.create_filter("фильтр".into(), String::new(), FilterQuery::default())
+        .unwrap();
+    settle(&a, &b, &storage);
+    add(&c, "в");
+
+    c.replace_remote_with_local().unwrap();
+    sync(&c, &storage);
+    sync(&a, &storage);
+    sync(&b, &storage);
+    for d in [&a, &b, &c] {
+        assert_eq!(view(d, Scope::All), ["в"]);
+        assert_eq!(sorted(view(d, Scope::Trash)), ["а1", "а2"]);
+        assert!(d.folders().unwrap().is_empty(), "the folders are gone");
+        assert!(d.filters().unwrap().is_empty(), "and the filter");
+        assert!(d.attachments(a1.id.clone()).unwrap().is_empty(), "and the attachment");
+    }
+    assert_eq!(dump(&a), dump(&c));
+    assert_eq!(dump(&b), dump(&c));
+    // Nothing waits any more: the next run is an ordinary one.
+    assert_eq!(sync(&c, &storage), SyncReport::default());
+
+    // What went to the Trash can be taken back.
+    a.restore_note(a1.id).unwrap();
+    settle(&a, &c, &storage);
+    sync(&b, &storage);
+    for d in [&a, &b, &c] {
+        assert_eq!(sorted(view(d, Scope::All)), ["а1", "в"]);
+    }
+}
+
+#[test]
+fn s37_sending_the_device_undoes_what_it_has_not_seen() {
+    let storage = tempfile::tempdir().unwrap();
+    let (a, b) = (device(), device());
+    let n = add(&a, "один");
+    let cleared = add(&a, "очищенная");
+    settle(&a, &b, &storage);
+
+    // A goes on: a rename, a tag, a note deleted for good, a new note.
+    a.set_title(n.id.clone(), "два".into()).unwrap();
+    a.add_tag(n.id.clone(), "дом".into()).unwrap();
+    a.delete_note(cleared.id.clone()).unwrap();
+    a.empty_trash().unwrap();
+    add(&a, "новая на A");
+    sync(&a, &storage);
+
+    // B holds the earlier state, like a device restored from a backup.
+    b.replace_remote_with_local().unwrap();
+    sync(&b, &storage);
+    sync(&a, &storage);
+    for d in [&a, &b] {
+        let note = d.get_note(n.id.clone()).unwrap();
+        assert_eq!(note.title, "один");
+        assert!(note.tags.is_empty());
+        assert_eq!(sorted(view(d, Scope::All)), ["один", "очищенная"]);
+        assert_eq!(view(d, Scope::Trash), ["новая на A"]);
+    }
+    assert_eq!(dump(&a), dump(&b));
+}
+
+#[test]
+fn s37_an_edit_made_before_and_uploaded_after_loses() {
+    let storage = tempfile::tempdir().unwrap();
+    let (a, b) = (device(), device());
+    let n = add(&a, "один");
+    settle(&a, &b, &storage);
+
+    a.set_title(n.id.clone(), "правка без связи".into()).unwrap();
+    add(&a, "создана без связи");
+    b.replace_remote_with_local().unwrap();
+    sync(&b, &storage);
+    settle(&a, &b, &storage);
+    for d in [&a, &b] {
+        assert_eq!(d.get_note(n.id.clone()).unwrap().title, "один");
+        // A note the device could not see is not its to delete.
+        assert_eq!(sorted(view(d, Scope::All)), ["один", "создана без связи"]);
+    }
+}
+
+#[test]
+fn s37_a_failed_run_leaves_the_replacement_waiting() {
+    let storage = tempfile::tempdir().unwrap();
+    let (a, c) = (device(), device());
+    add(&a, "с A");
+    sync(&a, &storage);
+    add(&c, "в");
+
+    let remote = Flaky::new(&storage);
+    c.replace_remote_with_local().unwrap();
+    assert!(c.sync_with(&remote).is_err());
+    assert_eq!(view(&c, Scope::All), ["в"]);
+    // What is edited while the storage is away belongs to the device's data.
+    add(&c, "г");
+    assert!(c.sync_with(&remote).is_err());
+
+    remote.down.store(false, std::sync::atomic::Ordering::Relaxed);
+    c.sync_with(&remote).unwrap();
+    sync(&a, &storage);
+    for d in [&a, &c] {
+        assert_eq!(sorted(view(d, Scope::All)), ["в", "г"]);
+        assert_eq!(view(d, Scope::Trash), ["с A"]);
+    }
+}
+
+#[test]
+fn s35_another_storage_cancels_a_waiting_replacement() {
+    let storage = tempfile::tempdir().unwrap();
+    let (a, c) = (device(), device());
+    add(&a, "с A");
+    sync(&a, &storage);
+    add(&c, "в");
+
+    c.replace_remote_with_local().unwrap();
+    c.set_sync_config(folder(&storage)).unwrap();
+    c.sync_now().unwrap();
+    assert_eq!(sorted(view(&c, Scope::All)), ["в", "с A"]);
+}
+
+#[test]
+fn s35_joining_a_storage_and_choosing_a_side_is_one_step() {
+    let storage = tempfile::tempdir().unwrap();
+    let (a, c, d) = (device(), device(), device());
+    add(&a, "с A");
+    a.set_sync_config(folder(&storage)).unwrap();
+    a.sync_now().unwrap();
+
+    add(&c, "в");
+    c.join_storage(folder(&storage), SyncSide::Storage).unwrap();
+    c.sync_now().unwrap();
+    assert_eq!(view(&c, Scope::All), ["с A"]);
+
+    add(&d, "г");
+    d.join_storage(folder(&storage), SyncSide::Device).unwrap();
+    d.sync_now().unwrap();
+    a.sync_now().unwrap();
+    c.sync_now().unwrap();
+    for device in [&a, &c, &d] {
+        assert_eq!(view(device, Scope::All), ["г"]);
+        assert_eq!(view(device, Scope::Trash), ["с A"]);
+    }
+
+    // The same storage again: the side still applies.
+    add(&c, "без связи");
+    c.join_storage(folder(&storage), SyncSide::Storage).unwrap();
+    c.sync_now().unwrap();
+    assert_eq!(view(&c, Scope::All), ["г"]);
+}
+
+// ---- attachments: what is needed, what is removed (S26, S27) ----
+
+#[test]
+fn s7_s26_a_note_in_the_trash_keeps_its_content_and_a_purged_one_loses_it_everywhere() {
+    let storage = tempfile::tempdir().unwrap();
+    let (a, b) = (device(), device());
+    let trashed = add(&a, "в корзину");
+    let first = attach(&a, &trashed, "1.txt", b"one");
+    let second = attach(&a, &trashed, "2.txt", b"two");
+    let kept = add(&a, "живая");
+    let removed = attach(&a, &kept, "3.txt", b"three");
+    let (v, w) = (add(&a, "v"), add(&a, "w"));
+    let shared = attach(&a, &v, "4.txt", b"four");
+    attach(&a, &w, "4.txt", b"four");
+    sync_all(&a, &storage);
+    sync_all(&b, &storage);
+    let all = [&first.sha256, &second.sha256, &removed.sha256, &shared.sha256];
+    assert!(all.iter().all(|h| on_device(&b, h) && in_storage(&storage, h)));
+
+    // A note in the Trash keeps its content everywhere.
+    a.delete_note(trashed.id.clone()).unwrap();
+    sync_all(&a, &storage);
+    sync_all(&b, &storage);
+    assert!(all
+        .iter()
+        .all(|h| on_device(&a, h) && on_device(&b, h) && in_storage(&storage, h)));
+
+    // Deleted for good, or taken off a note: gone; content another attachment refers to stays.
+    a.purge_note(trashed.id.clone()).unwrap();
+    a.remove_attachment(removed.id.clone()).unwrap();
+    a.purge_note(v.id.clone()).unwrap();
+    sync_all(&a, &storage);
+    sync_all(&b, &storage);
+    assert!(b.get_note(trashed.id).is_err(), "the note is gone from B");
+    for gone in [&first.sha256, &second.sha256, &removed.sha256] {
+        assert!(!on_device(&a, gone) && !on_device(&b, gone) && !in_storage(&storage, gone));
+    }
+    assert!(on_device(&a, &shared.sha256) && on_device(&b, &shared.sha256) && in_storage(&storage, &shared.sha256));
+
+    // The last note that refers to it goes: so does the content.
+    a.purge_note(w.id).unwrap();
+    sync_all(&a, &storage);
+    sync_all(&b, &storage);
+    assert!(!on_device(&a, &shared.sha256) && !on_device(&b, &shared.sha256) && !in_storage(&storage, &shared.sha256));
+}
+
+#[test]
+fn s26_a_run_that_did_not_read_everything_removes_nothing() {
+    let storage = tempfile::tempdir().unwrap();
+    let (a, b) = (device(), device());
+    let n = add(&a, "с файлом");
+    let att = attach(&a, &n, "1.txt", b"one");
+    sync_all(&a, &storage);
+    sync_all(&b, &storage);
+
+    // A file of A's log that B cannot read yet.
+    add(&a, "ещё");
+    sync(&a, &storage);
+    let name = files(&storage, "log")
+        .into_iter()
+        .rfind(|n| n.starts_with(&a.device_id()))
+        .unwrap();
+    let path = storage.path().join(ROOT).join("log").join(&name);
+    let whole = std::fs::read(&path).unwrap();
+    std::fs::write(&path, &whole[..whole.len() / 2]).unwrap();
+
+    b.remove_attachment(att.id.clone()).unwrap();
+    sync_all(&b, &storage);
+    assert!(on_device(&b, &att.sha256) && in_storage(&storage, &att.sha256));
+
+    std::fs::write(&path, &whole).unwrap();
+    sync_all(&b, &storage);
+    assert!(!on_device(&b, &att.sha256) && !in_storage(&storage, &att.sha256));
+}
+
+#[test]
+fn s26_a_device_without_sync_removes_unneeded_content_when_it_starts() {
+    let a = device();
+    let n = add(&a, "с файлом");
+    let att = attach(&a, &n, "1.txt", b"one");
+    a.remove_attachment(att.id).unwrap();
+    assert!(on_device(&a, &att.sha256));
+    Store::open(a.dir().to_string_lossy().into_owned()).unwrap();
+    assert!(!on_device(&a, &att.sha256));
+}
+
+#[test]
+fn s27_content_attached_again_without_a_connection_comes_back_to_the_storage() {
+    let storage = tempfile::tempdir().unwrap();
+    let (a, b, c) = (device(), device(), device());
+    let n = add(&a, "у A");
+    let att = attach(&a, &n, "1.txt", b"one");
     sync_all(&a, &storage);
     sync_all(&b, &storage); // B downloads the content and counts it as in the storage.
 
-    // Without a connection B attaches the same file to a task of its own.
+    // Without a connection B attaches the same file to a note of its own.
     let u = add(&b, "у B");
     attach(&b, &u, "1.txt", b"one");
 
-    // A deletes its task for good and removes the content from the storage.
-    a.delete_task(t.id.clone()).unwrap();
+    // A deletes its note for good and removes the content from the storage.
+    a.delete_note(n.id.clone()).unwrap();
     a.empty_trash().unwrap();
     sync_all(&a, &storage);
     assert!(!in_storage(&storage, &att.sha256));
 
-    // B uploads its task but still counts the content as in the storage.
+    // B uploads its note but still counts the content as in the storage.
     sync_all(&b, &storage);
     assert!(!in_storage(&storage, &att.sha256));
     sync(&c, &storage);
@@ -2124,11 +2094,11 @@ fn s48_content_attached_again_without_a_connection_comes_back_to_the_storage() {
 }
 
 #[test]
-fn s48_a_device_that_reads_the_removal_does_not_remove_it_again() {
+fn s27_a_device_that_reads_the_removal_does_not_remove_it_again() {
     let storage = tempfile::tempdir().unwrap();
     let (a, b) = (device(), device());
-    let t = add(&a, "с файлом");
-    let att = attach(&a, &t, "1.txt", b"one");
+    let n = add(&a, "с файлом");
+    let att = attach(&a, &n, "1.txt", b"one");
     sync_all(&a, &storage);
     sync_all(&b, &storage);
 
@@ -2146,29 +2116,100 @@ fn s48_a_device_that_reads_the_removal_does_not_remove_it_again() {
     assert!(!on_device(&b, &att.sha256));
 }
 
+// ---- convergence ----
+
+/// Three devices make random edits and sync in random order; once everyone has
+/// synced twice with no edits in between, all three must show the same data.
 #[test]
-fn s51_a_tag_at_the_limit_syncs_and_a_longer_one_from_before_is_not_shown() {
-    let storage = tempfile::tempdir().unwrap();
-    let (a, b) = (device(), device());
-    let t = add(&a, "задача");
-    // Both scripts at the byte limit: 196 Latin letters and 98 Cyrillic ones.
-    let latin = "a".repeat(196);
-    let cyrillic = "я".repeat(98);
-    a.add_tag(t.id.clone(), latin.clone()).unwrap();
-    a.add_tag(t.id.clone(), cyrillic.clone()).unwrap();
-    let long = "b".repeat(197);
+fn devices_converge_whatever_the_order_of_edits_and_syncs() {
+    for seed in 1..=8u64 {
+        let storage = tempfile::tempdir().unwrap();
+        let devices = [device(), device(), device()];
+        devices[1].set_compact_after_for_tests(4);
+        let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let mut rnd = |n: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % n as u64) as usize
+        };
+        let mut notes: Vec<String> = Vec::new();
+        let mut folders: Vec<String> = Vec::new();
+        let mut minute = 0;
+        for step in 0..200 {
+            let d = &devices[rnd(3)];
+            minute += 1;
+            d.set_now_for_tests(&format!("2026-10-05T{:02}:{:02}", 10 + minute / 60, minute % 60));
+            let note = if notes.is_empty() {
+                None
+            } else {
+                Some(notes[rnd(notes.len())].clone())
+            };
+            let folder = if folders.is_empty() {
+                None
+            } else {
+                Some(folders[rnd(folders.len())].clone())
+            };
+            let knows_note = |id: &String| d.get_note(id.clone()).is_ok();
+            let knows_folder = |id: &String| d.folder(id.clone()).is_ok();
+            match (rnd(17), note, folder) {
+                (0..=2, _, _) | (_, None, _) => {
+                    let parent = folder_of(&folders, &mut rnd).filter(|f| knows_folder(f));
+                    let created = d
+                        .create_note(NewNote {
+                            title: format!("note {step}"),
+                            folder_id: parent,
+                            ..NewNote::default()
+                        })
+                        .unwrap();
+                    notes.push(created.id);
+                }
+                (3, Some(id), _) if knows_note(&id) => d.set_title(id, format!("renamed {step}")).unwrap(),
+                (4, Some(id), _) if knows_note(&id) => d.set_pinned(id, rnd(2) == 0).unwrap(),
+                (5, Some(id), _) if knows_note(&id) => d.set_starred(id, rnd(2) == 0).unwrap(),
+                (6, Some(id), _) if knows_note(&id) => d.add_tag(id, format!("T{}", rnd(3))).unwrap(),
+                (7, Some(id), _) if knows_note(&id) => d.remove_tag(id, format!("t{}", rnd(3))).unwrap(),
+                (8, Some(id), _) if knows_note(&id) => d.delete_note(id).unwrap(),
+                (9, Some(id), _) if knows_note(&id) => d.restore_note(id).unwrap(),
+                (10, Some(id), f) if knows_note(&id) => d.move_note(id, f.filter(|f| knows_folder(f))).unwrap(),
+                (11, _, _) => {
+                    let parent = folder_of(&folders, &mut rnd).filter(|f| knows_folder(f));
+                    folders.push(d.create_folder(format!("folder {step}"), parent).unwrap().id);
+                }
+                (12, _, Some(id)) if knows_folder(&id) => {
+                    // Rejected when it would create a cycle locally; that is fine.
+                    let parent = folder_of(&folders, &mut rnd).filter(|f| knows_folder(f));
+                    d.move_folder(id, parent, None).ok();
+                }
+                (13, _, Some(id)) if knows_folder(&id) => drop(d.delete_folder(id).unwrap()),
+                (14, Some(id), _) if knows_note(&id) => d.set_archived(id, rnd(2) == 0).unwrap(),
+                (15, Some(id), _) if knows_note(&id) && rnd(4) == 0 => d.purge_note(id).unwrap(),
+                _ => drop(sync(d, &storage)),
+            }
+        }
+        for _ in 0..2 {
+            for d in &devices {
+                sync(d, &storage);
+            }
+        }
+        for d in &devices {
+            d.set_now_for_tests("2026-10-06T10:00");
+        }
+        let reference = dump(&devices[0]);
+        assert!(reference.len() > 8, "seed {seed}: the run produced data");
+        for (i, d) in devices.iter().enumerate().skip(1) {
+            assert_eq!(dump(d), reference, "seed {seed}: device {i} differs");
+        }
+        for d in &devices {
+            assert_eq!(sync(d, &storage).pulled, 0, "seed {seed}: nothing left to pull");
+        }
+    }
+}
 
-    // An earlier version took any word for a tag and left its field in the database.
-    let a = plant(a, &[("task", &t.id, &format!("tag:{long}"), serde_json::json!(true))]);
-    let shown = vec![latin, cyrillic];
-    assert_eq!(
-        a.task(t.id.clone()).unwrap().tags,
-        shown,
-        "a tag no register can carry is not shown"
-    );
-
-    sync(&a, &storage);
-    sync(&b, &storage);
-    assert_eq!(b.task(t.id.clone()).unwrap().tags, shown);
-    assert_eq!(a.task(t.id).unwrap().tags, shown);
+fn folder_of(folders: &[String], rnd: &mut impl FnMut(usize) -> usize) -> Option<String> {
+    if folders.is_empty() || rnd(3) == 0 {
+        None
+    } else {
+        Some(folders[rnd(folders.len())].clone())
+    }
 }
