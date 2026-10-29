@@ -29,12 +29,12 @@ The interface is in English with a Russian localization and follows the system l
 - R14. Deleting a folder moves the folder, its subfolders and all their notes to the Trash, after a confirmation that names the number of notes. Restoring a note puts it back into its folder and restores the folders on the way if they are in the Trash (S10 in [sync.md](sync.md)).
 - R15. A folder name is not empty and not longer than 200 characters; two folders in one parent may have the same name.
 - R16. Each folder has its own display settings: sort by last edit (the default), by creation or by title, ascending or descending; show the preview; show the date. Pinned notes come first under any sort. The system views (R44) have the same settings, stored on the device.
-- R17. **Daily mode.** A folder can be switched to daily mode. In such a folder the list of notes is grouped by the day of creation, newest first, under date headers. "New note" in it creates a note whose title is today's date in the long form of the interface language (for example "29 October 2026" or "29 октября 2026"); the title can be changed. Several notes per day are allowed.
+- R17. **Daily mode.** A folder can be switched to daily mode. In such a folder the list of notes is grouped by the day of creation, newest first, under date headers. "New note" in it creates a note whose title is today's date in the long form of the interface language (for example "29 October 2026" or "29 октября 2026"); the title can be changed. If the folder already has a note created today, "New note" opens it with the cursor at the end of its text instead. A second note for the same day is created through the menu item "New entry for today".
 
 ### Tags
 
 - R20. Tags are shown as chips under the title of a note. A tag is added by typing in the field after the chips, with completion from the existing tags; Return or a comma ends it. A tag is removed by its chip.
-- R21. A tag name is one or more words without the characters `,` and `#`, of up to 196 bytes of UTF-8 (S5 in [sync.md](sync.md)); leading and trailing spaces are dropped. Tags are compared ignoring case: "Work" and "work" are one tag, and the spelling first written is kept.
+- R21. A tag name is one or more words separated by spaces, without the characters `,` and `#`, of up to 196 bytes of UTF-8 (S5 in [sync.md](sync.md)); leading and trailing spaces are dropped. Tags are compared ignoring case: "Work" and "work" are one tag, and the spelling first written is kept.
 - R22. The sidebar lists the tags with the number of notes; choosing a tag lists its notes from all folders. A tag can be renamed and deleted for all notes at once; renaming into an existing tag merges the two.
 - R23. A word with `#` in the text of a note is ordinary text, not a tag.
 
@@ -58,7 +58,7 @@ The interface is in English with a Russian localization and follows the system l
 
 ### Version history
 
-- R40. Every note has a history of versions of its text. A version is the state of the text after a period of edits followed by five minutes without edits, on any device; the list shows the time, the device and how many characters were added and removed.
+- R40. Every note has a history of versions of its text. A version is the state of the text after a period of edits followed by five minutes without edits, on any device; during continuous editing a version is also taken once an hour; the list shows the time, the device and how many characters were added and removed.
 - R41. A version opens read-only, with the changes against the current text highlighted.
 - R42. "Restore this version" writes into the current text the edit that turns it into that version. It is an ordinary edit: it syncs, it can be undone, and it does not remove later versions from the history.
 - R43. The history covers the text only. The title, the folder, the tags and the flags keep only their current value.
@@ -131,11 +131,11 @@ The interface is in English with a Russian localization and follows the system l
 Each requirement is covered by a test named after its identifier where the behaviour lives in the core (`r14_*` in `core/tests/`), and checked in the apps by hand where it is in the interface; the specification records which checks were made. Examples of the scenarios:
 
 - R14: a folder with a subfolder and three notes is deleted → the confirmation names three notes; all of them and both folders are in the Trash; restoring one note restores both folders, and the other two notes stay in the Trash.
-- R17: a folder in daily mode → "New note" gives a note titled with today's date; on the next day the list has two date headers.
+- R17: a folder in daily mode → "New note" gives a note titled with today's date; "New note" again opens the same note; "New entry for today" gives a second one; on the next day the list has two date headers.
 - R21: tags "Work" and "work" on two notes → one tag with two notes in the sidebar.
 - R28: a locked note → typing does nothing, "Unlock" makes it editable; an edit from another device appears in a locked note.
 - R33: the link to an image is deleted from the text → the image is in the attachments panel as "Not in the text"; "Insert at cursor" brings it back; "Delete" removes it, and after the note is deleted for good its content is gone from the storage.
-- R40–R42: edits at 10:00 and 10:20 → two versions; restoring the 10:00 version gives its text, and the 10:20 version is still in the history; on another device the text is the restored one.
+- R40–R42: edits at 10:00 and 10:20 → two versions; edits every minute from 11:00 to 13:30 → versions at about 12:00, 13:00 and after the last edit; restoring the 10:00 version gives its text, and the 10:20 version is still in the history; on another device the text is the restored one.
 - R46: a note deleted 31 days ago with `trash_days` 30 → it is deleted for good on the next start, with its attachments.
 - R47: a note with `**слёзы**` → found by "слезы" and by "лёз".
 - R50: a link to a note, then the note is renamed and moved → the link opens it; the note shows the first one under "Linked from".
@@ -144,9 +144,3 @@ Each requirement is covered by a test named after its identifier where the behav
 ## Later
 
 Planned after the first version, in no fixed order: protected notes (opening needs biometrics or a password); grammar checking through a LanguageTool server; automatic export to a local folder; an S3 transport; import from Markdown folders (Obsidian), Bear and Apple Notes; a title format for new notes; quick photos into a note on Android; the web clipper; an API with tokens for scripts, as in Lists.
-
-## Open questions
-
-- R17: whether "New note" in a daily folder should open today's note when it already exists, instead of creating a second one.
-- R21: whether a tag name may contain spaces. The specification allows them; Standard Notes allows them too, while inline `#tags` in other apps do not.
-- R40: whether five minutes of quiet is the right boundary of a version.

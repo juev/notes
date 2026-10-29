@@ -14,7 +14,7 @@ The rule from the request: within a note the user changes only the kind of text 
 
 - E1. A note is CommonMark with the GitHub extensions: tables, task list items (`- [ ]`, `- [x]`), strikethrough (`~~text~~`) and autolinks. Added on top: highlight (`==text==`).
 - E2. Headings of levels 1 to 6 are recognised; levels 1, 2 and 3 have their own size, and levels 4 to 6 look like level 3 (E47).
-- E3. Fenced code blocks carry a language after the fence; the core highlights at least `bash`, `sh`, `shell`, `zsh`, `javascript`, `typescript`, `json`, `yaml`, `toml`, `markdown`, `python`, `go`, `rust`, `swift`, `kotlin`, `sql`, `html`, `css`, `diff` and `dockerfile`, and shows any other language and `text`/`plain` without highlighting. The highlighting library is chosen when the core is written; it runs in the core and returns ranges with a token class, like the rest of the parsing (E10).
+- E3. Fenced code blocks carry a language after the fence; the core highlights at least `bash`, `sh`, `shell`, `zsh`, `javascript`, `typescript`, `json`, `yaml`, `toml`, `markdown`, `python`, `go`, `rust`, `swift`, `kotlin`, `sql`, `html`, `css`, `diff` and `dockerfile`, and shows any other language and `text`/`plain` without highlighting. Highlighting runs in the core with `syntect` and its pure-Rust regex engine (`fancy-regex`), so the core needs no C library on any platform; it returns ranges with a token class, like the rest of the parsing (E10). Only the syntaxes of the languages above are built in. The growth of the core on Android and of the web server is measured when highlighting is added and recorded in the status of this document. Decision of the author of the project of 2026-10-29.
 - E4. Raw HTML in a note is shown as text and is never interpreted. A link with a scheme other than `http`, `https`, `mailto`, `attachment` and `note` is shown but does not open.
 - E5. The core departs from CommonMark where Lists does: a lone `-` under a line of text starts a list item instead of turning the line above into a heading.
 
@@ -30,7 +30,7 @@ The rule from the request: within a note the user changes only the kind of text 
 
 ### Editing
 
-- E20. Formatting is applied from the toolbar, from the context menu and by shortcuts on macOS and the web: ⌘B bold, ⌘I italic, ⇧⌘X strikethrough, ⌘E code, ⇧⌘H highlight, ⌘K link, ⌘1 to ⌘3 headings, ⌘0 plain paragraph, ⇧⌘8 bulleted list, ⇧⌘7 numbered list, ⇧⌘9 task list, ⇧⌘. quote. On Android the same actions are on a bar above the keyboard.
+- E20. Formatting is applied from the toolbar, from the context menu and by shortcuts on macOS and the web: ⌘B bold, ⌘I italic, ⇧⌘X strikethrough, ⌘E code, ⇧⌘H highlight, ⌘K link, ⌘1 to ⌘3 headings, ⌘0 plain paragraph, ⇧⌘8 bulleted list, ⇧⌘7 numbered list, ⇧⌘9 task list, ⇧⌘. quote. On Android the same actions are on a bar above the keyboard. Typing the markers by hand gives the same result on every platform, since the text is Markdown.
 - E21. Applying a format inserts its markers around the selection or the word at the cursor; applying it again where it is already set removes the markers. A line format replaces the line format the line already has.
 - E22. Return in a list item continues the list with the next marker; Return in an empty item ends the list. Tab and ⇧Tab change the level of a list item. The core decides the edit (`markdown_newline` in Lists), and the platform applies it as ordinary input.
 - E23. Pasting rich text (HTML from a browser or a word processor) converts it in the core to Markdown of this dialect; pasting as plain text (⌥⇧⌘V on macOS, the menu elsewhere) inserts the text as it is. Pasting a URL over a selection makes a link with the selection as its text. Pasting an image or a file creates an attachment (R30 in [product.md](product.md)).
@@ -79,8 +79,6 @@ The parsing rules are covered by tests in `core/tests/markdown.rs` named after t
 - E48: a line ending in `в` → `в` moves to the next line with its word.
 - E51: a misspelled word inside a code span → not underlined.
 
-## Open questions
+## To check
 
-- E3: which highlighting library to use in the core (both `syntect` and `tree-sitter-highlight` exist for Rust), and its cost in the size of the Android and web builds.
-- E20: whether Android needs a few Markdown shortcuts typed as text (for example `**` around a word applying bold), on top of the toolbar.
-- E50: whether the text field on Android, painted by our own editor, gets the system spell checker; if not, the check on Android is done through the spell checker service by hand. Not checked.
+- E50: whether the text field on Android, painted by our own editor, gets the system spell checker. If it does not, the editor asks the spell checker service of the system itself and paints the underlines from its answers. Checked on an emulator before the Android editor is built.

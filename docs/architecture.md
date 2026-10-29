@@ -72,6 +72,8 @@ Nextcloud Notes API and git were rejected: the first ties the app to one server,
 
 The note is stored as Markdown; formatting is a matter of display. The core parses the text and returns ranges: what to style, what to hide, what to replace with a bullet, a rule or a checkbox. The platforms only paint. This is the scheme of Lists (`core/src/markdown.rs` there, `pulldown-cmark`). The dialect and the editing rules are in [editor.md](specs/editor.md).
 
+Code blocks are highlighted in the core as well, with `syntect` on its pure-Rust regex engine (decision of the author of the project of 2026-10-29). Rejected: `tree-sitter-highlight`, which parses more precisely but brings a grammar in C for each language, built for every target. Highlighting on each platform was not considered: three highlighters would colour the same block differently.
+
 Within a note the user changes only the kind of text: bold, italic, code, headings, lists and so on. The font, the size, the spacing and the alignment are global settings for all notes (decision of the author of the project on 2026-10-29). They are shared by all devices, except the font size and the column width, which each device keeps for itself, because a phone and a desktop need different values.
 
 The fonts the app offers are bundled with it, so that a note looks the same on macOS, Android and the web. The candidates are fonts under the SIL Open Font License: Literata, Inter, iA Writer Quattro and JetBrains Mono for code. The licence of each is checked when it is added.
