@@ -1,0 +1,4 @@
+# One compiler for every machine and for CI, so that clippy and rustfmt agree.
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy"]

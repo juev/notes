@@ -1,0 +1,72 @@
+Task ID,Type,Name,Status,Project,Context,Start Date,Due Date,Completion Date,Duration,Flagged,Notes
+1,Project,Project 1,active,,,,,,,0,
+1.1,Action,Action 1.1,,Project 1,,,,,,0,
+1.2,Action,Action 1.2,,Project 1,,,,,,0,Note 1.2 line 1
+1.3,Action,Action 1.3,,Project 1,,,,,,0,
+1.3.1,Action,Action 1.3.1,,Project 1,,,,,,0,Note 1.3.1 line 1
+1.3.2,Action,Action 1.3.2,,Project 1,,,,,,0,Note 1.3.2 line 1
+1.3.3,Action,Action 1.3.3,,Project 1,,,,,,0,Note 1.3.3 line 1
+1.3.4,Action,Action 1.3.4,,Project 1,,,,,,0,Note 1.3.4 line 1
+1.3.5,Action,Action 1.3.5,,Project 1,,,,,,0,Note 1.3.5 line 1
+1.4,Action,Action 1.4,,Project 1,,,,,,0,
+1.4.1,Action,Action 1.4.1,,Project 1,,,,,,0,Note 1.4.1 line 1
+1.4.2,Action,Action 1.4.2,,Project 1,,,,,,0,"Note 1.4.2 line 1
+Note 1.4.2 line 2
+Note 1.4.2 line 3"
+1.4.3,Action,Action 1.4.3,,Project 1,,,,,,0,Note 1.4.3 line 1
+1.4.4,Action,Action 1.4.4,,Project 1,,,,,,0,Note 1.4.4 line 1
+4,Project,Project 4,active,,,,,,,0,
+4.1,Action,Action 4.1,,Project 4,,,2018-11-20 12:00:00 +0000,2018-11-20 09:25:06 +0000,,0,
+4.2,Action,Action 4.2,,Project 4,,,2018-11-21 12:00:00 +0000,2018-11-21 12:14:13 +0000,,0,
+6,Project,Project 6,active,,,,,,,0,
+6.1,Action,Action 6.1,,Project 6,,,2018-11-20 12:00:00 +0000,2018-11-20 11:41:34 +0000,,0,
+10,Project,Project 10,active,,,,,,,0,
+10.1,Action,Action 10.1,,Project 10,,,,,,0,"Note 10.1 line 1
+Note 10.1 line 2"
+10.1.1,Action,Action 10.1.1,,Project 10,Context A,,,,,0,"Note 10.1.1 line 1
+Note 10.1.1 line 2"
+10.1.1.1,Action,Action 10.1.1.1,,Project 10,,,2018-03-20 09:00:00 +0000,2018-03-21 02:01:41 +0000,,0,Note 10.1.1.1 line 1
+10.1.1.2,Action,Action 10.1.1.2,,Project 10,,,2018-03-20 09:00:00 +0000,2018-03-21 02:01:44 +0000,,0,Note 10.1.1.2 line 1
+10.1.1.3,Action,Action 10.1.1.3,,Project 10,,,,,,0,Note 10.1.1.3 line 1
+10.1.1.3.1,Action,Action 10.1.1.3.1,,Project 10,,,,,,0,
+10.1.1.3.2,Action,Action 10.1.1.3.2,,Project 10,,,,,,0,
+28,Project,Project 28,done,,,,2018-03-31 12:00:00 +0000,2018-04-02 07:33:32 +0000,,0,
+28.1,Action,Action 28.1,,Project 28,,,2018-03-31 12:00:00 +0000,2018-04-02 07:33:31 +0000,,0,
+33,Project,Project 33,active,,,,,,,0,
+33.1,Action,Action 33.1,,Project 33,,,,,,0,Note 33.1 line 1
+33.1.1,Action,Action 33.1.1,,Project 33,,,,,,0,
+33.1.1.1,Action,Action 33.1.1.1,,Project 33,,,2018-03-27 13:00:00 +0000,2018-03-27 06:31:37 +0000,60m,0,
+33.1.1.2,Action,Action 33.1.1.2,,Project 33,,,,,30m,0,Note 33.1.1.2 line 1
+33.1.2,Action,Action 33.1.2,,Project 33,,,,,,0,
+33.1.2.1,Action,Action 33.1.2.1,,Project 33,,,,,60m,0,
+33.1.2.2,Action,Action 33.1.2.2,,Project 33,,,,,,0,
+33.1.2.3,Action,Action 33.1.2.3,,Project 33,,,,,,0,
+33.1.3,Action,Action 33.1.3,,Project 33,,,,,,0,
+33.1.3.1,Action,Action 33.1.3.1,,Project 33,,,,,30m,0,
+33.1.3.2,Action,Action 33.1.3.2,,Project 33,,,,,,0,
+33.2,Action,Action 33.2,,Project 33,,,,,,0,
+33.2.1,Action,Action 33.2.1,,Project 33,,,,,,0,Note 33.2.1 line 1
+33.2.1.1,Action,Action 33.2.1.1,,Project 33,,,,2018-03-23 07:19:08 +0000,,0,Note 33.2.1.1 line 1
+33.2.1.2,Action,Action 33.2.1.2,,Project 33,,,,2018-03-23 07:19:27 +0000,,0,Note 33.2.1.2 line 1
+33.2.2,Action,Action 33.2.2,,Project 33,,,,,,0,"Note 33.2.2 line 1
+Note 33.2.2 line 2
+Note 33.2.2 line 3
+Note 33.2.2 line 4"
+33.2.2.1,Action,Action 33.2.2.1,,Project 33,,,,,,0,
+33.2.2.2,Action,Action 33.2.2.2,,Project 33,,,,,,0,
+33.2.2.3,Action,Action 33.2.2.3,,Project 33,,,,,,0,
+33.2.2.4,Action,Action 33.2.2.4,,Project 33,,,,,,0,
+33.2.2.5,Action,Action 33.2.2.5,,Project 33,,,,,,0,
+33.2.3,Action,Action 33.2.3,,Project 33,,,,,,0,
+33.3,Action,Action 33.3,,Project 33,,,,,,0,
+33.3.1,Action,Action 33.3.1,,Project 33,,,,,,0,
+33.3.1.1,Action,Action 33.3.1.1,,Project 33,,,,,,0,
+33.3.1.2,Action,Action 33.3.1.2,,Project 33,,,,,,0,
+33.3.1.3,Action,Action 33.3.1.3,,Project 33,,,,,,0,
+33.3.2,Action,Action 33.3.2,,Project 33,,,,,,0,
+33.3.2.1,Action,Action 33.3.2.1,,Project 33,,,,,,0,
+33.3.2.2,Action,Action 33.3.2.2,,Project 33,,,,,,0,
+33.3.3,Action,Action 33.3.3,,Project 33,,,,,,0,
+33.3.3.1,Action,Action 33.3.3.1,,Project 33,,,,,,0,
+33.3.3.2,Action,Action 33.3.3.2,,Project 33,,,,,,0,
+33.3.3.3,Action,Action 33.3.3.3,,Project 33,,,,,,0,
