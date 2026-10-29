@@ -1,6 +1,6 @@
 # Notes: design decisions
 
-Status: decisions made on 2026-10-29 in the discussion with the author of the project; nothing is implemented yet. Sources: the request of the author of the project, the design of [juev/lists](https://github.com/juev/lists) (its `docs/architecture.md` and `docs/specs/sync.md`), the source of Standard Notes (`standardnotes/app`, branch `main` as of 2026-10-28), a decrypted Standard Notes backup of the author of the project from 2026-10-29, the documentation of Loro and of jtx Board (links at the end).
+Status: decisions made on 2026-10-29 in the discussion with the author of the project; the core is being built in stage 1 (copied from Lists, notes and folders in place, note text not yet). Sources: the request of the author of the project, the design of [juev/lists](https://github.com/juev/lists) (its `docs/architecture.md` and `docs/specs/sync.md`), the source of Standard Notes (`standardnotes/app`, branch `main` as of 2026-10-28), a decrypted Standard Notes backup of the author of the project from 2026-10-29, the documentation and source of Automerge, Loro and yrs, the RustSec advisory database, the documentation of jtx Board (links at the end).
 
 ## Name
 
@@ -27,29 +27,51 @@ The web interface comes with its own server for the same reason as in Lists: Web
 
 What is copied without changes in behaviour, up to names and paths: the per-field registers with a hybrid logical clock, the change log in a "dumb" storage (WebDAV or a folder), snapshots and their compaction by size, attachment content named by its SHA-256 and its removal through `blob/<hash>/gone`, storage encryption by a passphrase, push between devices through ntfy and UnifiedPush, the choice of side when connecting a storage, backups, the activity log, keeping secrets out of the database. [sync.md](specs/sync.md) describes them for Notes.
 
-## Note text: Loro over Markdown source
+## Note text: Automerge over Markdown source
 
-In Lists every field is a "last writer wins" register. For a long text this means that of two offline edits of one note one is lost. The author of the project chose a text CRDT on 2026-10-29 instead of the alternatives below.
+In Lists every field is a "last writer wins" register. For a long text this means that of two offline edits of one note one is lost. The author of the project chose a text CRDT on 2026-10-29 instead of the alternatives below, first Loro and then, the same day, [Automerge](https://automerge.org) after the comparison in the next section.
 
-The body of a note is a [Loro](https://loro.dev) document with one `LoroText` that holds the Markdown source exactly as typed. Two devices that edited different places of the same note while offline get both edits; edits at the same place are both kept, one after the other. All other fields of a note (title, folder, tags, flags) stay LWW registers as in Lists.
+The body of a note is an Automerge document with one text object `body` at its root that holds the Markdown source exactly as typed. Two devices that edited different places of the same note while offline get both edits; edits at the same place are both kept, one after the other. All other fields of a note (title, folder, tags, flags) stay LWW registers as in Lists.
 
-Why the Markdown source and not rich text with marks. Decided by the author of the project on 2026-10-29. Loro has a rich text type built on the Peritext criteria, where bold and italic are ranges over plain text, but then lists, tables, code blocks and headings would need a separate block model, and the editors on three platforms would edit that model instead of a string. With the source in `LoroText` the editor edits a string, the Markdown parsing of Lists (ranges in UTF-16 units, painted by the platform) is reused, and export is the text itself. The price: two concurrent edits of markup at the same place can leave stray markers (for example `****`), which the user corrects by hand.
+Why the Markdown source and not rich text with marks. Decided by the author of the project on 2026-10-29. A rich text model keeps bold and italic as ranges over plain text, but then lists, tables, code blocks and headings would need a separate block model, and the editors on three platforms would edit that model instead of a string. With the source in a text object the editor edits a string, the Markdown parsing of Lists (ranges in UTF-16 units, painted by the platform) is reused, and export is the text itself. The price: two concurrent edits of markup at the same place can leave stray markers (for example `****`), which the user corrects by hand.
 
-How Loro fits into the change log. A change of the body is not a register value but a Loro update: the bytes that Loro exports for the operations since the previous upload. Applying a Loro update is idempotent and does not depend on order, like applying a register. A snapshot of the storage carries each body as a Loro snapshot. The history kept by Loro is also the history of versions of the note ([product.md](specs/product.md), R40–R43).
+How the document fits into the change log. A change of the body is not a register value but the bytes Automerge saves for the changes since the version this device last uploaded (`save_after` with the heads of that version); the reader applies them with `load_incremental`. Applying them is idempotent and does not depend on order, like applying a register. A snapshot of the storage carries each body as a whole saved document (`save`). The history kept by Automerge is also the history of versions of the note ([product.md](specs/product.md), R40–R43).
+
+What the core adds around Automerge, because the library does not do it:
+
+- **Positions.** Documents are created and loaded with the UTF-16 text encoding (`TextEncoding::Utf16CodeUnit`, `LoadOptions::text_encoding`), so the positions of `NSString`, Kotlin and JavaScript go in without conversion. Automerge quietly moves a position that falls inside a surrogate pair; the core checks the position against the text itself and refuses it (S70 in [sync.md](specs/sync.md)).
+- **Time of changes.** Automerge stores the time the caller gives a commit (`CommitOptions::with_time`, an `i64` whose unit the caller chooses) and writes 0 without it. The core gives every commit the time of the device clock in milliseconds and never a time below the latest one in the document. Every commit is a separate change; the boundaries of versions (R40) are computed from these times.
+- **Version and undo.** There is no revert and no undo manager. Restoring a version (R42) reads the text at that version (`text_at`) and writes it over the current one with `update_text`, which makes ordinary new changes. Undo of the user's own typing in the editor (E25 in [editor.md](specs/editor.md)) is kept by the core, the way Lists keeps undo of actions, and is built with the editor.
 
 Rejected:
 
 - **LWW plus a conflict copy** (as Joplin does). The simplest option; for one person conflicts are rare. Rejected by the author of the project in favour of no loss at all.
 - **Three-way merge against the last synced version.** Needs the common ancestor on every device and still falls back to a conflict copy when edits overlap.
-- **Automerge.** A text CRDT exists there too; Loro was chosen for its Rust core with a stable format since 1.0 and its rich text and movable tree types, which leave room for later. Not measured against each other on our data.
+- **Loro** and **yrs**: see the comparison below.
 
-Checked by a prototype on 2026-10-29 with `loro` 1.17.1 (a throwaway crate outside the repository; the texts of the author's Standard Notes backup were used on the author's machine and are not in the repository):
+### Comparison of text CRDTs
 
-- **UTF-16 positions.** `LoroText` has `insert_utf16`, `delete_utf16`, `splice_utf16`, `slice_utf16` and `len_utf16`, so the positions of `NSString`, Kotlin and JavaScript go in without conversion. A position inside a surrogate pair is refused with an error. `update` turns a whole new text into edits by a diff, which suits the web page and the import.
-- **Time of changes.** With `set_record_timestamp(true)` every change carries the Unix time in seconds; `set_next_commit_timestamp` sets it explicitly (the import uses it, I5 in [import.md](specs/import.md)). The times travel in updates and in snapshots and are read on a device that did not record them. The switch itself is not stored and is set on every document the core opens. Within one document the times never go down: a commit with an earlier time gets the latest one. Consecutive local commits closer than the merge interval (1000 seconds by default) merge into one change, so the core sets the interval to 60 seconds, well below the five minutes of R40.
-- **Growth.** The 319 non-empty notes of the backup, 748 510 bytes of text, were typed character by character, committing every 20 characters and uploading every 30 commits, with 5 % of random corrections. Loro snapshots with full history took 1.89 MB (1.41 MB with gzip), the state alone 0.69 MB, and the log of updates in base64 2.04 MB; the whole run took 0.3 s. The largest note, 92 770 characters, gave a snapshot of 69 KB typed once, 229 KB with 5 % corrections and 810 KB with 30 %; loading such a snapshot took under 0.4 ms. The correction model is synthetic; real editing (moving and rewriting whole paragraphs) can grow the history faster. On these numbers the full history is kept in the first version (S21 in [sync.md](specs/sync.md)).
-- **Merge and history.** Two devices with offline edits at both ends of a text converge on the same text, and applying an update twice changes nothing. `revert_to` brings back an earlier version as new operations (R42), `diff` between two versions gives the changes to highlight (R41), and `UndoManager` undoes the local edits and leaves the ones from other devices (E25 in [editor.md](specs/editor.md)).
-- **Android.** The prototype builds for `aarch64-linux-android` with NDK 28 without changes. Loro is reached through our own UniFFI boundary there, as everything else in the core; Loro also publishes `loro-ffi`, its own UniFFI bindings, which we do not need.
+Measured on 2026-10-29 with throwaway crates outside the repository, on one machine, release builds. The texts are the 319 non-empty notes of the author's Standard Notes backup, 748 510 bytes, used on the author's machine and not stored in the repository. Each note was typed character by character, committing every 20 characters two seconds apart and uploading every 30 commits, with 5 % of random corrections and a fixed seed; the correction model is synthetic, and real editing (moving and rewriting whole paragraphs) can grow the history faster. The dependency check is `cargo deny check` with this repository's `deny.toml`, cargo-deny 0.20.2.
+
+| | loro 1.17.1 | automerge 0.12.0 | yrs 0.28.0 |
+|---|---|---|---|
+| `cargo deny` | advisories fail: 4 unmaintained crates | passes | advisories fail: `smallstr` unmaintained (RUSTSEC-2026-0215) |
+| UTF-16 positions | `insert_utf16`, `delete_utf16`, `splice_utf16`; a position inside a surrogate pair is an error | encoding chosen per document; a position inside a pair is moved silently | `OffsetKind::Utf16` per document; a position inside a pair is moved silently |
+| Time of changes | recorded by the library in seconds, never goes down; close commits merge | stored as given by the caller, 0 without it, may go down | none |
+| Convergence, applying twice | same text | same text | same text |
+| Changes with missing dependencies | not checked | kept queued and kept in the saved document (`get_missing_deps`) | kept pending |
+| Revert, diff, undo of own edits | `revert_to`, `diff`, `UndoManager` | no revert (done with `text_at` and `update_text`), `diff`, no undo manager | revert by hand, diff only without garbage collection, `UndoManager` when remote changes carry an origin |
+| Corpus: saved documents with full history (gzip) | 1.89 MB (1.41 MB) | 0.93 MB (0.93 MB, already compressed) | 1.56 MB (0.87 MB) |
+| Corpus: log of updates in base64 | 2.04 MB | 5.92 MB | 3.82 MB |
+| Corpus: run time | 0.3 s | 6.7 s | 9.3 s |
+| Largest note (92 770 characters): saved size typed once / 5 % / 30 % corrections | 69 / 229 / 810 KB | 10 / 110 / 487 KB | 93 / 230 / 813 KB |
+| Largest note: loading | 0.05–0.35 ms | 24–75 ms | 0.07–20 ms |
+| Android `aarch64-linux-android`, NDK 28 | builds | builds | builds |
+| Version | 1.x, stable format | 0.x; the 1.0 alpha and beta of 2025 were yanked; depends on `hexane 1.0.0-alpha.5` | 0.x, many breaking changes in 0.28 |
+
+Loro was the first choice: it is the fastest, keeps the shortest log, and has everything the notes need. It was dropped on 2026-10-29 by the author of the project because of its dependencies. `cargo deny` stops on four crates marked unmaintained, all archived by their authors, with no maintained version for Loro to move to: `im` 15.1.0 (RUSTSEC-2026-0248), `sized-chunks` 0.6.5 (RUSTSEC-2026-0251), `bitmaps` 2.1.0 (RUSTSEC-2026-0247), `atomic-polyfill` 1.0.3 (RUSTSEC-2023-0089). Two of them also carry reports of unsoundness without a fix, which cargo-deny did not show by default and the local advisory database does: RUSTSEC-2023-0126 (undefined behaviour on insertion into `im::OrdSet`; Loro uses only `im::HashMap` and `im::HashSet`, found by a search of its source) and RUSTSEC-2026-0255 (use-after-free in `sized_chunks::Chunk` when the destructor of an element panics and the panic is caught; release builds of the core abort on panic). Neither is reachable on our path as far as was checked, but these crates sit where the core parses data from the storage, which an unencrypted storage lets anyone with write access shape, and a new fault there would have no fix. Ignoring the advisories was possible and was rejected. yrs was rejected for the same reason (one unmaintained crate), for having no time of changes, and for its log, where every update carries the whole delete set.
+
+The price of Automerge: the log is about three times larger than with Loro, the largest note loads in up to 75 ms, the crate is before 1.0 with an alpha dependency, so its version is pinned exactly, and the core supplies positions inside surrogate pairs, the time of changes, revert and undo itself.
 
 ## Storage: only the change log
 
@@ -103,6 +125,7 @@ Spelling is checked by the system on each platform: `NSSpellChecker` on macOS, t
 ## Sources
 
 - Lists: <https://github.com/juev/lists>, `docs/architecture.md`, `docs/specs/sync.md`, `docs/specs/product.md`
-- Loro: <https://loro.dev/blog/v1.0>, <https://loro.dev/blog/loro-richtext>
+- Text CRDTs: <https://automerge.org>, <https://docs.rs/automerge/0.12.0>, <https://loro.dev/blog/v1.0>, <https://loro.dev/blog/loro-richtext>, <https://docs.rs/yrs/0.28.0>
+- Advisories: <https://rustsec.org/advisories/RUSTSEC-2026-0248>, <https://rustsec.org/advisories/RUSTSEC-2026-0251>, <https://rustsec.org/advisories/RUSTSEC-2026-0247>, <https://rustsec.org/advisories/RUSTSEC-2023-0089>, <https://rustsec.org/advisories/RUSTSEC-2023-0126>, <https://rustsec.org/advisories/RUSTSEC-2026-0255>, <https://rustsec.org/advisories/RUSTSEC-2026-0215>
 - VJOURNAL: <https://jtx.techbee.at/compatibility>, <https://help.nextcloud.com/t/synchronizing-notes-over-caldav-as-vjournal-format/1676>, <https://www.rfc-editor.org/rfc/rfc5545>
 - Standard Notes: <https://github.com/standardnotes/app>, <https://standardnotes.com/help/14>, <https://standardnotes.com/features>
