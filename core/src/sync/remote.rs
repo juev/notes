@@ -47,7 +47,7 @@ pub trait Remote: Send + Sync {
 /// A move made of the operations every storage has: read, write, delete.
 /// R140: the content goes through a temporary file, so a large attachment is not held in memory.
 pub(crate) fn copy_over<R: Remote + ?Sized>(remote: &R, from: &str, to: &str) -> Result<bool> {
-    let tmp = std::env::temp_dir().join(format!("lists-copy-{}.part", uuid::Uuid::now_v7().simple()));
+    let tmp = std::env::temp_dir().join(format!("notes-copy-{}.part", uuid::Uuid::now_v7().simple()));
     let found = {
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true);

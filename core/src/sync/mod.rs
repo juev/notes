@@ -1,15 +1,14 @@
 //! Sync through dumb file storage. Layout and rules: docs/specs/sync.md.
 //!
 //! ```text
-//! lists/vault.json
-//! lists/log/<device>-<seq>.jsonl     immutable batch of field changes
-//! lists/log/<device>-<seq>.snap      empty: the device has a snapshot as of <seq>
-//! lists/snap/<device>-<seq>.jsonl    full state of a device as of its log <seq>, gzip
-//! lists/blobs/<aa>/<sha256>          attachment content
-//! lists/v1/vault.json                format 3: the storage moved here from lists/v1/
+//! notes/vault.json
+//! notes/log/<device>-<seq>.jsonl     immutable batch of field changes
+//! notes/log/<device>-<seq>.snap      empty: the device has a snapshot as of <seq>
+//! notes/snap/<device>-<seq>.jsonl    full state of a device as of its log <seq>, gzip
+//! notes/blobs/<aa>/<sha256>          attachment content
 //! ```
 //!
-//! Format 4 is the same layout with the files sealed under a passphrase (S54, `seal`).
+//! Format 2 is the same layout with the files sealed under a passphrase (S28, `seal`).
 //!
 //! A device only ever writes files carrying its own id, so two devices never
 //! write the same file and no locking is needed.
@@ -45,15 +44,11 @@ use remote::{DirRemote, Remote};
 use seal::{Keys, SealedRemote, Wrapped};
 use webdav::WebDavRemote;
 
-const ROOT: &str = "lists";
-/// S49: where the storage lived before #294. Only its `vault.json` stays, and says the storage moved.
-const LEGACY: &str = "lists/v1";
-/// S49: the format `lists/v1/vault.json` gets after the move: earlier versions stop on it (S14).
-const MOVED: u32 = 3;
-/// S46: the storage format this version writes; it reads format 1 as well.
-const FORMAT: u32 = 2;
-/// S54: a storage whose files are sealed under a passphrase.
-const SEALED: u32 = 4;
+const ROOT: &str = "notes";
+/// S17: the storage format this version writes and reads.
+const FORMAT: u32 = 1;
+/// S29: a storage whose files are sealed under a passphrase.
+const SEALED: u32 = 2;
 /// S56: the vault id of the encrypted storage this device has synced with.
 const SEALED_VAULT: &str = "sealed_vault";
 /// S56: files left in the clear when the storage was encrypted, still to be removed.
@@ -233,10 +228,6 @@ fn index(names: &[String], suffix: &str) -> Index {
 
 fn blob_remote_path(sha256: &str) -> String {
     format!("{ROOT}/blobs/{}/{}", &sha256[..2], sha256)
-}
-
-fn legacy_blob_path(sha256: &str) -> String {
-    format!("{LEGACY}/blobs/{}/{}", &sha256[..2], sha256)
 }
 
 fn read_vault(remote: &dyn Remote, path: &str) -> Result<Option<Vault>> {
@@ -479,37 +470,15 @@ impl Store {
                     *self.sealed.lock().unwrap_or_else(|p| p.into_inner()) = Some((remote.id(), Sealing::Locked));
                     return self.open_vault(&vault);
                 }
-                older if older < SEALED && was_sealed.is_some() => return Err(AppError::sync(NOT_SEALED)),
-                FORMAT => {}
-                // S46: the storage moves on; its files of format 1 stay readable.
-                1 => put_vault(remote, &path, FORMAT, &vault.vault)?,
+                FORMAT if was_sealed.is_some() => return Err(AppError::sync(NOT_SEALED)),
+                FORMAT => return Ok(Sealing::Clear),
                 other => return Err(newer_format(other)),
             }
-            // S49: a device of an earlier version may have written to the old place since the move.
-            let names = remote.list(&format!("{LEGACY}/log"))?;
-            if names
-                .iter()
-                .any(|n| parse_name(n, DATA).or_else(|| parse_name(n, MARK)).is_some())
-            {
-                self.move_legacy(remote, false)?;
-            }
-            return Ok(Sealing::Clear);
         }
         if was_sealed.is_some() {
             return Err(AppError::sync(NOT_SEALED));
         }
-        let legacy = format!("{LEGACY}/vault.json");
-        let id = match read_vault(remote, &legacy)? {
-            Some(vault) if matches!(vault.format, 1 | 2 | MOVED) => {
-                self.move_legacy(remote, true)?;
-                vault.vault
-            }
-            Some(vault) => return Err(newer_format(vault.format)),
-            None => uuid::Uuid::now_v7().to_string(),
-        };
-        // S49: the new place is named last but one, the old one is closed last, so a move cut short starts over.
-        put_vault(remote, &path, FORMAT, &id)?;
-        put_vault(remote, &legacy, MOVED, &id)?;
+        put_vault(remote, &path, FORMAT, &uuid::Uuid::now_v7().to_string())?;
         Ok(Sealing::Clear)
     }
 
@@ -558,40 +527,6 @@ impl Store {
             data,
         });
         Ok(data)
-    }
-
-    /// S49: moves the files of `lists/v1/` to the same names under `lists/`.
-    /// Attachment content goes along with `blobs`; after the move it is looked
-    /// for one file at a time (`download_blob`).
-    fn move_legacy(&self, remote: &dyn Remote, blobs: bool) -> Result<()> {
-        let mut moved = 0;
-        for dir in ["log", "snap", "push"] {
-            for name in remote.list(&format!("{LEGACY}/{dir}"))? {
-                let ours = match dir {
-                    "push" => name.ends_with(".json"),
-                    _ => parse_name(&name, DATA).or_else(|| parse_name(&name, MARK)).is_some(),
-                };
-                if ours && remote.rename(&format!("{LEGACY}/{dir}/{name}"), &format!("{ROOT}/{dir}/{name}"))? {
-                    moved += 1;
-                }
-            }
-        }
-        if blobs {
-            for folder in remote.folders(&format!("{LEGACY}/blobs"))? {
-                for name in remote.list(&format!("{LEGACY}/blobs/{folder}"))? {
-                    if is_sha256(&name)
-                        && name.starts_with(&folder)
-                        && remote.rename(&legacy_blob_path(&name), &blob_remote_path(&name))?
-                    {
-                        moved += 1;
-                    }
-                }
-            }
-        }
-        self.note(LogLevel::Info, "sync", || {
-            format!("moved {moved} files from {LEGACY}/ to {ROOT}/")
-        });
-        Ok(())
     }
 
     /// Whether the marks in `log/` leave something unexplained: a device whose
@@ -876,41 +811,21 @@ impl Store {
         Ok(sent)
     }
 
-    /// Whether the content arrived, and why not when it did not. An encrypted
-    /// storage has nothing in the old place to look at (`legacy`, S49).
-    fn download_blob(&self, remote: &dyn Remote, sha256: &str, legacy: bool) -> Result<Fetched> {
+    /// Whether the content arrived, and why not when it did not.
+    fn download_blob(&self, remote: &dyn Remote, sha256: &str) -> Result<Fetched> {
         let path = blob_remote_path(sha256);
         let local = self.blob_path(sha256);
         // A pass and a request (S35) may fetch the same content at once: each writes its own file.
         let tmp = local.with_extension(format!("{}.part", uuid::Uuid::now_v7().simple()));
         let max = self.attachment_limits().max_file;
         let mut out = HashingWriter::new(private_create(&tmp)?);
-        let mut found = match remote.get_to(&path, &mut out, max) {
+        let found = match remote.get_to(&path, &mut out, max) {
             Ok(found) => found,
             Err(e) => {
                 let _ = std::fs::remove_file(&tmp);
                 return Err(e);
             }
         };
-        // S49: content a device of an earlier version uploaded to the old place after the move.
-        if !found && legacy {
-            match remote.rename(&legacy_blob_path(sha256), &path) {
-                Ok(true) => {
-                    found = match remote.get_to(&path, &mut out, max) {
-                        Ok(found) => found,
-                        Err(e) => {
-                            let _ = std::fs::remove_file(&tmp);
-                            return Err(e);
-                        }
-                    };
-                }
-                Ok(false) => {}
-                Err(e) => {
-                    let _ = std::fs::remove_file(&tmp);
-                    return Err(e);
-                }
-            }
-        }
         if !found {
             let _ = std::fs::remove_file(&tmp);
             return Ok(Fetched::Missing);
@@ -968,7 +883,7 @@ impl Store {
                     (Way::Up, sent.map(|_| ()).map_err(|e| Trouble::Failed(e.to_string())))
                 }
             } else {
-                let outcome = match self.download_blob(remote, sha256, !view.sealed()) {
+                let outcome = match self.download_blob(remote, sha256) {
                     Ok(Fetched::Stored) => {
                         report.downloaded += 1;
                         Ok(())
@@ -1833,14 +1748,11 @@ impl Store {
         if !self.holds_data()? {
             return Ok(false);
         }
-        // S49: a storage not moved yet holds its files in the old place.
         let files = |remote: &dyn Remote| -> Result<bool> {
-            for root in [ROOT, LEGACY] {
-                for dir in ["log", "snap"] {
-                    let names = remote.list(&format!("{root}/{dir}"))?;
-                    if names.iter().any(|name| parse_name(name, DATA).is_some()) {
-                        return Ok(true);
-                    }
+            for dir in ["log", "snap"] {
+                let names = remote.list(&format!("{ROOT}/{dir}"))?;
+                if names.iter().any(|name| parse_name(name, DATA).is_some()) {
+                    return Ok(true);
                 }
             }
             Ok(false)
@@ -1978,7 +1890,7 @@ impl Store {
                 return Err(AppError::sync("the content of this attachment is not in the storage"));
             };
             let view = self.view(raw.as_ref())?;
-            match self.download_blob(view.remote(), &attachment.sha256, !view.sealed())? {
+            match self.download_blob(view.remote(), &attachment.sha256)? {
                 Fetched::Stored => Ok(()),
                 Fetched::Missing => Err(AppError::sync(
                     "the content of this attachment has not reached the storage yet",

@@ -2,7 +2,7 @@
 //! docs/specs/product.md.
 //!
 //! ```text
-//! lists/backups/<device>/Lists_(2026-10-09-11_15_05).listsbackup   R87 without blobs/
+//! notes/backups/<device>/Notes_(2026-10-09-11_15_05).notesbackup   R87 without blobs/
 //! ```
 
 use chrono::NaiveDateTime;

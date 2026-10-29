@@ -23,9 +23,9 @@ fn sync(d: &Device, storage: &TempDir) -> SyncReport {
     d.sync_with(&DirRemote::new(storage.path())).unwrap()
 }
 
-/// The folders of `lists/backups/` and the files in each, sorted.
+/// The folders of `notes/backups/` and the files in each, sorted.
 fn copies(storage: &TempDir) -> Vec<(String, Vec<String>)> {
-    let root = storage.path().join("lists/backups");
+    let root = storage.path().join("notes/backups");
     let mut out: Vec<(String, Vec<String>)> = std::fs::read_dir(&root)
         .map(|entries| {
             entries
@@ -51,7 +51,7 @@ fn only_copy(storage: &TempDir) -> PathBuf {
     assert_eq!(found[0].1.len(), 1, "{found:?}");
     storage
         .path()
-        .join("lists/backups")
+        .join("notes/backups")
         .join(&found[0].0)
         .join(&found[0].1[0])
 }
@@ -82,12 +82,12 @@ fn s60_a_pass_puts_a_copy_without_content_once_per_period() {
     let copy = only_copy(&storage);
     assert_eq!(
         entries(&copy),
-        ["lists.sqlite", "manifest.json"],
+        ["manifest.json", "notes.sqlite"],
         "no blobs/ in a copy for the storage"
     );
     assert!(copy
         .to_string_lossy()
-        .ends_with("Lists_(2026-10-05-10_00_00).listsbackup"));
+        .ends_with("Notes_(2026-10-05-10_00_00).notesbackup"));
 
     a.set_now_for_tests("2026-10-05T10:05");
     sync(&a, &storage);
@@ -110,9 +110,9 @@ fn s60_a_device_keeps_as_many_copies_as_it_keeps_locally_and_leaves_the_others()
     connect(&a, &storage);
     add(&a, "задача");
     // A copy of another device.
-    let other = storage.path().join("lists/backups/other-device");
+    let other = storage.path().join("notes/backups/other-device");
     std::fs::create_dir_all(&other).unwrap();
-    std::fs::write(other.join("Lists_(2026-01-01-09_00_00).listsbackup"), b"theirs").unwrap();
+    std::fs::write(other.join("Notes_(2026-01-01-09_00_00).notesbackup"), b"theirs").unwrap();
 
     for day in 5..12 {
         a.set_now_for_tests(&format!("2026-10-{day:02}T10:00"));
@@ -123,11 +123,11 @@ fn s60_a_device_keeps_as_many_copies_as_it_keeps_locally_and_leaves_the_others()
     assert_eq!(
         own.1,
         (7..12)
-            .map(|day| format!("Lists_(2026-10-{day:02}-10_00_00).listsbackup"))
+            .map(|day| format!("Notes_(2026-10-{day:02}-10_00_00).notesbackup"))
             .collect::<Vec<_>>(),
         "the five newest of the seven"
     );
-    assert!(other.join("Lists_(2026-01-01-09_00_00).listsbackup").exists());
+    assert!(other.join("Notes_(2026-01-01-09_00_00).notesbackup").exists());
 
     let listed = a.storage_backups().unwrap();
     assert_eq!(listed.len(), 6);

@@ -104,7 +104,7 @@ fn furnished() -> Device {
 fn r87_r90_a_backup_restores_on_a_clean_install() {
     let old = furnished();
     let backup = old.create_backup().unwrap();
-    assert_eq!(backup.name, "Lists_(2026-10-05-10_00_00).listsbackup");
+    assert_eq!(backup.name, "Notes_(2026-10-05-10_00_00).notesbackup");
     assert_eq!(backup.created, NOW);
     assert!(backup.size > 0);
 
@@ -246,7 +246,7 @@ fn r90_a_file_that_is_no_backup_changes_nothing() {
     let other = zip_with("other.zip", &[("2do.db", b"x")]);
     assert!(d.restore_backup(other, false).is_err());
     let newer = zip_with(
-        "newer.listsbackup",
+        "newer.notesbackup",
         &[(
             "manifest.json",
             br#"{"format":2,"created":"2027-01-01T00:00:00","fields":0,"blobs":0}"#,
@@ -255,13 +255,13 @@ fn r90_a_file_that_is_no_backup_changes_nothing() {
     let error = d.restore_backup(newer, false).unwrap_err().to_string();
     assert!(error.contains("format 2"), "{error}");
     let broken = zip_with(
-        "broken.listsbackup",
+        "broken.notesbackup",
         &[
             (
                 "manifest.json",
                 br#"{"format":1,"created":"2026-01-01T00:00:00","fields":1,"blobs":0}"#,
             ),
-            ("lists.sqlite", b"this is not a database"),
+            ("notes.sqlite", b"this is not a database"),
         ],
     );
     assert!(d.restore_backup(broken, false).is_err());
@@ -279,7 +279,7 @@ fn r90_content_that_does_not_match_its_name_is_not_taken() {
 
     // The same archive with the content of the attachment replaced.
     let dir = tempfile::tempdir().unwrap();
-    let forged = dir.path().join("forged.listsbackup");
+    let forged = dir.path().join("forged.notesbackup");
     let mut source = zip::ZipArchive::new(std::fs::File::open(&backup.path).unwrap()).unwrap();
     let mut out = zip::ZipWriter::new(std::fs::File::create(&forged).unwrap());
     for i in 0..source.len() {
@@ -401,9 +401,9 @@ fn r89_backups_are_listed_and_deleted_by_name() {
     assert_eq!(d.backups().unwrap(), [second]);
     d.delete_backup(first.name).unwrap();
     // Only what this folder holds under a backup's name can be named.
-    assert!(d.delete_backup("../lists.sqlite".into()).is_err());
-    assert!(d.delete_backup("lists.sqlite".into()).is_err());
-    assert!(d.dir().join("lists.sqlite").exists());
+    assert!(d.delete_backup("../notes.sqlite".into()).is_err());
+    assert!(d.delete_backup("notes.sqlite".into()).is_err());
+    assert!(d.dir().join("notes.sqlite").exists());
 }
 
 #[test]
@@ -505,7 +505,7 @@ fn r88_two_looks_at_the_schedule_at_once_make_one_backup() {
 
 /// Marks the database in `dir` as left by a version with an earlier schema.
 fn set_schema_version(dir: &std::path::Path, version: Option<&str>) {
-    let conn = rusqlite::Connection::open(dir.join("lists.sqlite")).unwrap();
+    let conn = rusqlite::Connection::open(dir.join("notes.sqlite")).unwrap();
     match version {
         Some(v) => conn
             .execute(
@@ -520,7 +520,7 @@ fn set_schema_version(dir: &std::path::Path, version: Option<&str>) {
 }
 
 fn schema_version(dir: &std::path::Path) -> Option<String> {
-    let conn = rusqlite::Connection::open(dir.join("lists.sqlite")).unwrap();
+    let conn = rusqlite::Connection::open(dir.join("notes.sqlite")).unwrap();
     conn.query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0))
         .ok()
 }
@@ -585,7 +585,7 @@ fn r92_the_backup_before_a_migration_does_not_read_the_derived_tables() {
     };
     // An earlier version left its derived tables in a shape this one does not know.
     set_schema_version(dir.path(), Some("0"));
-    let conn = rusqlite::Connection::open(dir.path().join("lists.sqlite")).unwrap();
+    let conn = rusqlite::Connection::open(dir.path().join("notes.sqlite")).unwrap();
     conn.execute_batch(
         "DROP TABLE tasks; DROP TABLE lists; DROP TABLE attachments; DROP TABLE task_tags; DROP TABLE filters;
          DELETE FROM meta WHERE key = 'derived_version';",
@@ -675,7 +675,7 @@ fn r92_the_backup_before_a_migration_takes_a_place_in_the_rotation() {
     // Five are kept by default: the new one is among them and the oldest is gone.
     assert_eq!(names.len(), 5);
     assert!(!names.contains(&oldest));
-    assert!(names.iter().any(|n| !n.starts_with("Lists_(2026-10-01")), "{names:?}");
+    assert!(names.iter().any(|n| !n.starts_with("Notes_(2026-10-01")), "{names:?}");
 }
 
 #[test]

@@ -138,7 +138,7 @@ fn s18_record_in_the_storage_follows_the_address() {
     a.set_sync_config(folder(&storage)).unwrap();
     let record = storage
         .path()
-        .join("lists/push")
+        .join("notes/push")
         .join(format!("{}.json", a.device_id()));
 
     a.set_push_endpoint(Some("https://push.example.org/one".into()))

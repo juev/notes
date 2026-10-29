@@ -1079,7 +1079,7 @@ impl Store {
         // R142: the data folder and the content in it are for this user alone.
         make_private_dir(&dir)?;
         make_private_dir(&dir.join("blobs"))?;
-        let database = dir.join("lists.sqlite");
+        let database = dir.join("notes.sqlite");
         let conn = Connection::open(&database)?;
         private_file(&database)?;
         crate::backup::close_backups(&dir.join("backups"))?;

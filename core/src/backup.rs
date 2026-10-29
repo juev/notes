@@ -1,9 +1,9 @@
 //! Backups of the data and restoring from them: R87–R90 in docs/specs/product.md.
 //!
 //! ```text
-//! Lists_(2026-10-09-11_15_05).listsbackup    a zip:
+//! Notes_(2026-10-09-11_15_05).notesbackup    a zip:
 //!   manifest.json     {"format":1,"created":"2026-10-09T11:15:05","fields":…,"blobs":…}
-//!   lists.sqlite      table `fields`: every register with its stamp
+//!   notes.sqlite      table `fields`: every register with its stamp
 //!   blobs/<sha256>    attachment content that is on the device
 //! ```
 
@@ -22,12 +22,12 @@ use crate::store::{hex, Store};
 use crate::LogLevel;
 
 const FORMAT: u32 = 1;
-const EXT: &str = ".listsbackup";
-const PREFIX: &str = "Lists_(";
+const EXT: &str = ".notesbackup";
+const PREFIX: &str = "Notes_(";
 const NAME_FMT: &str = "%Y-%m-%d-%H_%M_%S";
 pub(crate) const SECONDS_FMT: &str = "%Y-%m-%dT%H:%M:%S";
 const MANIFEST: &str = "manifest.json";
-const DATABASE: &str = "lists.sqlite";
+const DATABASE: &str = "notes.sqlite";
 const BLOBS: &str = "blobs/";
 
 /// How often automatic backups are made, in hours; 0 turns them off.

@@ -68,7 +68,7 @@ pub fn plant(device: Device, registers: &[(&str, &str, &str, serde_json::Value)]
     let Device { store, _dir: dir } = device;
     drop(store);
     {
-        let conn = rusqlite::Connection::open(dir.path().join("lists.sqlite")).unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("notes.sqlite")).unwrap();
         let newest: String = conn
             .query_row("SELECT max(stamp) FROM fields", [], |r| r.get(0))
             .unwrap();

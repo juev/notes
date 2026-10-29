@@ -239,7 +239,7 @@ fn s51_a_tag_from_before_the_limit_leaves_the_view_after_an_upgrade() {
     };
     let long = "a".repeat(197);
     {
-        let conn = rusqlite::Connection::open(dir.path().join("lists.sqlite")).unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("notes.sqlite")).unwrap();
         let stamp: String = conn
             .query_row("SELECT max(stamp) FROM fields", [], |r| r.get(0))
             .unwrap();
@@ -1652,7 +1652,7 @@ fn derived_tables_are_rebuilt_when_their_shape_changes() {
     };
     // What an older version of the app left behind: derived tables of another shape.
     {
-        let conn = rusqlite::Connection::open(dir.path().join("lists.sqlite")).unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("notes.sqlite")).unwrap();
         conn.execute_batch("DROP TABLE tasks; CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT); UPDATE meta SET value = '1' WHERE key = 'derived_version';").unwrap();
     }
     let store = Store::open(path).unwrap();
@@ -2741,7 +2741,7 @@ fn r142_the_data_folder_is_for_its_owner_alone() {
     let d = device();
     assert_eq!(mode(d.dir()), 0o700);
     assert_eq!(mode(&d.dir().join("blobs")), 0o700);
-    assert_eq!(mode(&d.dir().join("lists.sqlite")), 0o600);
+    assert_eq!(mode(&d.dir().join("notes.sqlite")), 0o600);
 
     let task = add(&d, "с файлом");
     let src = tempfile::tempdir().unwrap();
