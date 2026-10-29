@@ -350,15 +350,15 @@ mod tests {
     fn listing_tells_files_from_folders_and_decodes_names() {
         let body = r#"<?xml version="1.0"?>
 <d:multistatus xmlns:d="DAV:">
-  <d:response><d:href>/dav/lists/v1/log/</d:href>
+  <d:response><d:href>/dav/notes/log/</d:href>
     <d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>
-  <d:response><d:href>/dav/lists/v1/log/aaaaaaaaaaaa-0000000001.jsonl</d:href>
+  <d:response><d:href>/dav/notes/log/aaaaaaaaaaaa-0000000001.jsonl</d:href>
     <d:propstat><d:prop><d:resourcetype/></d:prop></d:propstat></d:response>
-  <D:response xmlns:D="DAV:"><D:href>http://host/dav/lists/v1/log/a%20b.jsonl</D:href></D:response>
-  <d:response><d:href>/dav/lists/v1/log/c2/</d:href></d:response>
+  <D:response xmlns:D="DAV:"><D:href>http://host/dav/notes/log/a%20b.jsonl</D:href></D:response>
+  <d:response><d:href>/dav/notes/log/c2/</d:href></d:response>
 </d:multistatus>"#;
         assert_eq!(
-            parse_entries(body, "lists/v1/log").unwrap(),
+            parse_entries(body, "notes/log").unwrap(),
             vec![
                 ("aaaaaaaaaaaa-0000000001.jsonl".to_string(), false),
                 ("a b.jsonl".to_string(), false),

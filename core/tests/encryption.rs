@@ -85,7 +85,7 @@ fn stored(storage: &TempDir) -> Vec<(String, Vec<u8>)> {
 }
 
 fn vault(storage: &TempDir) -> serde_json::Value {
-    serde_json::from_slice(&std::fs::read(storage.path().join("lists/vault.json")).unwrap()).unwrap()
+    serde_json::from_slice(&std::fs::read(storage.path().join("notes/vault.json")).unwrap()).unwrap()
 }
 
 fn holds(data: &[u8], needle: &[u8]) -> bool {
@@ -96,26 +96,26 @@ fn holds(data: &[u8], needle: &[u8]) -> bool {
 /// file that says the storage moved (S49); no path and no byte holds a secret.
 fn assert_sealed(storage: &TempDir, secrets: &[&str]) {
     let files = stored(storage);
-    assert!(files.iter().any(|(p, _)| p.starts_with("lists/log/")));
+    assert!(files.iter().any(|(p, _)| p.starts_with("notes/log/")));
     for (path, data) in files {
         for secret in secrets {
             assert!(!path.contains(secret), "{path} names {secret}");
             assert!(!holds(&data, secret.as_bytes()), "{path} holds {secret}");
         }
-        if path == "lists/vault.json" || path == "lists/v1/vault.json" {
+        if path == "notes/vault.json" {
             continue;
         }
         if path.ends_with(".snap") {
             assert!(data.is_empty(), "{path}");
             continue;
         }
-        assert!(data.starts_with(b"LSE1"), "{path} is not sealed");
+        assert!(data.starts_with(b"NSE1"), "{path} is not sealed");
     }
 }
 
 fn assert_clear(storage: &TempDir) {
     for (path, data) in stored(storage) {
-        assert!(!data.starts_with(b"LSE1"), "{path} is sealed");
+        assert!(!data.starts_with(b"NSE1"), "{path} is sealed");
     }
 }
 
@@ -136,7 +136,7 @@ impl Remote for OnSeal<'_> {
         self.inner.get(path)
     }
     fn put(&self, path: &str, data: &[u8]) -> Result<()> {
-        if path == "lists/vault.json" && holds(data, b"\"format\":4") {
+        if path == "notes/vault.json" && holds(data, b"\"format\":2") {
             (self.before)()?;
         }
         self.inner.put(path, data)
@@ -173,7 +173,7 @@ fn s54_two_devices_converge_through_an_encrypted_folder() {
     sync_files(&b, &storage);
 
     encrypt(&a, &storage, PASS);
-    assert_eq!(vault(&storage)["format"], 4);
+    assert_eq!(vault(&storage)["format"], 2);
     assert!(a.sync_status().unwrap().encrypted);
 
     // S58: B learns it from the snapshot of A, which it cannot read, and stops; its own work goes on.
@@ -252,8 +252,8 @@ fn s58_a_missing_or_wrong_passphrase_and_a_newer_format_stop_sync_with_their_own
 
     // An earlier version stops on format 4 the same way this one stops on a later one (S14).
     let mut later = vault(&storage);
-    later["format"] = 5.into();
-    std::fs::write(storage.path().join("lists/vault.json"), later.to_string()).unwrap();
+    later["format"] = 3.into();
+    std::fs::write(storage.path().join("notes/vault.json"), later.to_string()).unwrap();
     let b = reopen(b);
     b.set_sync_passphrase(Some(PASS.into()));
     let newer = sync_error(&b, &storage);
@@ -277,7 +277,7 @@ fn s57_a_changed_moved_or_plain_file_stays_unread() {
     sync(&a, &storage);
     add(&a, "вторая");
     sync(&a, &storage);
-    let log = storage.path().join("lists/log");
+    let log = storage.path().join("notes/log");
     let mut own: Vec<PathBuf> = std::fs::read_dir(&log)
         .unwrap()
         .map(|e| e.unwrap().path())
@@ -332,7 +332,7 @@ fn s57_a_changed_moved_or_plain_file_stays_unread() {
     sync_files(&a, &storage);
     let sealed: Vec<(String, Vec<u8>)> = stored(&storage)
         .into_iter()
-        .filter(|(p, _)| p.starts_with("lists/blobs/"))
+        .filter(|(p, _)| p.starts_with("notes/blobs/"))
         .collect();
     assert_eq!(sealed.len(), 2);
     assert!(sealed
@@ -367,7 +367,7 @@ fn s56_a_change_uploaded_in_the_clear_while_the_storage_is_encrypted_is_not_lost
     a.encrypt_storage_with(&remote, PASS.into()).unwrap();
     let plain = stored(&storage)
         .into_iter()
-        .filter(|(p, d)| p.starts_with("lists/log/") && p.ends_with(".jsonl") && !d.starts_with(b"LSE1"))
+        .filter(|(p, d)| p.starts_with("notes/log/") && p.ends_with(".jsonl") && !d.starts_with(b"NSE1"))
         .count();
     assert_eq!(plain, 1, "the file of B is there in the clear");
 
@@ -405,7 +405,7 @@ fn s56_encryption_cut_short_leaves_the_storage_as_it_was() {
     };
     let error = a.encrypt_storage_with(&remote, PASS.into()).unwrap_err().to_string();
     assert!(error.contains("507"), "{error}");
-    assert_eq!(vault(&storage)["format"], 2);
+    assert_eq!(vault(&storage)["format"], 1);
     assert_clear(&storage);
     assert_eq!(stored(&storage), before);
     assert!(!a.sync_status().unwrap().encrypted);
@@ -463,7 +463,7 @@ fn s59_a_changed_passphrase_works_where_it_was_changed_and_is_asked_for_elsewher
     sync(&b, &storage);
     let before: Vec<(String, Vec<u8>)> = stored(&storage)
         .into_iter()
-        .filter(|(p, _)| p != "lists/vault.json")
+        .filter(|(p, _)| p != "notes/vault.json")
         .collect();
 
     a.change_storage_passphrase_with(&DirRemote::new(storage.path()), "new phrase".into())
@@ -471,7 +471,7 @@ fn s59_a_changed_passphrase_works_where_it_was_changed_and_is_asked_for_elsewher
     // Only `vault.json` was written again.
     let after: Vec<(String, Vec<u8>)> = stored(&storage)
         .into_iter()
-        .filter(|(p, _)| p != "lists/vault.json")
+        .filter(|(p, _)| p != "notes/vault.json")
         .collect();
     assert_eq!(after, before);
     add(&a, "после смены");
@@ -511,8 +511,8 @@ fn s62_a_storage_that_is_not_encrypted_any_more_is_not_written_in_the_clear() {
 
     // The storage puts back a `vault.json` in the clear.
     std::fs::write(
-        storage.path().join("lists/vault.json"),
-        format!("{{\"format\":2,\"vault\":\"{id}\"}}"),
+        storage.path().join("notes/vault.json"),
+        format!("{{\"format\":1,\"vault\":\"{id}\"}}"),
     )
     .unwrap();
     let a = reopen(a);
@@ -520,7 +520,7 @@ fn s62_a_storage_that_is_not_encrypted_any_more_is_not_written_in_the_clear() {
     add(&a, "не уйдёт открытым");
     let error = sync_error(&a, &storage);
     assert!(error.contains("not any more"), "{error}");
-    std::fs::remove_file(storage.path().join("lists/vault.json")).unwrap();
+    std::fs::remove_file(storage.path().join("notes/vault.json")).unwrap();
     let error = sync_error(&a, &storage);
     assert!(error.contains("not any more"), "{error}");
     assert_sealed(&storage, &["не уйдёт открытым"]);

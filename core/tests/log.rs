@@ -419,7 +419,7 @@ fn r102_content_that_does_not_match_its_hash_is_an_error_line() {
     a.sync_attachments_with(&DirRemote::new(storage.path())).unwrap();
     let blob = storage
         .path()
-        .join(format!("lists/blobs/{}/{}", &att.sha256[..2], att.sha256));
+        .join(format!("notes/blobs/{}/{}", &att.sha256[..2], att.sha256));
     std::fs::write(blob, b"something else").unwrap();
     b.sync_with(&DirRemote::new(storage.path())).unwrap();
 

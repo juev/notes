@@ -39,7 +39,7 @@ impl Dav {
     }
 
     fn storage(&self) -> std::path::PathBuf {
-        self.root.path().join("dav/user/lists")
+        self.root.path().join("dav/user/notes")
     }
 }
 
@@ -70,7 +70,7 @@ fn two_devices_converge_through_webdav() {
     assert!(up.pushed > 0);
     assert_eq!(a.sync_attachments().unwrap().uploaded, 1);
     // The client created the collections itself, starting from the missing base.
-    assert!(dav.root.path().join("dav/user/lists/vault.json").is_file());
+    assert!(dav.root.path().join("dav/user/notes/vault.json").is_file());
 
     let down = b.sync_now().unwrap();
     assert!(down.pulled > 0);
@@ -109,7 +109,7 @@ fn compaction_works_over_webdav() {
         add(&a, &format!("t{i}"));
         a.sync_now().unwrap();
     }
-    let logs = std::fs::read_dir(dav.root.path().join("dav/user/lists/log"))
+    let logs = std::fs::read_dir(dav.root.path().join("dav/user/notes/log"))
         .unwrap()
         .flatten()
         .filter(|f| f.file_name().to_string_lossy().ends_with(".jsonl"))
@@ -270,8 +270,8 @@ fn password_is_kept_out_of_the_database_and_asked_for_again_after_restart() {
     store.sync_now().unwrap();
 }
 
-const LOG: &str = "PROPFIND /dav/user/lists/log/ depth=1";
-const SNAP: &str = "PROPFIND /dav/user/lists/snap/ depth=1";
+const LOG: &str = "PROPFIND /dav/user/notes/log/ depth=1";
+const SNAP: &str = "PROPFIND /dav/user/notes/snap/ depth=1";
 
 /// A and B in step; A compacts after every file it writes.
 fn in_step(dav: &Dav) -> (Device, Device) {
@@ -310,7 +310,7 @@ fn s17_device_left_behind_by_compaction_catches_up_without_listing_snapshots() {
         b.sync_now().unwrap();
     });
     assert!(
-        seen.iter().any(|r| r.starts_with("GET /dav/user/lists/snap/")),
+        seen.iter().any(|r| r.starts_with("GET /dav/user/notes/snap/")),
         "{seen:?}"
     );
     assert!(!seen.contains(&SNAP.to_string()), "{seen:?}");
@@ -464,119 +464,6 @@ fn s43_put_creates_the_missing_folder_after_a_409_without_asking_for_it() {
     );
 }
 
-/// A storage over WebDAV in the layout before #294, `lists/v1/`, with a
-/// snapshot, a log file and attachment content of A.
-fn legacy(dav: &Dav) {
-    let a = device();
-    connect(&a, dav, "secret");
-    // A stands for an earlier version, which kept no copies in the storage (S60).
-    a.set_storage_backups(false).unwrap();
-    a.set_compact_after_for_tests(0);
-    let t = add(&a, "из снимка");
-    let src = tempfile::tempdir().unwrap();
-    let file = src.path().join("note.txt");
-    std::fs::write(&file, "вложение").unwrap();
-    a.add_attachment(t.id.clone(), file.to_string_lossy().into_owned(), None)
-        .unwrap();
-    a.sync_now().unwrap();
-    assert_eq!(a.sync_attachments().unwrap().uploaded, 1);
-    a.set_compact_after_for_tests(256);
-    add(&a, "из журнала");
-    a.sync_now().unwrap();
-    let (root, aside) = (dav.storage(), dav.root.path().join("aside"));
-    std::fs::remove_dir_all(root.join("v1")).unwrap();
-    std::fs::rename(&root, &aside).unwrap();
-    std::fs::create_dir(&root).unwrap();
-    std::fs::rename(&aside, root.join("v1")).unwrap();
-}
-
-/// What the server holds under a folder, by path inside it.
-fn tree(dir: &std::path::Path) -> Vec<String> {
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if entry.path().is_dir() {
-            out.extend(tree(&entry.path()).into_iter().map(|n| format!("{name}/{n}")));
-        } else {
-            out.push(name);
-        }
-    }
-    out.sort();
-    out
-}
-
-#[test]
-fn s49_the_move_goes_by_move_requests_without_carrying_the_content() {
-    let dav = start();
-    legacy(&dav);
-    let before: Vec<String> = tree(&dav.storage().join("v1"))
-        .into_iter()
-        .filter(|n| n != "vault.json")
-        .collect();
-    let b = device();
-    connect(&b, &dav, "secret");
-    let seen = dav.requests(|| {
-        b.sync_now().unwrap();
-    });
-    // A move into a folder not there yet is repeated once after the folder is made (S43).
-    let moves: std::collections::BTreeSet<&String> = seen
-        .iter()
-        .filter(|r| r.starts_with("MOVE /dav/user/lists/v1/"))
-        .collect();
-    assert_eq!(moves.len(), before.len(), "{seen:?}");
-    assert!(
-        !seen.iter().any(
-            |r| r.starts_with("PUT /dav/user/lists/v1/") && !r.ends_with("/vault.json")
-                || r.starts_with("GET /dav/user/lists/v1/") && !r.ends_with("/vault.json")
-        ),
-        "{seen:?}"
-    );
-    let mut got = view(&b, Scope::Inbox);
-    got.sort();
-    assert_eq!(got, ["из журнала", "из снимка"]);
-    assert_eq!(tree(&dav.storage().join("v1")), ["vault.json"]);
-    assert_eq!(b.sync_attachments().unwrap().downloaded, 1);
-}
-
-#[test]
-fn s49_a_server_without_move_gets_copies() {
-    let dav = start();
-    legacy(&dav);
-    std::fs::write(dav.root.path().join(".no-move"), "").unwrap();
-    let before: Vec<String> = tree(&dav.storage().join("v1"))
-        .into_iter()
-        .filter(|n| n != "vault.json")
-        .collect();
-    let b = device();
-    connect(&b, &dav, "secret");
-    b.sync_now().unwrap();
-    let mut got = view(&b, Scope::Inbox);
-    got.sort();
-    assert_eq!(got, ["из журнала", "из снимка"]);
-    assert_eq!(tree(&dav.storage().join("v1")), ["vault.json"]);
-    let moved: Vec<String> = tree(&dav.storage())
-        .into_iter()
-        .filter(|n| !n.starts_with("v1/") && n != "vault.json" && !n.contains(&b.device_id()))
-        .collect();
-    assert_eq!(moved, before);
-    assert_eq!(b.sync_attachments().unwrap().downloaded, 1);
-}
-
-#[test]
-fn s49_a_server_that_answers_403_for_a_missing_folder_gets_the_folders() {
-    let dav = start();
-    legacy(&dav);
-    std::fs::write(dav.root.path().join(".move-403"), "").unwrap();
-    let b = device();
-    connect(&b, &dav, "secret");
-    b.sync_now().unwrap();
-    let mut got = view(&b, Scope::Inbox);
-    got.sort();
-    assert_eq!(got, ["из журнала", "из снимка"]);
-    assert_eq!(tree(&dav.storage().join("v1")), ["vault.json"]);
-    assert_eq!(b.sync_attachments().unwrap().downloaded, 1);
-}
-
 /// S54–S56 over HTTP: the storage is encrypted from the settings, the other
 /// device enters the passphrase, and nothing on the server reads in the clear.
 #[test]
@@ -626,7 +513,7 @@ fn s54_two_devices_converge_through_an_encrypted_webdav_storage() {
             if name == "vault.json" || name.ends_with(".snap") || name.starts_with('.') {
                 continue;
             }
-            assert!(data.starts_with(b"LSE1"), "{} is not sealed", path.display());
+            assert!(data.starts_with(b"NSE1"), "{} is not sealed", path.display());
             seen += 1;
         }
     }

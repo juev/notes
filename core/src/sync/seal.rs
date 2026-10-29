@@ -7,7 +7,7 @@
 //! last one, and its associated data is the path the file is read under.
 //!
 //! ```text
-//! "LSE1" | prefix (19) | chunk 0 + tag | … | last chunk + tag
+//! "NSE1" | prefix (19) | chunk 0 + tag | … | last chunk + tag
 //! ```
 
 use std::io::Write;
@@ -28,7 +28,7 @@ use crate::store::hex;
 /// The plain bytes of one chunk; the last chunk of a file may be shorter, even empty.
 pub(crate) const CHUNK: usize = 64 * 1024;
 const TAG: usize = 16;
-const MAGIC: &[u8; 4] = b"LSE1";
+const MAGIC: &[u8; 4] = b"NSE1";
 const PREFIX: usize = 19;
 const HEADER: usize = MAGIC.len() + PREFIX;
 
@@ -66,7 +66,7 @@ fn derive(passphrase: &str, salt: &[u8]) -> Result<[u8; 32]> {
 /// The wrapped key is bound to its storage: a `vault.json` copied from
 /// another storage does not open here.
 fn wrap_aad(vault: &str) -> Vec<u8> {
-    format!("lists vault {vault}").into_bytes()
+    format!("notes vault {vault}").into_bytes()
 }
 
 /// What `vault.json` of format 4 holds besides the format and the vault id, in base64.
@@ -134,8 +134,8 @@ fn subkey(data_key: &[u8; 32], label: &str) -> [u8; 32] {
 impl Keys {
     pub(crate) fn new(data_key: &[u8; 32]) -> Keys {
         Keys {
-            file: XChaCha20Poly1305::new(&subkey(data_key, "lists file").into()),
-            name: subkey(data_key, "lists blob name"),
+            file: XChaCha20Poly1305::new(&subkey(data_key, "notes file").into()),
+            name: subkey(data_key, "notes blob name"),
         }
     }
 
@@ -394,7 +394,7 @@ impl Remote for SealedRemote<'_> {
 
     /// R140: the file is sealed into a temporary file and sent from there, so it never sits in memory.
     fn put_file(&self, path: &str, local: &Path) -> Result<()> {
-        let tmp = std::env::temp_dir().join(format!("lists-seal-{}.part", uuid::Uuid::now_v7().simple()));
+        let tmp = std::env::temp_dir().join(format!("notes-seal-{}.part", uuid::Uuid::now_v7().simple()));
         let sealed = (|| -> Result<()> {
             let out = std::io::BufWriter::new(super::private_create(&tmp)?);
             let mut sealer = Sealer::new(&self.keys, path, out)?;
@@ -446,11 +446,11 @@ mod tests {
         let keys = keys();
         for len in [0, 1, CHUNK - 1, CHUNK, CHUNK + 1, 3 * CHUNK, 3 * CHUNK + 5] {
             let data: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
-            let sealed = keys.seal("lists/log/a", &data).unwrap();
+            let sealed = keys.seal("notes/log/a", &data).unwrap();
             assert_eq!(sealed.len() as u64, sealed_len(len as u64), "{len}");
-            assert_eq!(keys.open("lists/log/a", &sealed).as_deref(), Some(&data[..]), "{len}");
-            assert!(keys.open("lists/log/b", &sealed).is_none(), "{len}");
-            assert!(Keys::new(&[8u8; 32]).open("lists/log/a", &sealed).is_none(), "{len}");
+            assert_eq!(keys.open("notes/log/a", &sealed).as_deref(), Some(&data[..]), "{len}");
+            assert!(keys.open("notes/log/b", &sealed).is_none(), "{len}");
+            assert!(Keys::new(&[8u8; 32]).open("notes/log/a", &sealed).is_none(), "{len}");
         }
     }
 
@@ -492,20 +492,21 @@ mod tests {
         assert_eq!(unwrap("correct horse", "vault-2", &wrapped).unwrap(), None);
     }
 
-    /// S54, S55: bytes sealed by argon2 0.5 and chacha20poly1305 0.10 still open,
-    /// so a storage written before an update of these crates stays readable.
+    /// S28: bytes sealed by argon2 0.6 and chacha20poly1305 0.11 with the labels
+    /// of Notes still open, so a storage written before an update of these
+    /// crates stays readable.
     #[test]
     fn a_storage_sealed_by_an_earlier_release_opens() {
         let wrapped = Wrapped {
-            salt: "twtGQyiD105Yaq3g3B5Phw==".into(),
-            nonce: "obn7Cn5iigKS1jiv47F+uwOETC7W1AK7".into(),
-            key: "rzWYUxzZPr/g4OUd4IMoPZdaFIjrORQ3R763niMM4D21+rXO+htW02f9e0i0IQeE".into(),
+            salt: "ukTn2wCFqy+U2KnE43Dvow==".into(),
+            nonce: "xQTRFpF309IzNXbQMK4F0QClZqjRJV1r".into(),
+            key: "wdyvxqmt8JWsQdf9rpHyKx9J05IdeltlJKhLYj7wTWU6q85Sw5QOtRA4xZ3ztBBj".into(),
         };
         assert_eq!(unwrap("correct horse", "vault-1", &wrapped).unwrap(), Some([5u8; 32]));
         let sealed = b64()
-            .decode("TFNFMRNpKks1CrpKdMwoBoeg0ytb63pE6ZgEn/wFQw11N15Kb6gG1Za+LbAapcJRYHsuBYiPSUUGSpkl")
+            .decode("TlNFMQ6pbhzm+KaksJMUiopiGsIs9pVyzV3dGp+rymZuI1rhfXrOklpegOBBoO6jwMItFviorBJEIe2r")
             .unwrap();
-        let opened = Keys::new(&[7u8; 32]).open("lists/log/a", &sealed);
+        let opened = Keys::new(&[7u8; 32]).open("notes/log/a", &sealed);
         assert_eq!(opened.as_deref(), Some(&b"the first sealed file"[..]));
     }
 

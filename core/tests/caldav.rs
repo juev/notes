@@ -1857,7 +1857,7 @@ fn s51_a_category_that_does_not_fit_is_not_a_local_register() {
 
     assert!(a.sync_now().unwrap().pulled > 0);
     assert_eq!(a.task(t.id.clone()).unwrap().tags, std::slice::from_ref(&fits));
-    let conn = rusqlite::Connection::open(a.dir().join("lists.sqlite")).unwrap();
+    let conn = rusqlite::Connection::open(a.dir().join("notes.sqlite")).unwrap();
     let written: i64 = conn
         .query_row(
             "SELECT count(*) FROM fields WHERE field = ?1",
