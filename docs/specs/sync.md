@@ -1,6 +1,6 @@
 # Notes: data and sync
 
-Status: specification, nothing is implemented. The mechanism is copied from Lists ([architecture.md](../architecture.md)), where the parts marked "as in Lists" are implemented and covered by tests; in Notes each of them is checked again by its own tests. The text CRDT (S3, S4, S20–S22) is new and has no implementation anywhere yet. Sources: the request of the author of the project of 2026-10-29; `docs/specs/sync.md` of Lists.
+Status: specification, nothing is implemented. The mechanism is copied from Lists ([architecture.md](../architecture.md)), where the parts marked "as in Lists" are implemented and covered by tests; in Notes each of them is checked again by its own tests. The text CRDT (S3, S4, S20–S22, S70) is new; its use of Loro 1.17.1 was checked by a throwaway prototype on 2026-10-29 (UTF-16 positions, the time of changes, convergence, growth; [architecture.md](../architecture.md)), and the core does not exist yet. Sources: the request of the author of the project of 2026-10-29; `docs/specs/sync.md` of Lists.
 
 ## Purpose and scope
 
@@ -30,6 +30,7 @@ The moment a note was last edited is not a field: it is the greatest timestamp a
 - S1. A timestamp is a hybrid logical clock: milliseconds, a counter and the device identifier, written as a fixed-width string, so that the strings compare as timestamps. A device that receives a foreign timestamp from the future moves its own clock past it. As in Lists.
 - S2. For each triple "kind, identifier, field" except `note/<id>/body` the value with the greater timestamp wins. Applying a change is idempotent, and the result does not depend on the order of application. As in Lists.
 - S3. The body of a note is a Loro document with one text container `body` that holds the Markdown source as typed. A local edit is applied to the document as insertions and deletions at positions; the change that goes to the storage is a Loro update, the operations since the version this device last uploaded for this note. Applying an update is idempotent and does not depend on order: two devices that received the same updates in any order have the same text. Edits made offline on two devices at different places of the text are both kept; edits at the same place are both kept, one after the other.
+- S70. Positions in the body are counted in UTF-16 units, as the platforms count them; a position inside a surrogate pair is refused. Every Loro document is opened with the recording of the time of changes turned on and a merge interval of 60 seconds, so that a change of the body carries the time it was made, to the second, and the version history (R40 in [product.md](product.md)) can find its boundaries. The time comes from the clock of the device that made the change; within one document it never goes down.
 - S4. Each device has a Loro peer identifier, a random 64-bit number chosen when the device identifier is created. A new device identifier (S36, S39) gets a new peer identifier, so that two writers never share one.
 - S5. A register key — kind, identifier and field name — is non-empty and no longer than 200 bytes of UTF-8; a change with any other key is not applied. A tag is the field `tag:<name>`, so a tag name is no longer than 196 bytes. As in Lists.
 - S6. Moving a note to the Trash is the `deleted` field with the moment of deletion; restoring writes an empty value. A note deleted on one device and edited on another stays deleted, and the edit is kept and visible after restoring.
@@ -65,7 +66,7 @@ notes/
 ### Text CRDT in the log
 
 - S20. A device remembers, for each note, the Loro version it last uploaded. A pass that uploads changes writes one body change per note edited since then. A note created on the device gets its first body change in the same file as its first register changes, so a reader never sees a note without a body document.
-- S21. The Loro history is kept in full in the first version: neither the device nor the snapshot trims it. The size of a document and of its updates is measured on real data (the import of the Standard Notes backup) before trimming is considered. Trimming is a change of the storage format (S17).
+- S21. The Loro history is kept in full in the first version: neither the device nor the snapshot trims it. A prototype on the texts of the author's Standard Notes backup gave 1.89 MB of snapshots for 0.75 MB of text with synthetic corrections ([architecture.md](../architecture.md)); the size is measured again on the real import, and the activity log reports the size of the largest document. Trimming is a change of the storage format (S17).
 - S22. A body change may fail to apply: its bytes are not a Loro update, or it depends on operations the device does not have. The device keeps such a change as received and retries it after the next file is read; the rest of the file is applied. The device writes the fact into the activity log with the note identifier and the device of the file, without the text.
 
 ### Attachments
@@ -144,4 +145,5 @@ Each requirement is covered by a test in `core/tests/` named after its identifie
 - S22: a body change with damaged bytes → the rest of the file applies, the note keeps its previous text, and the activity log has a line naming the note and the device without the text.
 - S28–S31: the scenarios of Lists for encryption, with a note body and an attachment of 200 000 bytes; neither file names nor contents in the storage contain the title, the text or the SHA-256 of the attachment.
 - S40: B has a note open in the editor with the cursor in the middle; A inserts text before the cursor; after sync the text on B contains the insertion and the cursor is still between the same two characters.
+- S70: an insertion at a UTF-16 position after an emoji lands after it; a position inside the emoji is refused. Edits committed at 10:00:00 and 10:00:30 are one change, at 10:00:00 and 10:02:00 two; the times are read on a device that received them by an update and by a snapshot.
 - S41–S45: the push scenarios of Lists (`core/tests/push.rs` there) against stub servers.
