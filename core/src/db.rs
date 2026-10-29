@@ -136,19 +136,6 @@ const DERIVED_SCHEMA: &str = "
 
 ";
 
-/// Adds a column to a table created by an earlier version.
-fn add_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Result<()> {
-    let present: bool = conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2)",
-        [table, column],
-        |r| r.get(0),
-    )?;
-    if !present {
-        conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))?;
-    }
-    Ok(())
-}
-
 pub fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "
@@ -182,30 +169,8 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             value TEXT NOT NULL,
             PRIMARY KEY (kind, id, field)
         ) WITHOUT ROWID;
-
-        -- CalDAV bookkeeping: what the server held when it was last read
-        CREATE TABLE IF NOT EXISTS caldav_calendars (href TEXT PRIMARY KEY, list_id TEXT NOT NULL, sent TEXT) WITHOUT ROWID;
-        CREATE TABLE IF NOT EXISTS caldav_items (
-            href TEXT PRIMARY KEY,
-            calendar TEXT NOT NULL,
-            uid TEXT NOT NULL,
-            etag TEXT NOT NULL,
-            raw TEXT NOT NULL
-        ) WITHOUT ROWID;
-        CREATE INDEX IF NOT EXISTS caldav_items_uid ON caldav_items (uid);
-
         ",
     )?;
-    // The task's registers as they were when the object was last found to say the same (C17).
-    add_column(conn, "caldav_items", "synced", "TEXT")?;
-    // Why the object could not be read; such a row may have no task (C23).
-    add_column(conn, "caldav_items", "problem", "TEXT")?;
-    // The calendar's change tag when its objects were last listed in full (C19).
-    add_column(conn, "caldav_calendars", "tag", "TEXT")?;
-    // The sync token that describes the calendar as it was last read (C20).
-    add_column(conn, "caldav_calendars", "token", "TEXT")?;
-    // The change tag of a deleted list's calendar when it was last found to hold objects (C15).
-    add_column(conn, "caldav_calendars", "kept", "TEXT")?;
     if meta_get(conn, "derived_version")?.as_deref() != Some(DERIVED_VERSION) {
         conn.execute_batch("DROP TABLE IF EXISTS lists; DROP TABLE IF EXISTS tasks; DROP TABLE IF EXISTS task_tags; DROP TABLE IF EXISTS attachments; DROP TABLE IF EXISTS filters;")?;
     }

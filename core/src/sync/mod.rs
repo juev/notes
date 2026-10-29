@@ -1442,10 +1442,10 @@ impl Store {
         }
     }
 
-    /// The configured file storage; `None` when sync is off or goes through CalDAV.
+    /// The configured file storage; `None` when sync is off.
     fn file_storage(&self) -> Result<Option<Box<dyn Remote>>> {
         Ok(match self.sync_config()? {
-            SyncConfig::Off | SyncConfig::CalDav { .. } => None,
+            SyncConfig::Off => None,
             SyncConfig::Folder { path } => Some(Box::new(DirRemote::new(path))),
             SyncConfig::WebDav { url, user } => Some(Box::new(WebDavRemote::new(&url, &user, &self.password(&user)?)?)),
         })
@@ -1470,10 +1470,6 @@ impl Store {
                 }
                 report
             }
-            SyncConfig::CalDav { url, user } => {
-                let password = self.password(&user)?;
-                self.replacing(|| crate::caldav::engine::run(self, &url, &user, &password))?
-            }
         }))
     }
 
@@ -1489,9 +1485,7 @@ impl Store {
 
     /// S37 without the lock: the caller holds it.
     fn drop_local(&self) -> Result<()> {
-        // Over CalDAV the shared settings do not travel (S32): they are this device's own.
-        let own_settings = matches!(self.sync_config()?, SyncConfig::CalDav { .. });
-        self.renew(None, own_settings)
+        self.renew(None, false)
     }
 
     /// Replaces the registers and makes this a device the storage has not seen
@@ -1536,8 +1530,7 @@ impl Store {
              DELETE FROM tasks; DELETE FROM task_tags; DELETE FROM attachments; DELETE FROM filters; DELETE FROM lists;
              INSERT INTO lists (id) VALUES ('inbox');
              DELETE FROM peers; DELETE FROM outbox; DELETE FROM blobs_uploaded;
-             DELETE FROM caldav_calendars; DELETE FROM caldav_items;
-             DELETE FROM meta WHERE key IN ('sync_ok', 'sync_error', 'caldav_filters_sent', 'caldav_home', 'push_published',
+             DELETE FROM meta WHERE key IN ('sync_ok', 'sync_error', 'push_published',
                                             'own_seq', 'force_snapshot', 'replace_remote', 'replace_kept_at',
                                             'log_bytes', 'snap_bytes', 'blobs_whole', 'sealed_vault');",
         )?;
@@ -1588,10 +1581,6 @@ impl Store {
                 WebDavRemote::new(&url, &user, "")?;
                 Some(StoredConfig::Webdav { url, user })
             }
-            SyncConfig::CalDav { url, user } => {
-                crate::caldav::client::Client::validate(&url)?;
-                Some(StoredConfig::Caldav { url, user })
-            }
         };
         let mut inner = self.lock();
         let tx = inner
@@ -1605,9 +1594,8 @@ impl Store {
         // (a storage seen before must not get a second file with an old number),
         // and the first run publishes a snapshot so that readers there can start from it.
         tx.execute_batch(
-            "DELETE FROM peers; DELETE FROM outbox; DELETE FROM blobs_uploaded;
-             DELETE FROM caldav_calendars; DELETE FROM caldav_items; DELETE FROM kept;
-             DELETE FROM meta WHERE key IN ('sync_ok', 'sync_error', 'caldav_filters_sent', 'caldav_home', 'push_published',
+            "DELETE FROM peers; DELETE FROM outbox; DELETE FROM blobs_uploaded; DELETE FROM kept;
+             DELETE FROM meta WHERE key IN ('sync_ok', 'sync_error', 'push_published',
                                             'replace_remote', 'replace_kept_at', 'log_bytes', 'snap_bytes',
                                             'blobs_whole', 'sealed_vault', 'clear_files');
              UPDATE fields SET dirty = 1;",
@@ -1640,17 +1628,12 @@ fn change_from_row(r: &rusqlite::Row) -> rusqlite::Result<Change> {
 }
 
 /// Tests sync settings before they are saved: asks the storage at `config`
-/// with `password` and writes nothing, neither there nor here (S26, C26).
+/// with `password` and writes nothing, neither there nor here (S46).
 #[uniffi::export]
 pub fn check_sync_connection(config: SyncConfig, password: String) -> Result<ConnectionCheck> {
     match config {
         SyncConfig::WebDav { url, user } => WebDavRemote::new(&url, &user, &password)?.check(),
-        SyncConfig::CalDav { url, user } => {
-            crate::caldav::client::Client::check(&url, &user, &password).map(|()| ConnectionCheck::Ready)
-        }
-        SyncConfig::Off | SyncConfig::Folder { .. } => {
-            Err(AppError::invalid("only WebDAV and CalDAV settings can be tested"))
-        }
+        SyncConfig::Off | SyncConfig::Folder { .. } => Err(AppError::invalid("only WebDAV settings can be tested")),
     }
 }
 
@@ -1659,7 +1642,6 @@ pub fn check_sync_connection(config: SyncConfig, password: String) -> Result<Con
 enum StoredConfig {
     Folder { path: String },
     Webdav { url: String, user: String },
-    Caldav { url: String, user: String },
 }
 
 #[uniffi::export]
@@ -1670,7 +1652,6 @@ impl Store {
             match stored.and_then(|s| serde_json::from_str::<StoredConfig>(&s).ok()) {
                 Some(StoredConfig::Folder { path }) => SyncConfig::Folder { path },
                 Some(StoredConfig::Webdav { url, user }) => SyncConfig::WebDav { url, user },
-                Some(StoredConfig::Caldav { url, user }) => SyncConfig::CalDav { url, user },
                 None => SyncConfig::Off,
             },
         )
@@ -1761,7 +1742,6 @@ impl Store {
             SyncConfig::Off => Ok(false),
             SyncConfig::Folder { path } => files(&DirRemote::new(path)),
             SyncConfig::WebDav { url, user } => files(&WebDavRemote::new(&url, &user, &password)?),
-            SyncConfig::CalDav { url, user } => crate::caldav::engine::holds_objects(&url, &user, &password),
         }
     }
 
@@ -1828,11 +1808,7 @@ impl Store {
                     "sync_ok",
                     &inner.now().format("%Y-%m-%dT%H:%M").to_string(),
                 )?;
-                // A run that got through may still have left something unread (C23).
-                match crate::caldav::engine::unreadable(&inner.conn)? {
-                    Some(problem) => db::meta_set(&inner.conn, "sync_error", &problem)?,
-                    None => db::meta_del(&inner.conn, "sync_error")?,
-                }
+                db::meta_del(&inner.conn, "sync_error")?;
             }
             Err(e) => db::meta_set(&inner.conn, "sync_error", &e.to_string())?,
         }
@@ -1841,9 +1817,8 @@ impl Store {
 
     /// S34: moves attachment content after a run of `sync_now`: uploads what
     /// the storage lacks and downloads what this device lacks. A file that
-    /// fails stays waiting and does not fail the call. Does nothing with
-    /// CalDAV, where the content travels inside the task, and while another
-    /// pass is going.
+    /// fails stays waiting and does not fail the call. Does nothing while
+    /// another pass is going.
     pub fn sync_attachments(&self) -> Result<AttachmentReport> {
         let Some(remote) = self.file_storage()? else {
             return Ok(AttachmentReport::default());

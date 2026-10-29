@@ -1043,13 +1043,6 @@ fn s34_attachments_of_deleted_tasks_and_removed_attachments_do_not_wait() {
     a.set_sync_config(SyncConfig::Off).unwrap();
     assert_eq!(a.sync_status().unwrap().attachments_waiting, 0);
     assert_eq!(a.sync_attachments().unwrap(), AttachmentReport::default());
-    a.set_sync_config(SyncConfig::CalDav {
-        url: "http://127.0.0.1:9/dav".into(),
-        user: String::new(),
-    })
-    .unwrap();
-    assert_eq!(a.sync_status().unwrap().attachments_waiting, 0);
-    assert_eq!(a.sync_attachments().unwrap(), AttachmentReport::default());
 }
 
 #[test]

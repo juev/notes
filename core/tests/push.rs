@@ -1,8 +1,6 @@
-//! Nudges between devices: S18–S23 and S27–S30 in docs/specs/sync.md, C22 in docs/specs/caldav.md.
+//! Nudges between devices: S41–S45 in docs/specs/sync.md.
 
 mod common;
-#[path = "common/dav.rs"]
-mod dav;
 
 use std::sync::{Arc, Mutex};
 
@@ -159,66 +157,6 @@ fn s18_record_in_the_storage_follows_the_address() {
 
     assert!(a.set_push_endpoint(Some("file:///etc/passwd".into())).is_err());
     assert_eq!(a.push_endpoint().unwrap(), None);
-}
-
-struct Dav {
-    url: String,
-    root: tempfile::TempDir,
-}
-
-fn caldav() -> Dav {
-    let server = Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
-    let root = tempfile::tempdir().unwrap();
-    let dir = root.path().to_path_buf();
-    std::fs::create_dir(dir.join("cal")).unwrap();
-    std::thread::spawn(move || dav::serve(&server, &dir));
-    Dav {
-        url: format!("http://127.0.0.1:{port}/cal"),
-        root,
-    }
-}
-
-fn join(dav: &Dav) -> Device {
-    let d = device();
-    d.set_sync_config(SyncConfig::CalDav {
-        url: dav.url.clone(),
-        user: "user".into(),
-    })
-    .unwrap();
-    d.set_sync_password(Some("secret".into()));
-    d
-}
-
-#[test]
-fn c22_through_caldav() {
-    let dav = caldav();
-    let inbox = Inbox::start();
-    nudges_follow_uploads(&join(&dav), &join(&dav), &inbox);
-}
-
-#[test]
-fn c22_server_that_drops_custom_properties_gets_no_nudges_and_no_repeated_writes() {
-    let dav = caldav();
-    std::fs::write(dav.root.path().join(".no-custom-props"), "").unwrap();
-    let inbox = Inbox::start();
-    let (a, b) = (join(&dav), join(&dav));
-    a.set_push_endpoint(inbox.address("a")).unwrap();
-    b.set_push_endpoint(inbox.address("b")).unwrap();
-    for _ in 0..2 {
-        a.sync_now().unwrap();
-        b.sync_now().unwrap();
-    }
-    add(&a, "от A");
-    a.sync_now().unwrap();
-    assert_eq!(inbox.take(), Vec::<String>::new());
-
-    let log = dav.root.path().join(".requests");
-    std::fs::write(&log, "").unwrap();
-    a.sync_now().unwrap();
-    a.sync_now().unwrap();
-    let seen = std::fs::read_to_string(&log).unwrap();
-    assert!(!seen.contains("PROPPATCH"), "{seen}");
 }
 
 /// Stands in for an ntfy server: `POST /<topic>` reaches everyone who holds
@@ -790,26 +728,4 @@ fn s41_a_device_on_another_server_keeps_its_topic() {
     finish_pushes();
     assert_eq!(a.push_endpoint().unwrap().unwrap(), first);
     assert_eq!(b.push_endpoint().unwrap().unwrap(), second);
-}
-
-#[test]
-fn s41_through_caldav() {
-    let dav = caldav();
-    let ntfy = Ntfy::start();
-    let (a, b, first, second) = sharers(&ntfy, |d| {
-        d.set_sync_config(SyncConfig::CalDav {
-            url: dav.url.clone(),
-            user: "user".into(),
-        })
-        .unwrap();
-        d.set_sync_password(Some("secret".into()));
-    });
-    let shared = first.min(second);
-    assert_eq!(a.push_endpoint().unwrap().unwrap(), shared);
-    assert_eq!(b.push_endpoint().unwrap().unwrap(), shared);
-
-    ntfy.take();
-    add(&b, "от B");
-    b.sync_now().unwrap();
-    assert_eq!(ntfy.take(), [format!("POST {} -", path_of(Some(shared)))]);
 }

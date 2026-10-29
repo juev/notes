@@ -3,7 +3,6 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use chrono::{NaiveDate, NaiveDateTime};
@@ -124,8 +123,6 @@ pub struct Store {
     pub(crate) push_token: Mutex<Option<String>>,
     /// S30: the own server answered 401 or 403 to the last subscription, to the last nudge.
     pub(crate) push_refused: Mutex<(bool, bool)>,
-    /// How many objects CalDAV sync has built for upload or comparison.
-    pub(crate) caldav_renders: AtomicU64,
     /// What undo takes back (R131).
     pub(crate) history: Mutex<crate::undo::History>,
     /// R140: how much content this device takes, kept by the device and not synced.
@@ -980,11 +977,6 @@ impl Store {
     }
 
     #[doc(hidden)]
-    pub fn caldav_renders_for_tests(&self) -> u64 {
-        self.caldav_renders.load(Ordering::Relaxed)
-    }
-
-    #[doc(hidden)]
     pub fn data_dir(&self) -> &Path {
         &self.dir
     }
@@ -1116,7 +1108,6 @@ impl Store {
             push_retry: Mutex::new(std::time::Duration::from_secs(10)),
             push_token: Mutex::new(None),
             push_refused: Mutex::new((false, false)),
-            caldav_renders: AtomicU64::new(0),
             history: Mutex::new(Default::default()),
             limits: Mutex::new(AttachmentLimits::default()),
         });
