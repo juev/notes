@@ -5,12 +5,9 @@
 uniffi::setup_scaffolding!();
 
 mod backup;
-mod caldav;
 mod db;
 mod error;
-mod export;
 mod hlc;
-mod import;
 mod log;
 mod markdown;
 mod model;
@@ -26,7 +23,6 @@ mod undo;
 
 pub use backup::{Backup, BackupSettings};
 pub use error::{AppError, Result};
-pub use import::ImportReport;
 pub use log::LogLevel;
 pub use markdown::{
     markdown_layout, markdown_newline, MarkdownAlign, MarkdownBlock, MarkdownCell, MarkdownEdit, MarkdownKind,

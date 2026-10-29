@@ -377,13 +377,6 @@ pub enum SyncConfig {
         url: String,
         user: String,
     },
-    /// A CalDAV server: lists are calendars, tasks are VTODO objects that
-    /// other clients can see. The address is the calendar home or any address
-    /// from which the server can name it. The password is handled as for WebDAV.
-    CalDav {
-        url: String,
-        user: String,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Default, uniffi::Record)]

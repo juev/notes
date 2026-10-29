@@ -186,7 +186,7 @@ fn s60_a_failed_copy_does_not_fail_the_pass() {
 }
 
 #[test]
-fn s60_r154_no_copies_when_turned_off_without_schedule_or_with_caldav() {
+fn s60_r154_no_copies_when_turned_off_without_schedule_or_without_sync() {
     let storage = tempfile::tempdir().unwrap();
     let a = device();
     connect(&a, &storage);
@@ -217,11 +217,7 @@ fn s60_r154_no_copies_when_turned_off_without_schedule_or_with_caldav() {
         "turned on again, a copy comes with the next pass"
     );
 
-    a.set_sync_config(SyncConfig::CalDav {
-        url: "https://dav.example.org/".into(),
-        user: "me".into(),
-    })
-    .unwrap();
+    a.set_sync_config(SyncConfig::Off).unwrap();
     assert!(!a.storage_backup_status().unwrap().available);
 }
 
