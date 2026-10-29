@@ -1,0 +1,24 @@
+"Date: 2026-06-29+0000"
+"Version: 7.2"
+"Status: 
+0 Normal
+1 Completed
+2 Archived"
+"Folder Name","List Name","Title","Kind","Tags","Content","Is Check list","Start Date","Due Date","Reminder","Repeat","Priority","Status","Created Time","Completed Time","Order","Timezone","Is All Day","Is Floating","Column Name","Column Order","View Mode","taskId","parentId","projectKind"
+"Folder 1","List 1","Task 1","TEXT","tag1a, tag1b, tag1c","","N","2024-07-18T05:00:00+0000","2024-07-18T05:00:00+0000","PT0S
+-PT5M","","0","2","2024-07-17T22:18:20+0000","2024-07-18T06:07:22+0000","-4611686018493349888","Europe/Zurich","false","false","Column A","-288230376151678976","kanban","1","","TASK"
+"Folder 2","List 2","Task 2","TEXT","tag2a, tag2b","","N","2024-08-05T16:00:00+0000","2024-08-05T16:00:00+0000","-P0DT2H0M0S","","0","2","2024-06-17T17:09:55+0000","2024-08-13T05:10:17+0000","-1","Australia/Perth","true","false","","","list","2","","TASK"
+"Folder 2","List 2","Task 3","TEXT","tag3a, tag3b","","N","2024-07-15T08:00:00+0000","2024-07-15T08:00:00+0000","PT0S","","5","-1","2024-07-01T18:28:37+0000","2024-07-15T09:33:15+0000","-3145729","Europe/Vienna","false","false","","","list","3","","TASK"
+"","Inbox","Task 4","CHECKLIST","","▫Item 4.1▫Item 4.2▫Item 4.3▫Item 4.4▫Item 4.5▫Item 4.6","Y","","","","","0","2","2024-05-31T17:35:22+0000","2024-06-03T09:55:21+0000","2199023255552","Europe/Berlin","false","false","","","list","4","","TASK"
+"Folder 1","List 1","Task 5","CHECKLIST","tag5a, tag5b, tag5c","▪","Y","2024-06-28T09:30:00+0000","2024-06-28T09:30:00+0000","PT0S","","0","2","2024-06-27T05:33:49+0000","2024-06-30T16:21:15+0000","-4611686018471002112","Europe/Warsaw","false","false","Column A","-288230376151678976","kanban","5","","TASK"
+"Folder 1","List 3","Task 6","TEXT","tag6a","","N","2024-06-17T21:00:00+0000","2024-06-17T21:00:00+0000","PT0S","","5","2","2024-06-17T17:48:10+0000","2024-06-17T23:21:14+0000","-11665409","Europe/Warsaw","false","false","","","list","6","","TASK"
+"Folder 1","List 4","Task 7","TEXT","tag7a, tag7b, tag7c","","N","2024-10-04T04:30:00+0000","2024-10-04T04:30:00+0000","PT0S","","3","2","2024-10-04T02:26:23+0000","2024-10-06T00:13:16+0000","-8070450532272701440","Australia/Perth","false","false","Column A","0","kanban","7","","TASK"
+"","Inbox","Task 8","TEXT","","","N","","","","","0","0","2024-06-29T18:33:25+0000","","-1099514314752","Europe/Berlin","false","false","","","list","8","","TASK"
+"Folder 3","List 5","Task 9","TEXT","tag9a, tag9b","Note 9 line 1Note 9 line 2","N","2024-06-01T22:00:00+0000","2024-06-01T22:00:00+0000","","","0","2","2024-05-31T21:04:51+0000","2024-06-02T16:55:52+0000","-1","Europe/Berlin","true","false","","","list","9","","TASK"
+"","List 6","Task 10","TEXT","tag10a","","N","2024-03-18T05:00:00+0000","2024-03-18T05:00:00+0000","PT0S","FREQ=WEEKLY;INTERVAL=1;BYDAY=MO,WE,FR","0","0","2023-08-12T09:06:11+0000","","6047313952768","America/Chicago","false","false","","","list","10","","TASK"
+"","List 6","Task 11","TEXT","tag11a","","N","2024-04-15T05:00:00+0000","2024-04-15T05:00:00+0000","","FREQ=MONTHLY;INTERVAL=1","0","0","2024-01-06T16:59:30+0000","","36833639530496","America/Chicago","true","false","","","list","11","","TASK"
+"","Inbox","Task 12","TEXT","tag12a","Note 12 line 1","N","2026-06-07T04:30:00+0000","2026-06-07T06:30:00+0000","-PT30M","","0","0","2026-06-06T22:32:36+0000","","-50579685376000","UTC","false","false","","","list","12","","TASK"
+"Folder 4","List 7","Task 13","NOTE","","","N","","","","","0","0","2026-04-30T20:11:53+0000","","1099510972416","Asia/Kolkata","false","false","Column A","-131073","kanban","13","","NOTE"
+"","Inbox","Task 14","TEXT","","","N","","","","","0","0","2026-05-16T15:56:35+0000","","-32985351847936","Asia/Kolkata","false","false","","","list","14","","TASK"
+"","Inbox","Task 15","TEXT","","","N","","","","","0","0","2026-05-16T15:58:03+0000","","-38482909921280","Asia/Kolkata","false","false","","","list","15","14","TASK"
+"","Inbox","Task 16","TEXT","","","N","","","","","0","0","2026-05-16T15:56:45+0000","","-458752","Asia/Kolkata","false","false","","","list","16","14","TASK"

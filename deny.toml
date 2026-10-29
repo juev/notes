@@ -1,0 +1,45 @@
+# cargo-deny for the core: `cargo deny --manifest-path core/Cargo.toml check`
+# (make deny). Advisories stop the build: a crate with a
+# published vulnerability or one that is no longer maintained is a decision to
+# make, not a warning to scroll past.
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    # basic-toml is unmaintained. It is a build-time dependency of uniffi 0.32.2
+    # through askama 0.16.1, the latest of both; drop this once uniffi moves to
+    # an askama without it.
+    { id = "RUSTSEC-2026-0374", reason = "build-time only, no maintained upgrade yet" },
+]
+
+[licenses]
+version = 2
+# What the dependencies carry today; a new license is a decision as well.
+allow = [
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.9
+# xxhash-rust comes with Loro (loro-internal, loro-kv-store). BSL-1.0 is allowed
+# for this crate only; another crate under it is a new decision.
+exceptions = [
+    { crate = "xxhash-rust", allow = ["BSL-1.0"] },
+]
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
