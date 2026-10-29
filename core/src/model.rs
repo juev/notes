@@ -1,221 +1,125 @@
 use serde::{Deserialize, Serialize};
 
-pub const INBOX_ID: &str = "inbox";
-
-/// How long a completed task stays in its view (R68).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, uniffi::Enum)]
-pub enum KeepDone {
-    /// This many seconds from the completion; none removes the task at once.
-    Seconds { seconds: u32 },
-    /// Until the day of the completion is over on the clock of this device.
-    EndOfDay,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, uniffi::Enum)]
-#[serde(rename_all = "lowercase")]
-pub enum Priority {
-    #[default]
-    None,
-    Low,
-    Medium,
-    High,
-}
-
-impl Priority {
-    pub fn from_i64(v: i64) -> Self {
-        match v {
-            1 => Priority::Low,
-            2 => Priority::Medium,
-            3 => Priority::High,
-            _ => Priority::None,
-        }
-    }
-    pub fn as_i64(self) -> i64 {
-        match self {
-            Priority::None => 0,
-            Priority::Low => 1,
-            Priority::Medium => 2,
-            Priority::High => 3,
-        }
-    }
-}
-
+/// What a folder sorts its notes by (R16).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, uniffi::Enum)]
-pub enum SortMode {
+pub enum SortBy {
+    /// The moment of the last edit.
     #[default]
-    Manual,
-    Due,
-    Priority,
+    Edited,
+    Created,
     Title,
 }
 
-impl SortMode {
+/// How a folder orders its notes (R16); pinned notes come first whatever it says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct FolderSort {
+    pub by: SortBy,
+    pub descending: bool,
+}
+
+impl Default for FolderSort {
+    fn default() -> Self {
+        FolderSort {
+            by: SortBy::Edited,
+            descending: true,
+        }
+    }
+}
+
+impl FolderSort {
+    /// The stored form, `<by>:<asc|desc>`; what does not read gives the default (R16).
     pub fn parse(s: &str) -> Self {
-        match s {
-            "due" => SortMode::Due,
-            "priority" => SortMode::Priority,
-            "title" => SortMode::Title,
-            _ => SortMode::Manual,
+        let Some((by, direction)) = s.split_once(':') else {
+            return FolderSort::default();
+        };
+        let by = match by {
+            "edited" => SortBy::Edited,
+            "created" => SortBy::Created,
+            "title" => SortBy::Title,
+            _ => return FolderSort::default(),
+        };
+        match direction {
+            "asc" => FolderSort { by, descending: false },
+            "desc" => FolderSort { by, descending: true },
+            _ => FolderSort::default(),
         }
     }
-    pub fn as_str(self) -> &'static str {
-        match self {
-            SortMode::Manual => "manual",
-            SortMode::Due => "due",
-            SortMode::Priority => "priority",
-            SortMode::Title => "title",
-        }
+    pub fn as_string(self) -> String {
+        let by = match self.by {
+            SortBy::Edited => "edited",
+            SortBy::Created => "created",
+            SortBy::Title => "title",
+        };
+        format!("{by}:{}", if self.descending { "desc" } else { "asc" })
     }
 }
 
-/// What hiding Inbox changed, so that one undo takes it back (R121).
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
-pub struct InboxHiding {
-    /// The tasks moved out of Inbox.
-    pub moved: Vec<String>,
-    /// The default list for new tasks before hiding (R40).
-    pub new_task_list: String,
-}
-
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
-pub struct TaskList {
+pub struct Folder {
     pub id: String,
     pub name: String,
-    /// `#RRGGBB`, empty for the platform default.
-    pub color: String,
-    /// Platform-neutral icon name, empty for the default.
+    /// A symbol from the app's set or an emoji; empty for the default (R10).
     pub icon: String,
-    pub sort: SortMode,
-    pub show_done: bool,
-    pub default_priority: Priority,
-    /// New tasks in this list are due today.
-    pub default_due_today: bool,
-    pub archived: bool,
-    pub open_count: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
-#[serde(rename_all = "lowercase")]
-pub enum Freq {
-    Daily,
-    Weekly,
-    Monthly,
-    Yearly,
-}
-
-/// Recurrence rule. Weekdays are 1 (Monday) to 7 (Sunday).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
-pub struct Repeat {
-    pub freq: Freq,
-    pub interval: u32,
-    /// Weekly only: days of the week the task falls on. Empty means "same weekday".
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub weekdays: Vec<u32>,
-    /// Monthly only: day of month, 31 meaning "last day" in shorter months.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub monthday: Option<u32>,
-    /// Monthly only: 1..5 for the n-th `nth_weekday`, -1 for the last one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub nth: Option<i32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub nth_weekday: Option<u32>,
-    /// Count the next occurrence from the completion date instead of the due date.
-    #[serde(default)]
-    pub from_done: bool,
-    /// Occurrences left, including the current one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub count: Option<u32>,
-    /// Last allowed date, `YYYY-MM-DD`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub until: Option<String>,
+    /// The folder it is shown under; none for the root (S10).
+    pub parent_id: Option<String>,
+    /// Daily mode (R17).
+    pub daily: bool,
+    pub sort: FolderSort,
+    pub show_preview: bool,
+    pub show_date: bool,
+    /// Notes in it and in its subfolders that are neither deleted nor archived (R12).
+    pub note_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
-pub struct TaskItem {
+pub struct Note {
     pub id: String,
-    /// The list the task is shown in: the list of its topmost ancestor.
-    pub list_id: String,
-    pub parent_id: Option<String>,
-    pub parent_title: Option<String>,
     pub title: String,
-    pub notes: String,
-    pub start: Option<String>,
-    pub due: Option<String>,
-    pub priority: Priority,
+    /// The folder the note is shown in; none for the root, which a deleted or unknown folder also gives (S10).
+    pub folder_id: Option<String>,
     pub tags: Vec<String>,
-    pub repeat: Option<Repeat>,
-    pub remind: Option<String>,
-    /// Completion moment, `YYYY-MM-DDTHH:MM`.
-    pub done: Option<String>,
-    /// Closed as "won't do" rather than completed (R69); `done` then holds the moment.
-    pub wont: bool,
+    pub pinned: bool,
+    pub starred: bool,
+    pub archived: bool,
+    pub locked: bool,
+    /// In the Trash (S6).
     pub deleted: bool,
-    /// A record of one completed occurrence of a repeating task.
-    pub is_log: bool,
-    /// Shown in the sidebar and opened as a view of its own; its subtasks are the project's tasks.
-    pub is_project: bool,
-    pub subtasks_total: u32,
-    pub subtasks_done: u32,
+    /// Milliseconds since the epoch.
+    pub created_ms: u64,
+    /// The greatest stamp among the registers of the note, in milliseconds since the epoch.
+    pub edited_ms: u64,
+    /// When the note went to the Trash, in milliseconds since the epoch (R46).
+    pub deleted_ms: Option<u64>,
+    /// Attachments that are not deleted.
     pub attachments: u32,
-    /// The due date the views go by: `due`, or the project's when the task has none (R125).
-    /// Computed when the task is read; only `due` is stored.
-    pub effective_due: Option<String>,
-    /// The start the views go by: `start`, held back to the project's start (R125).
-    pub effective_start: Option<String>,
-    /// A record of a repeat whose completion can still be taken back (R128): its mark reopens it,
-    /// in Completed as well (R133). Computed when the task is read.
-    #[uniffi(default = false)]
-    pub undoable: bool,
 }
 
 #[derive(Debug, Clone, Default, uniffi::Record)]
-pub struct NewTask {
+pub struct NewNote {
     pub title: String,
     #[uniffi(default = None)]
-    pub list_id: Option<String>,
-    #[uniffi(default = None)]
-    pub parent_id: Option<String>,
-    #[uniffi(default = "")]
-    pub notes: String,
-    #[uniffi(default = None)]
-    pub start: Option<String>,
-    #[uniffi(default = None)]
-    pub due: Option<String>,
-    #[uniffi(default = None)]
-    pub priority: Option<Priority>,
+    pub folder_id: Option<String>,
     #[uniffi(default = [])]
     pub tags: Vec<String>,
-    /// R130: the task goes first among its siblings; without it, and without `after`, it goes last.
-    #[uniffi(default = false)]
-    pub first: bool,
-    /// R130: the task goes right under this one, or under its parent when it is a subtask; where that task
-    /// is not a sibling of the new one, the new task goes first.
-    #[uniffi(default = None)]
-    pub after: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Enum)]
 pub enum Scope {
-    Inbox,
-    Today,
-    Upcoming,
+    /// Notes that are neither archived nor in the Trash (R44).
     All,
-    Completed,
-    /// The part of the Completed log that was closed as "won't do" (R69).
-    WontDo,
+    Starred,
+    Archived,
     Trash,
-    List {
+    /// Notes without tags.
+    Untagged,
+    /// Notes outside any folder (R13).
+    NoFolder,
+    /// The notes of the folder itself.
+    Folder {
         id: String,
     },
     Tag {
         name: String,
-    },
-    Search {
-        text: String,
-    },
-    /// The tasks of a project, completed ones last.
-    Project {
-        id: String,
     },
     /// A saved filter.
     Filter {
@@ -223,86 +127,150 @@ pub enum Scope {
     },
 }
 
-/// Which dates a filter lets through. The date of a task is its due date, or
-/// its start date when it has no due date.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, uniffi::Enum)]
-#[serde(rename_all = "lowercase", tag = "kind")]
-pub enum DueWindow {
-    #[default]
-    Any,
-    Overdue,
-    Today,
-    /// Today and the following days, `days` in total, plus anything overdue.
-    Next {
-        days: u32,
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct TagCount {
+    pub name: String,
+    pub count: u32,
+}
+
+/// What the system views of the sidebar hold (R44).
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct Counts {
+    pub all: u32,
+    pub starred: u32,
+    pub archived: u32,
+    pub trash: u32,
+    pub untagged: u32,
+    pub no_folder: u32,
+}
+
+/// Which part of a time a condition of a filter lets through (R45). A date is `YYYY-MM-DD`
+/// on the clock of the device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum DateTest {
+    /// Before the day starts.
+    Before { date: String },
+    /// After the day is over.
+    After { date: String },
+    /// Within the last `days` days up to now.
+    Within { days: u32 },
+}
+
+/// One condition of a saved filter (R45).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum Condition {
+    InFolder {
+        folder_id: String,
+        subfolders: bool,
     },
-    NoDate,
+    HasTag {
+        name: String,
+    },
+    /// The note has no tags at all.
+    NoTags,
+    NoneOfTags {
+        names: Vec<String>,
+    },
+    Pinned,
+    Starred,
+    /// Asks for archived notes, which a filter leaves out otherwise (R27).
+    Archived,
+    HasAttachments,
+    TitleIs {
+        text: String,
+    },
+    TitleContains {
+        text: String,
+    },
+    Created {
+        when: DateTest,
+    },
+    Edited {
+        when: DateTest,
+    },
 }
 
+/// Whether a note has to meet every condition of a filter or any of them (R45).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, uniffi::Enum)]
-#[serde(rename_all = "lowercase")]
-pub enum FilterStatus {
+#[serde(rename_all = "snake_case")]
+pub enum FilterJoin {
     #[default]
-    Open,
-    /// Completed, not "won't do".
-    Done,
-    Wont,
     All,
+    Any,
 }
 
-/// What a saved filter selects. Every condition that is set must hold.
+/// What a saved filter selects (R45).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, uniffi::Record)]
-pub struct FilterSpec {
+pub struct FilterQuery {
     #[serde(default)]
-    pub due: DueWindow,
-    /// Empty means any list.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub list_ids: Vec<String>,
-    /// The task must carry all of these.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tags: Vec<String>,
+    pub join: FilterJoin,
     #[serde(default)]
-    pub min_priority: Priority,
-    #[serde(default)]
-    pub status: FilterStatus,
-    /// Words the title or the note must contain; empty means no condition.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub text: String,
+    pub conditions: Vec<Condition>,
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct SavedFilter {
     pub id: String,
     pub name: String,
-    pub spec: FilterSpec,
-    pub open_count: u32,
+    pub icon: String,
+    pub query: FilterQuery,
+    /// Notes it selects now.
+    pub count: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
-pub struct TagCount {
-    pub name: String,
-    pub open_count: u32,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, uniffi::Enum)]
+pub enum TextAlign {
+    #[default]
+    Left,
+    Justify,
 }
 
+/// The settings every device shares (S12). The font size and the column width belong to the device.
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
-pub struct Counts {
-    pub inbox: u32,
-    pub today: u32,
-    pub overdue: u32,
-    pub upcoming: u32,
-    pub trash: u32,
-    /// Open top-level tasks, as the All view lists them.
-    pub all: u32,
-    /// What the Completed view lists, "won't do" among it.
-    pub completed: u32,
-    /// What the "Won't do" view lists (R69).
-    pub wont_do: u32,
+pub struct AppSettings {
+    /// A whole number of days from 1 to 3650 (S8).
+    pub trash_days: u32,
+    pub font_body: String,
+    pub font_mono: String,
+    pub line_height: f64,
+    pub paragraph_spacing: f64,
+    pub align: TextAlign,
+    pub hyphenate: bool,
+    pub smart_typography: bool,
+    pub spellcheck: bool,
+    /// `auto` or a BCP 47 tag.
+    pub spell_language: String,
+    /// `root`, `last` or the identifier of a folder (R2).
+    pub new_note_folder: String,
+}
+
+pub const DEFAULT_TRASH_DAYS: u32 = 30;
+pub const MAX_TRASH_DAYS: u32 = 3650;
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        AppSettings {
+            trash_days: DEFAULT_TRASH_DAYS,
+            font_body: "system".into(),
+            font_mono: "system".into(),
+            line_height: 1.5,
+            paragraph_spacing: 0.5,
+            align: TextAlign::Left,
+            hyphenate: false,
+            smart_typography: true,
+            spellcheck: true,
+            spell_language: "auto".into(),
+            new_note_folder: "root".into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct Attachment {
     pub id: String,
-    pub task_id: String,
+    pub note_id: String,
     pub name: String,
     pub mime: String,
     pub size: u64,
@@ -311,51 +279,41 @@ pub struct Attachment {
     pub local_path: Option<String>,
 }
 
-/// R140: how much content one attachment and all attachments of one task may take on this device.
+/// R36: how much content one attachment and all attachments of one note may take on this device.
 /// Kept by the device, not synced: a phone and a server have different room.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
 pub struct AttachmentLimits {
     /// The largest single file that can be added or downloaded.
     pub max_file: u64,
-    /// The most that all live attachments of one task may weigh together.
-    pub max_task: u64,
+    /// The most that all live attachments of one note may weigh together.
+    pub max_note: u64,
 }
 
-/// R140: the limits of a device that has not chosen its own.
+/// R36: the limits of a device that has not chosen its own.
 pub const DEFAULT_MAX_FILE: u64 = 512 * 1024 * 1024;
-pub const DEFAULT_MAX_TASK: u64 = 2 * 1024 * 1024 * 1024;
+pub const DEFAULT_MAX_NOTE: u64 = 2 * 1024 * 1024 * 1024;
 
 impl Default for AttachmentLimits {
     fn default() -> Self {
         AttachmentLimits {
             max_file: DEFAULT_MAX_FILE,
-            max_task: DEFAULT_MAX_TASK,
+            max_note: DEFAULT_MAX_NOTE,
         }
     }
 }
 
-/// What saving every attachment of a task into a folder did (R91).
+/// What saving every attachment of a note into a folder did.
 #[derive(Debug, Clone, PartialEq, Default, uniffi::Record)]
 pub struct AttachmentsSaved {
     /// The names the files were written under, in the order of the attachments.
     pub saved: Vec<String>,
     /// The names of the attachments that could not be downloaded or written.
     pub failed: Vec<String>,
-    /// How many were downloaded for this (R76).
+    /// How many were downloaded for this (R35).
     pub fetched: u32,
 }
 
-/// Result of parsing a quick-entry line.
-#[derive(Debug, Clone, PartialEq, Default, uniffi::Record)]
-pub struct QuickParse {
-    pub title: String,
-    pub due: Option<String>,
-    pub priority: Priority,
-    pub tags: Vec<String>,
-    pub list_name: Option<String>,
-}
-
-/// What a test of sync settings found when the storage can be reached (S26).
+/// What a test of sync settings found when the storage can be reached (S46).
 #[derive(Debug, Clone, Copy, PartialEq, uniffi::Enum)]
 pub enum ConnectionCheck {
     /// The storage answers at the address.
@@ -389,18 +347,18 @@ pub struct SyncReport {
     pub blobs_downloaded: u32,
 }
 
-/// Which side is kept when a device joins a storage and both hold data (S36).
+/// Which side is kept when a device joins a storage and both hold data (S33).
 #[derive(Debug, Clone, Copy, PartialEq, uniffi::Enum)]
 pub enum SyncSide {
-    /// Both: the usual merge (S12).
+    /// Both: the usual merge (S16).
     Merge,
-    /// The storage: the device drops its own data (S37).
+    /// The storage: the device drops its own data (S36).
     Storage,
-    /// The device: its data goes over the storage's (S38).
+    /// The device: its data goes over the storage's (S37).
     Device,
 }
 
-/// Result of one pass over attachment content (S34).
+/// Result of one pass over attachment content (S24).
 #[derive(Debug, Clone, PartialEq, Default, uniffi::Record)]
 pub struct AttachmentReport {
     pub uploaded: u32,
@@ -414,49 +372,11 @@ pub struct SyncStatus {
     pub configured: bool,
     /// Local changes not uploaded yet.
     pub pending: u32,
-    /// Attachments whose content is not on this device or not known to be in the storage (S34).
+    /// Attachments whose content is not on this device or not known to be in the storage (S24).
     pub attachments_waiting: u32,
     /// `YYYY-MM-DDTHH:MM` of the last successful run.
     pub last_ok: Option<String>,
     pub last_error: Option<String>,
-    /// S54: the storage is encrypted with a passphrase, as far as this device knows.
+    /// S28: the storage is encrypted with a passphrase, as far as this device knows.
     pub encrypted: bool,
-}
-
-/// How this device wants to be notified. Kept by the app, not synced:
-/// a phone and a desktop rarely want the same.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
-pub struct NotifySettings {
-    pub enabled: bool,
-    /// For a task due at a time and without a reminder of its own: notify this
-    /// many minutes before, once per entry. Empty turns these off; 0 means at
-    /// the due time.
-    pub lead_minutes: Vec<u32>,
-    /// For a task due on a day without a time: notify at this time (`HH:MM`) on that day.
-    pub all_day_at: Option<String>,
-    /// A summary of the day at this time (`HH:MM`), when there is anything due.
-    pub summary_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
-pub enum NotificationKind {
-    /// The reminder set on the task.
-    Reminder,
-    /// Derived from the due date by the settings.
-    Due,
-    /// The summary of a day; `count` tasks are due or overdue.
-    Summary,
-}
-
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
-pub struct PlannedNotification {
-    /// Stable across calls, so the app can replace what it scheduled before.
-    pub key: String,
-    pub kind: NotificationKind,
-    /// `YYYY-MM-DDTHH:MM`, local time.
-    pub at: String,
-    pub task_id: Option<String>,
-    pub title: String,
-    pub due: Option<String>,
-    pub count: u32,
 }

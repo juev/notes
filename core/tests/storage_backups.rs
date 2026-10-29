@@ -1,4 +1,4 @@
-//! Backups in the storage: S60 and S61 in docs/specs/sync.md, R153 and R154 in
+//! Backups in the storage: S32 in docs/specs/sync.md, R71 and R72 in
 //! docs/specs/product.md. Storage is a temporary folder.
 
 mod common;
@@ -63,21 +63,21 @@ fn entries(path: &Path) -> Vec<String> {
     names
 }
 
-fn attach(d: &Device, task: &TaskItem, name: &str, content: &[u8]) -> Attachment {
+fn attach(d: &Device, note: &Note, name: &str, content: &[u8]) -> Attachment {
     let src = tempfile::tempdir().unwrap();
     let file = src.path().join(name);
     std::fs::write(&file, content).unwrap();
-    d.add_attachment(task.id.clone(), file.to_string_lossy().into_owned(), None)
+    d.add_attachment(note.id.clone(), file.to_string_lossy().into_owned(), None)
         .unwrap()
 }
 
 #[test]
-fn s60_a_pass_puts_a_copy_without_content_once_per_period() {
+fn s32_a_pass_puts_a_copy_without_content_once_per_period() {
     let storage = tempfile::tempdir().unwrap();
     let a = device();
     connect(&a, &storage);
-    let task = add(&a, "в копии");
-    attach(&a, &task, "a.txt", b"content");
+    let note = add(&a, "в копии");
+    attach(&a, &note, "a.txt", b"content");
     sync(&a, &storage);
     let copy = only_copy(&storage);
     assert_eq!(
@@ -104,7 +104,7 @@ fn s60_a_pass_puts_a_copy_without_content_once_per_period() {
 }
 
 #[test]
-fn s60_a_device_keeps_as_many_copies_as_it_keeps_locally_and_leaves_the_others() {
+fn s32_a_device_keeps_as_many_copies_as_it_keeps_locally_and_leaves_the_others() {
     let storage = tempfile::tempdir().unwrap();
     let a = device();
     connect(&a, &storage);
@@ -170,7 +170,7 @@ impl Remote for NoBackups {
 }
 
 #[test]
-fn s60_a_failed_copy_does_not_fail_the_pass() {
+fn s32_a_failed_copy_does_not_fail_the_pass() {
     let storage = tempfile::tempdir().unwrap();
     let a = device();
     connect(&a, &storage);
@@ -186,7 +186,7 @@ fn s60_a_failed_copy_does_not_fail_the_pass() {
 }
 
 #[test]
-fn s60_r154_no_copies_when_turned_off_without_schedule_or_without_sync() {
+fn s32_no_copies_when_turned_off_without_schedule_or_without_sync() {
     let storage = tempfile::tempdir().unwrap();
     let a = device();
     connect(&a, &storage);
@@ -222,7 +222,7 @@ fn s60_r154_no_copies_when_turned_off_without_schedule_or_without_sync() {
 }
 
 #[test]
-fn s61_copies_in_an_encrypted_storage_are_sealed_and_clear_ones_go() {
+fn s32_copies_in_an_encrypted_storage_are_sealed_and_clear_ones_go() {
     let storage = tempfile::tempdir().unwrap();
     let a = device();
     connect(&a, &storage);
@@ -250,16 +250,16 @@ fn s61_copies_in_an_encrypted_storage_are_sealed_and_clear_ones_go() {
     add(&a, "после копии");
     a.restore_storage_backup(listed[0].device.clone(), listed[0].name.clone(), false)
         .unwrap();
-    assert_eq!(view(&a, Scope::Inbox), ["секретная задача"]);
+    assert_eq!(oldest_first(&a), ["секретная задача"]);
 }
 
 #[test]
-fn r153_a_copy_from_the_storage_restores_on_another_device_and_the_content_follows() {
+fn s32_a_copy_from_the_storage_restores_on_another_device_and_the_content_follows() {
     let storage = tempfile::tempdir().unwrap();
     let a = device();
     connect(&a, &storage);
-    let task = add(&a, "с файлом");
-    attach(&a, &task, "a.txt", b"the content");
+    let note = add(&a, "с файлом");
+    attach(&a, &note, "a.txt", b"the content");
     sync(&a, &storage);
     a.sync_attachments_with(&DirRemote::new(storage.path())).unwrap();
 
@@ -270,12 +270,12 @@ fn r153_a_copy_from_the_storage_restores_on_another_device_and_the_content_follo
     assert!(!listed[0].this_device);
     b.restore_storage_backup(listed[0].device.clone(), listed[0].name.clone(), false)
         .unwrap();
-    assert_eq!(view(&b, Scope::Inbox), ["с файлом"]);
-    let waiting = b.attachments(task.id.clone()).unwrap();
+    assert_eq!(oldest_first(&b), ["с файлом"]);
+    let waiting = b.attachments(note.id.clone()).unwrap();
     assert_eq!(waiting.len(), 1);
     assert!(waiting[0].local_path.is_none(), "not downloaded yet");
     b.sync_attachments_with(&DirRemote::new(storage.path())).unwrap();
-    let got = b.attachments(task.id.clone()).unwrap();
+    let got = b.attachments(note.id.clone()).unwrap();
     assert_eq!(
         std::fs::read(got[0].local_path.as_ref().unwrap()).unwrap(),
         b"the content"

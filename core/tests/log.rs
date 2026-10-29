@@ -1,7 +1,7 @@
 mod common;
 
 use common::*;
-use notes_core::{LogLevel, NewTask, Store, SyncConfig};
+use notes_core::{LogLevel, NewNote, Store, SyncConfig};
 
 fn log_of(device: &Device) -> String {
     std::fs::read_to_string(device.dir().join("log.txt")).unwrap_or_default()
@@ -22,7 +22,7 @@ fn unreachable() -> SyncConfig {
 }
 
 #[test]
-fn r102_a_new_device_logs_errors_and_has_no_file() {
+fn r95_a_new_device_logs_errors_and_has_no_file() {
     let a = device();
     assert_eq!(a.log_level(), LogLevel::Error);
     assert!(a.log_files().is_empty());
@@ -30,7 +30,7 @@ fn r102_a_new_device_logs_errors_and_has_no_file() {
 }
 
 #[test]
-fn r102_a_failed_sync_is_an_error_line() {
+fn r95_a_failed_sync_is_an_error_line() {
     let a = device();
     a.set_sync_config(unreachable()).unwrap();
     a.set_sync_password(Some("pw-123".into()));
@@ -42,7 +42,7 @@ fn r102_a_failed_sync_is_an_error_line() {
 }
 
 #[test]
-fn r102_a_failure_that_repeats_is_an_error_once() {
+fn r95_a_failure_that_repeats_is_an_error_once() {
     let a = device();
     a.set_sync_config(unreachable()).unwrap();
     assert!(a.sync_now().is_err());
@@ -55,7 +55,7 @@ fn r102_a_failure_that_repeats_is_an_error_once() {
 }
 
 #[test]
-fn r102_a_failure_after_a_run_that_went_through_is_an_error_again() {
+fn r95_a_failure_after_a_run_that_went_through_is_an_error_again() {
     let storage = tempfile::tempdir().unwrap();
     let a = device();
     a.set_sync_config(unreachable()).unwrap();
@@ -68,7 +68,7 @@ fn r102_a_failure_after_a_run_that_went_through_is_an_error_again() {
 }
 
 #[test]
-fn r102_a_sync_that_went_through_is_an_event_and_not_an_error() {
+fn r95_a_sync_that_went_through_is_an_event_and_not_an_error() {
     let storage = tempfile::tempdir().unwrap();
     let a = device();
     a.set_sync_config(folder(&storage)).unwrap();
@@ -85,7 +85,7 @@ fn r102_a_sync_that_went_through_is_an_event_and_not_an_error() {
 }
 
 #[test]
-fn r102_a_run_that_changed_nothing_is_said_at_the_detailed_level_only() {
+fn r95_a_run_that_changed_nothing_is_said_at_the_detailed_level_only() {
     let storage = tempfile::tempdir().unwrap();
     let a = device();
     a.set_sync_config(folder(&storage)).unwrap();
@@ -103,7 +103,7 @@ fn r102_a_run_that_changed_nothing_is_said_at_the_detailed_level_only() {
 }
 
 #[test]
-fn r102_nothing_is_written_when_the_log_is_off() {
+fn r95_nothing_is_written_when_the_log_is_off() {
     let a = device();
     a.set_log_level(LogLevel::Off).unwrap();
     a.set_sync_config(unreachable()).unwrap();
@@ -113,7 +113,7 @@ fn r102_nothing_is_written_when_the_log_is_off() {
 }
 
 #[test]
-fn r102_the_level_is_kept_on_the_device() {
+fn r95_the_level_is_kept_on_the_device() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().to_string_lossy().into_owned();
     Store::open(path.clone())
@@ -124,7 +124,7 @@ fn r102_the_level_is_kept_on_the_device() {
 }
 
 #[test]
-fn r102_the_level_is_not_synced() {
+fn r95_the_level_is_not_synced() {
     let storage = tempfile::tempdir().unwrap();
     let (a, b) = (device(), device());
     a.set_sync_config(folder(&storage)).unwrap();
@@ -137,7 +137,7 @@ fn r102_the_level_is_not_synced() {
 }
 
 #[test]
-fn r102_a_line_from_the_app_follows_the_level_and_stays_one_line() {
+fn r95_a_line_from_the_app_follows_the_level_and_stays_one_line() {
     let a = device();
     a.log(LogLevel::Info, "app".into(), "started".into());
     assert_eq!(log_of(&a), "");
@@ -152,7 +152,7 @@ fn r102_a_line_from_the_app_follows_the_level_and_stays_one_line() {
 }
 
 #[test]
-fn r102_a_file_over_the_limit_becomes_the_previous_one() {
+fn r95_a_file_over_the_limit_becomes_the_previous_one() {
     let a = device();
     let big = "x".repeat(200 * 1024);
     for _ in 0..6 {
@@ -173,7 +173,7 @@ fn r102_a_file_over_the_limit_becomes_the_previous_one() {
 }
 
 #[test]
-fn r102_clearing_removes_both_files() {
+fn r95_clearing_removes_both_files() {
     let a = device();
     let big = "x".repeat(600 * 1024);
     for _ in 0..3 {
@@ -186,14 +186,14 @@ fn r102_clearing_removes_both_files() {
 }
 
 #[test]
-fn r102_the_log_holds_neither_the_tasks_nor_the_password() {
+fn r95_the_log_holds_neither_the_notes_nor_the_password() {
     let storage = tempfile::tempdir().unwrap();
     let a = device();
     a.set_log_level(LogLevel::Debug).unwrap();
-    a.create_task(NewTask {
+    a.create_note(NewNote {
         title: "Секрет".into(),
-        notes: "тайная заметка".into(),
-        ..NewTask::default()
+        tags: vec!["тайный тег".into()],
+        ..NewNote::default()
     })
     .unwrap();
     a.set_sync_config(folder(&storage)).unwrap();
@@ -208,13 +208,13 @@ fn r102_the_log_holds_neither_the_tasks_nor_the_password() {
     assert!(log.contains(" INFO sync: run finished"), "{log}");
     assert!(log.contains(" INFO backup: created "), "{log}");
     assert!(log.contains(" ERROR sync: "), "{log}");
-    for hidden in ["Секрет", "тайная", "pw-123"] {
+    for hidden in ["Секрет", "тайный", "pw-123"] {
         assert!(!log.contains(hidden), "{hidden} is in the log: {log}");
     }
 }
 
 #[test]
-fn r102_a_backup_does_not_carry_the_log() {
+fn r95_a_backup_does_not_carry_the_log() {
     let a = device();
     add(&a, "one");
     a.log(LogLevel::Error, "app".into(), "kept out of the backup".into());
@@ -227,13 +227,13 @@ fn r102_a_backup_does_not_carry_the_log() {
 // --- R102: attachment content and the calls of the apps (#251) ---
 
 use notes_core::sync::remote::{DirRemote, Remote};
-use notes_core::{AppError, Attachment, Result, TaskItem};
+use notes_core::{AppError, Attachment, Note, Result};
 
-fn attach(d: &Device, task: &TaskItem, name: &str, content: &[u8]) -> Attachment {
+fn attach(d: &Device, note: &Note, name: &str, content: &[u8]) -> Attachment {
     let src = tempfile::tempdir().unwrap();
     let file = src.path().join(name);
     std::fs::write(&file, content).unwrap();
-    d.add_attachment(task.id.clone(), file.to_string_lossy().into_owned(), None)
+    d.add_attachment(note.id.clone(), file.to_string_lossy().into_owned(), None)
         .unwrap()
 }
 
@@ -294,7 +294,7 @@ fn reopened(d: &Device) -> std::sync::Arc<Store> {
 }
 
 #[test]
-fn r102_content_the_storage_refuses_is_an_error_line_without_the_task_or_the_hash() {
+fn r95_content_the_storage_refuses_is_an_error_line_without_the_task_or_the_hash() {
     let storage = tempfile::tempdir().unwrap();
     let a = device();
     let t = add(&a, "Секрет");
@@ -317,7 +317,7 @@ fn r102_content_the_storage_refuses_is_an_error_line_without_the_task_or_the_has
 }
 
 #[test]
-fn r102_content_that_keeps_failing_is_an_error_once_an_hour_and_across_restarts() {
+fn r95_content_that_keeps_failing_is_an_error_once_an_hour_and_across_restarts() {
     let storage = tempfile::tempdir().unwrap();
     let a = device();
     let t = add(&a, "с файлом");
@@ -351,7 +351,7 @@ fn r102_content_that_keeps_failing_is_an_error_once_an_hour_and_across_restarts(
 }
 
 #[test]
-fn r102_content_that_goes_through_after_failing_is_an_event_and_a_new_failure_an_error() {
+fn r95_content_that_goes_through_after_failing_is_an_event_and_a_new_failure_an_error() {
     let storage = tempfile::tempdir().unwrap();
     let a = device();
     let t = add(&a, "с файлом");
@@ -388,7 +388,7 @@ fn r102_content_that_goes_through_after_failing_is_an_event_and_a_new_failure_an
 }
 
 #[test]
-fn r102_content_that_cannot_be_read_is_an_error_line_at_once() {
+fn r95_content_that_cannot_be_read_is_an_error_line_at_once() {
     let storage = tempfile::tempdir().unwrap();
     let (a, b) = (device(), device());
     let t = add(&a, "с файлом");
@@ -410,7 +410,7 @@ fn r102_content_that_cannot_be_read_is_an_error_line_at_once() {
 }
 
 #[test]
-fn r102_content_that_does_not_match_its_hash_is_an_error_line() {
+fn r95_content_that_does_not_match_its_hash_is_an_error_line() {
     let storage = tempfile::tempdir().unwrap();
     let (a, b) = (device(), device());
     let t = add(&a, "с файлом");
@@ -430,7 +430,7 @@ fn r102_content_that_does_not_match_its_hash_is_an_error_line() {
 }
 
 #[test]
-fn r102_content_missing_from_the_storage_is_an_error_only_after_an_hour() {
+fn r95_content_missing_from_the_storage_is_an_error_only_after_an_hour() {
     let storage = tempfile::tempdir().unwrap();
     let (a, b) = (device(), device());
     let t = add(&a, "с файлом");
@@ -461,7 +461,7 @@ fn r102_content_missing_from_the_storage_is_an_error_only_after_an_hour() {
 }
 
 #[test]
-fn r102_an_attachment_that_cannot_be_downloaded_on_request_is_an_error_line() {
+fn r95_an_attachment_that_cannot_be_downloaded_on_request_is_an_error_line() {
     let storage = tempfile::tempdir().unwrap();
     let (a, b) = (device(), device());
     b.set_sync_config(folder(&storage)).unwrap();
@@ -477,7 +477,7 @@ fn r102_an_attachment_that_cannot_be_downloaded_on_request_is_an_error_line() {
 }
 
 #[test]
-fn r102_calls_of_the_apps_that_fail_are_error_lines() {
+fn r95_calls_of_the_apps_that_fail_are_error_lines() {
     let a = device();
     let t = add(&a, "Секрет");
     assert!(a

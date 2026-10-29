@@ -1,7 +1,7 @@
-//! R131: the history of undo. An action that changes a task remembers, for every register it
+//! R75: the history of undo. An action that changes a note remembers, for every register it
 //! writes, what the register held before and the stamp it was given; undo writes the former values
 //! back as an ordinary local change, so it syncs like any other. The history lives in memory, one
-//! stack per actor: the apps are one actor, the web server makes each session one (R131).
+//! stack per actor: the apps are one actor, the web server makes each session one (R75).
 
 use std::cell::RefCell;
 use std::collections::hash_map::Entry;
@@ -10,7 +10,6 @@ use std::collections::{HashMap, HashSet};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 
-use crate::db::KIND_TASK;
 use crate::error::Result;
 use crate::store::{Store, Writer};
 
@@ -37,14 +36,14 @@ struct Register {
     written: String,
 }
 
-/// What one action did to one task, with its subtasks and the record of a repeat: undone whole or
-/// not at all (R131).
+/// What one action did to one note: undone whole or
+/// not at all (R75).
 #[derive(Default)]
 pub(crate) struct Step {
     registers: Vec<Register>,
     /// The objects the action wrote, and whether each was there before it.
     existed: HashMap<(String, String), bool>,
-    /// Edits of the same text of the same task in a row make one step (R131).
+    /// Edits of the same text of the same note in a row make one step (R75).
     text: Option<(String, String)>,
 }
 
@@ -83,7 +82,7 @@ impl Step {
         Ok(())
     }
 
-    /// Whether nothing has written over the step since: by this device or another one, by sync or CalDAV.
+    /// Whether nothing has written over the step since: by this device or another one, by sync.
     fn current(&self, conn: &Connection) -> Result<bool> {
         for r in &self.registers {
             let stamp: Option<String> = conn
@@ -110,21 +109,8 @@ impl Step {
                 continue;
             }
             gone.insert((kind.as_str(), id.as_str()));
-            let fields: Vec<&str> = self
-                .registers
-                .iter()
-                .filter(|r| &r.kind == kind && &r.id == id)
-                .map(|r| r.field.as_str())
-                .collect();
-            // A record of a repeat that was not there is no longer completed, as R128 takes it back;
-            // anything else the action made goes to the trash.
-            if kind == KIND_TASK && fields.contains(&"log_of") {
-                for field in ["done", "wont"].into_iter().filter(|f| fields.contains(f)) {
-                    w.set(kind, id, field, Value::Null)?;
-                }
-            } else {
-                w.set(kind, id, "deleted", json!(true))?;
-            }
+            // What the action made goes to the Trash.
+            w.set(kind, id, "deleted", json!(true))?;
         }
         for r in self.registers.iter().rev() {
             if gone.contains(&(r.kind.as_str(), r.id.as_str())) {
@@ -144,13 +130,13 @@ impl Step {
     }
 }
 
-/// The steps one undo takes back: one for an action on one task, several for an action on many.
+/// The steps one undo takes back: one for an action on one note, several for an action on many.
 type Action = Vec<Step>;
 
 #[derive(Default)]
 pub(crate) struct History {
     stacks: HashMap<String, Vec<Action>>,
-    /// Actions on several tasks being put together (`Store::begin_group`).
+    /// Actions on several notes being put together (`Store::begin_group`).
     open: HashMap<String, Action>,
     /// How many actions each history has taken in (`Store::undo_revision`).
     revisions: HashMap<String, u64>,
@@ -205,7 +191,7 @@ impl History {
 
 impl Store {
     /// Runs `f` with the calls it makes acting for `actor`, so that they go into its own history.
-    /// The web server gives each session one (R131). Calls outside act for the app itself.
+    /// The web server gives each session one (R75). Calls outside act for the app itself.
     pub fn as_actor<T>(&self, actor: &str, f: impl FnOnce() -> T) -> T {
         let before = ACTOR.with(|a| std::mem::replace(&mut *a.borrow_mut(), actor.to_string()));
         let out = f();
@@ -213,12 +199,12 @@ impl Store {
         out
     }
 
-    /// A write that the history can take back: one step of the current actor (R131).
+    /// A write that the history can take back: one step of the current actor (R75).
     pub(crate) fn act<T>(&self, f: impl FnOnce(&mut Writer) -> Result<T>) -> Result<T> {
         self.act_on(None, f)
     }
 
-    /// The same for an edit of a text of the task; edits in a row make one step.
+    /// The same for an edit of a text of the note; edits in a row make one step.
     pub(crate) fn act_on<T>(
         &self,
         text: Option<(String, String)>,
@@ -239,8 +225,8 @@ impl Store {
 
 #[uniffi::export]
 impl Store {
-    /// R131: takes back the last action of this history that is not taken back yet. A task that has
-    /// changed since is left as it is. Returns how many tasks came back.
+    /// R75: takes back the last action of this history that is not taken back yet. A note that has
+    /// changed since is left as it is. Returns how many notes came back.
     pub fn undo(&self) -> Result<u32> {
         let actor = actor();
         let Some(action) = self.history().stacks.get_mut(&actor).and_then(Vec::pop) else {
@@ -260,12 +246,12 @@ impl Store {
         Ok(count)
     }
 
-    /// Whether there is an action to take back (R131).
+    /// Whether there is an action to take back (R75).
     pub fn can_undo(&self) -> bool {
         self.history().stacks.get(&actor()).is_some_and(|s| !s.is_empty())
     }
 
-    /// The actions until `end_group` are taken back by one undo: an action on several tasks (R131).
+    /// The actions until `end_group` are taken back by one undo: an action on several notes (R75).
     pub fn begin_group(&self) {
         self.history().open.insert(actor(), Vec::new());
     }

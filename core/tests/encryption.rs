@@ -1,4 +1,4 @@
-//! Encryption of the storage with a passphrase: S54–S60 in docs/specs/sync.md.
+//! Encryption of the storage with a passphrase: S28–S31 in docs/specs/sync.md.
 //! Storage is a temporary folder; `webdav.rs` repeats the main case over HTTP.
 
 mod common;
@@ -37,17 +37,17 @@ fn connect(d: &Device, storage: &TempDir) {
     .unwrap();
 }
 
-fn attach(d: &Device, task: &TaskItem, name: &str, content: &[u8]) -> Attachment {
+fn attach(d: &Device, note: &Note, name: &str, content: &[u8]) -> Attachment {
     let src = tempfile::tempdir().unwrap();
     let file = src.path().join(name);
     std::fs::write(&file, content).unwrap();
-    d.add_attachment(task.id.clone(), file.to_string_lossy().into_owned(), None)
+    d.add_attachment(note.id.clone(), file.to_string_lossy().into_owned(), None)
         .unwrap()
 }
 
 /// The content of an attachment as this device holds it, if it does.
-fn content(d: &Device, task: &TaskItem, name: &str) -> Option<Vec<u8>> {
-    let found = d.attachments(task.id.clone()).unwrap();
+fn content(d: &Device, note: &Note, name: &str) -> Option<Vec<u8>> {
+    let found = d.attachments(note.id.clone()).unwrap();
     let file = found.iter().find(|a| a.name == name)?;
     std::fs::read(file.local_path.as_ref()?).ok()
 }
@@ -156,13 +156,13 @@ impl Remote for OnSeal<'_> {
 }
 
 #[test]
-fn s54_two_devices_converge_through_an_encrypted_folder() {
+fn s28_s30_two_devices_converge_through_an_encrypted_folder() {
     let storage = tempfile::tempdir().unwrap();
     let (a, b) = (device(), device());
     connect(&a, &storage);
     connect(&b, &storage);
     let t = add(&a, "секретная задача");
-    a.set_notes(t.id.clone(), "заметка под замком".into()).unwrap();
+    a.add_tag(t.id.clone(), "заметка под замком".into()).unwrap();
     // Larger than a chunk, so that it is sealed and opened in pieces.
     let first = attach(&a, &t, "plan.bin", &bulk(200_000, 1));
     a.set_push_endpoint(Some("https://push.example/topic-a".into()))
@@ -185,7 +185,7 @@ fn s54_two_devices_converge_through_an_encrypted_folder() {
     sync(&b, &storage);
     sync_files(&b, &storage);
     sync(&a, &storage);
-    assert_eq!(view(&a, Scope::Inbox), ["секретная задача", "без связи"]);
+    assert_eq!(oldest_first(&a), ["секретная задача", "без связи"]);
 
     let u = add(&a, "после шифрования");
     let second = attach(&a, &u, "second.bin", &bulk(70_000, 2));
@@ -194,20 +194,17 @@ fn s54_two_devices_converge_through_an_encrypted_folder() {
     sync(&b, &storage);
     assert_eq!(sync_files(&b, &storage).downloaded, 1);
     assert_eq!(content(&b, &u, "second.bin"), Some(bulk(70_000, 2)));
-    b.set_notes(u.id.clone(), "правка с B".into()).unwrap();
+    b.set_title(u.id.clone(), "правка с B".into()).unwrap();
     sync(&b, &storage);
     sync(&a, &storage);
-    assert_eq!(a.task(u.id.clone()).unwrap().notes, "правка с B");
+    assert_eq!(a.get_note(u.id.clone()).unwrap().title, "правка с B");
 
     // A device that comes later with the passphrase reads everything.
     let c = device();
     c.set_sync_passphrase(Some(PASS.into()));
     sync(&c, &storage);
     sync_files(&c, &storage);
-    assert_eq!(
-        view(&c, Scope::Inbox),
-        ["секретная задача", "без связи", "после шифрования"]
-    );
+    assert_eq!(oldest_first(&c), ["секретная задача", "без связи", "правка с B"]);
     assert_eq!(content(&c, &t, "plan.bin"), Some(bulk(200_000, 1)));
     assert_eq!(content(&c, &u, "second.bin"), Some(bulk(70_000, 2)));
 
@@ -226,7 +223,7 @@ fn s54_two_devices_converge_through_an_encrypted_folder() {
 }
 
 #[test]
-fn s58_a_missing_or_wrong_passphrase_and_a_newer_format_stop_sync_with_their_own_message() {
+fn s28_a_missing_or_wrong_passphrase_and_a_newer_format_stop_sync_with_their_own_message() {
     let storage = tempfile::tempdir().unwrap();
     let (a, b) = (device(), device());
     add(&a, "одна");
@@ -244,11 +241,11 @@ fn s58_a_missing_or_wrong_passphrase_and_a_newer_format_stop_sync_with_their_own
     assert_ne!(missing, wrong);
     // Local work goes on.
     add(&b, "локально");
-    assert_eq!(view(&b, Scope::Inbox), ["одна", "локально"]);
+    assert_eq!(oldest_first(&b), ["одна", "локально"]);
     b.set_sync_passphrase(Some(PASS.into()));
     sync(&b, &storage);
     sync(&a, &storage);
-    assert_eq!(view(&a, Scope::Inbox), ["одна", "локально"]);
+    assert_eq!(oldest_first(&a), ["одна", "локально"]);
 
     // An earlier version stops on format 4 the same way this one stops on a later one (S14).
     let mut later = vault(&storage);
@@ -261,7 +258,7 @@ fn s58_a_missing_or_wrong_passphrase_and_a_newer_format_stop_sync_with_their_own
 }
 
 #[test]
-fn s57_a_changed_moved_or_plain_file_stays_unread() {
+fn s28_a_changed_moved_or_plain_file_stays_unread() {
     let storage = tempfile::tempdir().unwrap();
     let (a, b) = (device(), device());
     // A state that outweighs two small log files, so that they stay in the log (S45).
@@ -292,9 +289,9 @@ fn s57_a_changed_moved_or_plain_file_stays_unread() {
     let middle = changed.len() / 2;
     changed[middle] ^= 1;
     std::fs::write(&first, &changed).unwrap();
-    let before = view(&b, Scope::Inbox);
+    let before = oldest_first(&b);
     assert_eq!(sync(&b, &storage).pulled, 0);
-    assert_eq!(view(&b, Scope::Inbox), before);
+    assert_eq!(oldest_first(&b), before);
 
     // The second file put under the name of the first: it was sealed for another path.
     std::fs::write(&first, &second_bytes).unwrap();
@@ -311,16 +308,16 @@ fn s57_a_changed_moved_or_plain_file_stays_unread() {
         .parse()
         .unwrap();
     let injected = format!(
-        "{{\"v\":2,\"device\":\"{device_id}\",\"seq\":{seq},\"count\":1}}\n{{\"k\":\"task\",\"i\":\"0192aaaa-0000-7000-8000-000000000001\",\"f\":\"title\",\"v\":\"подложено\",\"t\":\"ffffffffffff-0000-{device_id}\"}}\n"
+        "{{\"v\":2,\"device\":\"{device_id}\",\"seq\":{seq},\"count\":1}}\n{{\"k\":\"note\",\"i\":\"0192aaaa-0000-7000-8000-000000000001\",\"f\":\"title\",\"v\":\"подложено\",\"t\":\"ffffffffffff-0000-{device_id}\"}}\n"
     );
     std::fs::write(&first, injected).unwrap();
     assert_eq!(sync(&b, &storage).pulled, 0);
-    assert_eq!(view(&b, Scope::Inbox), before);
+    assert_eq!(oldest_first(&b), before);
 
     // The file as it was: both changes arrive.
     std::fs::write(&first, &first_bytes).unwrap();
     sync(&b, &storage);
-    let now = view(&b, Scope::Inbox);
+    let now = oldest_first(&b);
     assert_eq!(now.len(), before.len() + 2);
     assert!(now.ends_with(&["первая".to_string(), "вторая".to_string()]));
 
@@ -347,7 +344,7 @@ fn s57_a_changed_moved_or_plain_file_stays_unread() {
 }
 
 #[test]
-fn s56_a_change_uploaded_in_the_clear_while_the_storage_is_encrypted_is_not_lost() {
+fn s28_a_change_uploaded_in_the_clear_while_the_storage_is_encrypted_is_not_lost() {
     let storage = tempfile::tempdir().unwrap();
     let (a, b) = (device(), device());
     add(&a, "от A");
@@ -376,16 +373,16 @@ fn s56_a_change_uploaded_in_the_clear_while_the_storage_is_encrypted_is_not_lost
     b.set_sync_passphrase(Some(PASS.into()));
     sync(&b, &storage);
     sync(&a, &storage);
-    assert_eq!(view(&a, Scope::Inbox), ["от A", "от B в момент включения"]);
+    assert_eq!(oldest_first(&a), ["от A", "от B в момент включения"]);
     let c = device();
     c.set_sync_passphrase(Some(PASS.into()));
     sync(&c, &storage);
-    assert_eq!(view(&c, Scope::Inbox), ["от A", "от B в момент включения"]);
+    assert_eq!(oldest_first(&c), ["от A", "от B в момент включения"]);
     assert_sealed(&storage, &["от A", "от B"]);
 }
 
 #[test]
-fn s56_encryption_cut_short_leaves_the_storage_as_it_was() {
+fn s28_encryption_cut_short_leaves_the_storage_as_it_was() {
     let storage = tempfile::tempdir().unwrap();
     let (a, b) = (device(), device());
     let t = add(&a, "до шифрования");
@@ -415,16 +412,16 @@ fn s56_encryption_cut_short_leaves_the_storage_as_it_was() {
     sync(&a, &storage);
     sync(&b, &storage);
     sync_files(&b, &storage);
-    assert_eq!(view(&b, Scope::Inbox), ["до шифрования", "после сбоя"]);
+    assert_eq!(oldest_first(&b), ["до шифрования", "после сбоя"]);
     encrypt(&a, &storage, PASS);
     b.set_sync_passphrase(Some(PASS.into()));
     sync(&b, &storage);
-    assert_eq!(view(&b, Scope::Inbox), ["до шифрования", "после сбоя"]);
+    assert_eq!(oldest_first(&b), ["до шифрования", "после сбоя"]);
     assert_sealed(&storage, &["до шифрования", "после сбоя"]);
 }
 
 #[test]
-fn s56_content_the_encrypting_device_lacks_comes_from_the_device_that_has_it() {
+fn s28_content_the_encrypting_device_lacks_comes_from_the_device_that_has_it() {
     let storage = tempfile::tempdir().unwrap();
     let (a, b) = (device(), device());
     let t = add(&b, "файл B");
@@ -454,7 +451,7 @@ fn s56_content_the_encrypting_device_lacks_comes_from_the_device_that_has_it() {
 }
 
 #[test]
-fn s59_a_changed_passphrase_works_where_it_was_changed_and_is_asked_for_elsewhere() {
+fn s28_a_changed_passphrase_works_where_it_was_changed_and_is_asked_for_elsewhere() {
     let storage = tempfile::tempdir().unwrap();
     let (a, b) = (device(), device());
     sync(&a, &storage);
@@ -479,7 +476,7 @@ fn s59_a_changed_passphrase_works_where_it_was_changed_and_is_asked_for_elsewher
 
     // B, still running, has the same data key.
     sync(&b, &storage);
-    assert_eq!(view(&b, Scope::Inbox), ["после смены"]);
+    assert_eq!(oldest_first(&b), ["после смены"]);
     // Started again, it asks for the new passphrase.
     let b = reopen(b);
     b.set_sync_passphrase(Some(PASS.into()));
@@ -493,11 +490,11 @@ fn s59_a_changed_passphrase_works_where_it_was_changed_and_is_asked_for_elsewher
     add(&a, "после перезапуска");
     sync(&a, &storage);
     sync(&b, &storage);
-    assert_eq!(view(&b, Scope::Inbox), ["после смены", "после перезапуска"]);
+    assert_eq!(oldest_first(&b), ["после смены", "после перезапуска"]);
 }
 
 #[test]
-fn s62_a_storage_that_is_not_encrypted_any_more_is_not_written_in_the_clear() {
+fn s28_a_storage_that_is_not_encrypted_any_more_is_not_written_in_the_clear() {
     let storage = tempfile::tempdir().unwrap();
     let a = device();
     a.set_sync_config(SyncConfig::Folder {

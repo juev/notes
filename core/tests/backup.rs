@@ -1,4 +1,4 @@
-//! Backups and restoring: R87–R90 in docs/specs/product.md, S40 in docs/specs/sync.md.
+//! Backups and restoring: R70–R72 in docs/specs/product.md, S38 in docs/specs/sync.md.
 
 mod common;
 
@@ -24,84 +24,88 @@ fn sorted(mut titles: Vec<String>) -> Vec<String> {
     titles
 }
 
-fn attach(d: &Device, task: &TaskItem, name: &str, content: &[u8]) -> Attachment {
+fn attach(d: &Device, note: &Note, name: &str, content: &[u8]) -> Attachment {
     let src = tempfile::tempdir().unwrap();
     let file = src.path().join(name);
     std::fs::write(&file, content).unwrap();
-    d.add_attachment(task.id.clone(), file.to_string_lossy().into_owned(), None)
+    d.add_attachment(note.id.clone(), file.to_string_lossy().into_owned(), None)
         .unwrap()
 }
 
 /// Everything a user can see, in a form two devices can compare.
 fn dump(d: &Device) -> Vec<String> {
-    fn walk(d: &Device, tasks: Vec<TaskItem>, depth: usize, out: &mut Vec<String>) {
-        for t in tasks {
+    let mut out = Vec::new();
+    for f in d.folders().unwrap() {
+        out.push(format!(
+            "# {} | {} | parent={:?} icon={} daily={} sort={:?}",
+            f.id, f.name, f.parent_id, f.icon, f.daily, f.sort
+        ));
+    }
+    for scope in [Scope::All, Scope::Archived, Scope::Trash] {
+        out.push(format!("# {scope:?}"));
+        for n in d.notes(scope).unwrap() {
             let files: Vec<String> = d
-                .attachments(t.id.clone())
+                .attachments(n.id.clone())
                 .unwrap()
                 .into_iter()
                 .map(|a| format!("{}:{}:{}", a.name, a.sha256, a.local_path.is_some()))
                 .collect();
             out.push(format!(
-                "{}{} | {} | due={:?} prio={:?} done={} tags={:?} repeat={} notes={:?} files={:?}",
-                "  ".repeat(depth),
-                t.id,
-                t.title,
-                t.due,
-                t.priority,
-                t.done.is_some(),
-                t.tags,
-                t.repeat.is_some(),
-                t.notes,
-                files
+                "  {} | {} | folder={:?} tags={:?} pinned={} starred={} locked={} deleted={:?} files={:?}",
+                n.id, n.title, n.folder_id, n.tags, n.pinned, n.starred, n.locked, n.deleted_ms, files
             ));
-            walk(d, d.subtasks(t.id).unwrap(), depth + 1, out);
         }
     }
-    let mut out = Vec::new();
-    for list in d.lists().unwrap() {
-        out.push(format!("# {} | {} | {}", list.id, list.name, list.color));
-        walk(d, d.tasks(Scope::List { id: list.id }).unwrap(), 1, &mut out);
+    for f in d.filters().unwrap() {
+        out.push(format!("# filter {} | {} | {:?}", f.id, f.name, f.query));
     }
-    out.push("# trash".into());
-    out.extend(
-        d.tasks(Scope::Trash)
-            .unwrap()
-            .into_iter()
-            .map(|t| format!("  {} | {}", t.id, t.title)),
-    );
-    out.push("# completed".into());
-    out.extend(
-        d.tasks(Scope::Completed)
-            .unwrap()
-            .into_iter()
-            .map(|t| format!("  {} | {}", t.id, t.title)),
-    );
-    out.push(format!("# keep done {:?}", d.keep_done().unwrap()));
+    out.push(format!("# settings {:?}", d.settings().unwrap()));
     out
 }
 
 /// A device with a bit of everything a backup has to carry.
 fn furnished() -> Device {
     let d = device();
-    let work = d.create_list("Работа".into()).unwrap();
-    let report = add(&d, "отчёт");
-    d.move_to_list(report.id.clone(), work.id).unwrap();
+    let work = new_folder(&d, "Работа", None);
+    d.set_folder_icon(work.id.clone(), "💼".into()).unwrap();
+    let report = add_in(&d, "отчёт", &work);
     d.add_tag(report.id.clone(), "срочно".into()).unwrap();
-    d.set_due(report.id.clone(), Some("2026-10-12".into())).unwrap();
-    d.set_notes(report.id.clone(), "черновик у Оли".into()).unwrap();
-    add_sub(&d, &report, "собрать цифры");
+    d.set_starred(report.id.clone(), true).unwrap();
     attach(&d, &report, "цифры.txt", b"1 2 3");
     let gone = add(&d, "удалённая");
-    d.delete_task(gone.id).unwrap();
-    let done = add(&d, "сделанная");
-    d.complete_task(done.id).unwrap();
-    d.set_keep_done(KeepDone::EndOfDay).unwrap();
+    d.delete_note(gone.id).unwrap();
+    let shelved = add(&d, "в архиве");
+    d.set_archived(shelved.id, true).unwrap();
+    d.create_filter(
+        "Срочное".into(),
+        String::new(),
+        FilterQuery {
+            join: FilterJoin::All,
+            conditions: vec![Condition::HasTag {
+                name: "срочно".into()
+            }],
+        },
+    )
+    .unwrap();
+    d.set_settings(AppSettings {
+        trash_days: 14,
+        ..AppSettings::default()
+    })
+    .unwrap();
     d
 }
 
+/// The note with this title.
+fn titled(d: &Device, title: &str) -> Note {
+    d.notes(Scope::All)
+        .unwrap()
+        .into_iter()
+        .find(|n| n.title == title)
+        .unwrap()
+}
+
 #[test]
-fn r87_r90_a_backup_restores_on_a_clean_install() {
+fn r70_r72_a_backup_restores_on_a_clean_install() {
     let old = furnished();
     let backup = old.create_backup().unwrap();
     assert_eq!(backup.name, "Notes_(2026-10-05-10_00_00).notesbackup");
@@ -112,12 +116,7 @@ fn r87_r90_a_backup_restores_on_a_clean_install() {
     fresh.restore_backup(backup.path.clone(), false).unwrap();
     assert_eq!(dump(&fresh), dump(&old));
     // The content came with the backup and opens.
-    let report = fresh
-        .tasks(Scope::Search {
-            text: "отчёт".into()
-        })
-        .unwrap()
-        .remove(0);
+    let report = titled(&fresh, "отчёт");
     let file = fresh.attachments(report.id).unwrap().remove(0);
     assert_eq!(std::fs::read(file.local_path.unwrap()).unwrap(), b"1 2 3");
     // A clean install had nothing to keep before the restore.
@@ -127,9 +126,9 @@ fn r87_r90_a_backup_restores_on_a_clean_install() {
 }
 
 #[test]
-fn r140_a_large_file_survives_a_backup_and_a_restore() {
+fn r36_a_large_file_survives_a_backup_and_a_restore() {
     let old = device();
-    let task = add(&old, "с большим файлом");
+    let note = add(&old, "с большим файлом");
     let src = tempfile::tempdir().unwrap();
     let file = src.path().join("large.bin");
     {
@@ -140,18 +139,13 @@ fn r140_a_large_file_survives_a_backup_and_a_restore() {
         out.write_all(b"end!").unwrap();
     }
     let added = old
-        .add_attachment(task.id, file.to_string_lossy().into_owned(), None)
+        .add_attachment(note.id, file.to_string_lossy().into_owned(), None)
         .unwrap();
     let backup = old.create_backup().unwrap();
 
     let fresh = device();
     fresh.restore_backup(backup.path, false).unwrap();
-    let restored = fresh
-        .tasks(Scope::Search {
-            text: "большим".into()
-        })
-        .unwrap()
-        .remove(0);
+    let restored = titled(&fresh, "с большим файлом");
     let got = fresh.attachments(restored.id).unwrap().remove(0);
     assert_eq!((got.name.as_str(), got.size), ("large.bin", 16 * 1024 * 1024));
     assert_eq!(got.sha256, added.sha256);
@@ -173,7 +167,7 @@ fn r140_a_large_file_survives_a_backup_and_a_restore() {
 }
 
 #[test]
-fn r87_what_belongs_to_the_device_is_not_in_the_backup() {
+fn r70_what_belongs_to_the_device_is_not_in_the_backup() {
     let storage = tempfile::tempdir().unwrap();
     let old = furnished();
     old.set_sync_config(folder(&storage)).unwrap();
@@ -197,20 +191,19 @@ fn r87_what_belongs_to_the_device_is_not_in_the_backup() {
 }
 
 #[test]
-fn r90_restoring_replaces_the_data_and_keeps_what_was_there_as_a_backup() {
+fn r72_restoring_replaces_the_data_and_keeps_what_was_there_as_a_backup() {
     let d = furnished();
     let before = dump(&d);
     let backup = d.create_backup().unwrap();
 
     d.set_now_for_tests("2026-10-06T09:00");
-    let work = d.lists().unwrap().into_iter().find(|l| l.name == "Работа").unwrap();
-    d.delete_list(work.id).unwrap();
+    let work = d.folders().unwrap().into_iter().find(|f| f.name == "Работа").unwrap();
+    d.delete_folder(work.id).unwrap();
     add(&d, "лишняя");
     let changed = dump(&d);
     assert_ne!(changed, before);
 
     d.restore_backup(backup.path, false).unwrap();
-    // Seen at the moment of the first look: a completed task leaves its list with time (R68).
     d.set_now_for_tests(NOW);
     assert_eq!(dump(&d), before);
     // The state that was replaced is the newest backup now.
@@ -223,7 +216,7 @@ fn r90_restoring_replaces_the_data_and_keeps_what_was_there_as_a_backup() {
 }
 
 #[test]
-fn r90_a_file_that_is_no_backup_changes_nothing() {
+fn r72_a_file_that_is_no_backup_changes_nothing() {
     let d = furnished();
     let before = dump(&d);
     let dir = tempfile::tempdir().unwrap();
@@ -271,7 +264,7 @@ fn r90_a_file_that_is_no_backup_changes_nothing() {
 }
 
 #[test]
-fn r90_content_that_does_not_match_its_name_is_not_taken() {
+fn r72_content_that_does_not_match_its_name_is_not_taken() {
     let old = device();
     let t = add(&old, "с файлом");
     let file = attach(&old, &t, "a.txt", b"honest");
@@ -313,7 +306,7 @@ fn r90_content_that_does_not_match_its_name_is_not_taken() {
 }
 
 #[test]
-fn r88_automatic_backups_follow_the_schedule_and_the_oldest_go() {
+fn r70_automatic_backups_follow_the_schedule_and_the_oldest_go() {
     let d = device();
     assert_eq!(
         d.backup_settings().unwrap(),
@@ -388,7 +381,7 @@ fn r88_automatic_backups_follow_the_schedule_and_the_oldest_go() {
 }
 
 #[test]
-fn r89_backups_are_listed_and_deleted_by_name() {
+fn r70_backups_are_listed_and_deleted_by_name() {
     let d = device();
     add(&d, "задача");
     let first = d.create_backup().unwrap();
@@ -407,7 +400,7 @@ fn r89_backups_are_listed_and_deleted_by_name() {
 }
 
 #[test]
-fn s40_a_restore_merged_with_the_storage_keeps_what_happened_since() {
+fn s38_a_restore_merged_with_the_storage_keeps_what_happened_since() {
     let storage = tempfile::tempdir().unwrap();
     let (a, b) = (device(), device());
     let t = add(&a, "один");
@@ -417,22 +410,22 @@ fn s40_a_restore_merged_with_the_storage_keeps_what_happened_since() {
     let backup = a.create_backup().unwrap();
 
     b.set_title(t.id.clone(), "два".into()).unwrap();
-    b.delete_task(later_gone.id.clone()).unwrap();
+    b.delete_note(later_gone.id.clone()).unwrap();
     sync(&b, &storage);
     sync(&a, &storage);
 
     a.restore_backup(backup.path, false).unwrap();
-    assert_eq!(a.task(t.id.clone()).unwrap().title, "один");
+    assert_eq!(a.get_note(t.id.clone()).unwrap().title, "один");
     sync(&a, &storage);
     sync(&b, &storage);
     for d in [&a, &b] {
-        assert_eq!(d.task(t.id.clone()).unwrap().title, "два", "the later edit wins");
+        assert_eq!(d.get_note(t.id.clone()).unwrap().title, "два", "the later edit wins");
         assert_eq!(view(d, Scope::Trash), ["удалят позже"]);
     }
 }
 
 #[test]
-fn s40_a_restore_put_over_the_storage_reaches_every_device() {
+fn s38_a_restore_put_over_the_storage_reaches_every_device() {
     let storage = tempfile::tempdir().unwrap();
     let (a, b) = (device(), device());
     a.set_sync_config(folder(&storage)).unwrap();
@@ -445,7 +438,7 @@ fn s40_a_restore_put_over_the_storage_reaches_every_device() {
     let was = a.device_id();
 
     b.set_title(t.id.clone(), "два".into()).unwrap();
-    b.delete_task(later_gone.id).unwrap();
+    b.delete_note(later_gone.id).unwrap();
     add(&b, "появилась позже");
     b.sync_now().unwrap();
     a.sync_now().unwrap();
@@ -456,19 +449,19 @@ fn s40_a_restore_put_over_the_storage_reaches_every_device() {
     a.sync_now().unwrap();
     b.sync_now().unwrap();
     for d in [&a, &b] {
-        assert_eq!(d.task(t.id.clone()).unwrap().title, "один");
-        assert_eq!(sorted(view(d, Scope::All)), ["один", "удалят позже"]);
+        assert_eq!(d.get_note(t.id.clone()).unwrap().title, "один");
+        assert_eq!(sorted(oldest_first(d)), ["один", "удалят позже"]);
         assert_eq!(view(d, Scope::Trash), ["появилась позже"]);
     }
     // The device goes on under its new name.
     add(&a, "после");
     a.sync_now().unwrap();
     b.sync_now().unwrap();
-    assert_eq!(sorted(view(&b, Scope::All)), ["один", "после", "удалят позже"]);
+    assert_eq!(sorted(oldest_first(&b)), ["один", "после", "удалят позже"]);
 }
 
 #[test]
-fn s40_a_backup_restored_on_another_device_does_not_share_its_name() {
+fn s38_a_backup_restored_on_another_device_does_not_share_its_name() {
     let storage = tempfile::tempdir().unwrap();
     let (a, b) = (device(), device());
     a.set_sync_config(folder(&storage)).unwrap();
@@ -485,12 +478,12 @@ fn s40_a_backup_restored_on_another_device_does_not_share_its_name() {
     a.sync_now().unwrap();
     b.sync_now().unwrap();
     for d in [&a, &b] {
-        assert_eq!(sorted(view(d, Scope::All)), ["ещё с A", "с A", "с B"]);
+        assert_eq!(sorted(oldest_first(d)), ["ещё с A", "с A", "с B"]);
     }
 }
 
 #[test]
-fn r88_two_looks_at_the_schedule_at_once_make_one_backup() {
+fn r70_two_looks_at_the_schedule_at_once_make_one_backup() {
     let d = device();
     add(&d, "задача");
     let made: usize = std::thread::scope(|scope| {
@@ -525,25 +518,25 @@ fn schema_version(dir: &std::path::Path) -> Option<String> {
         .ok()
 }
 
-/// A data folder with tasks in it, closed.
+/// A data folder with notes in it, closed.
 fn furnished_folder() -> (TempDir, Vec<String>) {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path().to_string_lossy().into_owned()).unwrap();
-    let list = store.create_list("Работа".into()).unwrap();
-    let task = add(&store, "отчёт");
-    store.move_to_list(task.id.clone(), list.id).unwrap();
-    store.set_notes(task.id, "черновик у Оли".into()).unwrap();
+    let folder = store.create_folder("Работа".into(), None).unwrap();
+    let note = add(&store, "отчёт");
+    store.move_note(note.id.clone(), Some(folder.id)).unwrap();
+    store.add_tag(note.id, "черновик у Оли".into()).unwrap();
     add(&store, "вторая");
-    let titles = sorted(view(&store, Scope::All));
+    let titles = sorted(oldest_first(&store));
     (dir, titles)
 }
 
-fn attach_to(store: &Store, task: &TaskItem, name: &str, content: &[u8]) {
+fn attach_to(store: &Store, note: &Note, name: &str, content: &[u8]) {
     let src = tempfile::tempdir().unwrap();
     let file = src.path().join(name);
     std::fs::write(&file, content).unwrap();
     store
-        .add_attachment(task.id.clone(), file.to_string_lossy().into_owned(), None)
+        .add_attachment(note.id.clone(), file.to_string_lossy().into_owned(), None)
         .unwrap();
 }
 
@@ -552,7 +545,7 @@ fn open(dir: &TempDir) -> Result<std::sync::Arc<Store>> {
 }
 
 #[test]
-fn r92_a_database_of_an_earlier_schema_is_backed_up_before_it_is_migrated() {
+fn schema_a_database_of_an_earlier_schema_is_backed_up_before_it_is_migrated() {
     let (dir, titles) = furnished_folder();
     assert_eq!(schema_version(dir.path()).as_deref(), Some("2"));
     set_schema_version(dir.path(), Some("1"));
@@ -563,11 +556,11 @@ fn r92_a_database_of_an_earlier_schema_is_backed_up_before_it_is_migrated() {
     assert_eq!(backups.len(), 1);
     assert!(std::path::Path::new(&backups[0].path).starts_with(dir.path().join("backups")));
     assert_eq!(schema_version(dir.path()).as_deref(), Some("2"));
-    assert_eq!(sorted(view(&store, Scope::All)), titles);
+    assert_eq!(sorted(oldest_first(&store)), titles);
     // The copy holds what the database held: a clean install restored from it shows the same.
     let fresh = device();
     fresh.restore_backup(backups[0].path.clone(), false).unwrap();
-    assert_eq!(sorted(view(&fresh, Scope::All)), titles);
+    assert_eq!(sorted(oldest_first(&fresh)), titles);
     drop(store);
 
     // The next start finds the schema it knows and makes no copy.
@@ -575,19 +568,19 @@ fn r92_a_database_of_an_earlier_schema_is_backed_up_before_it_is_migrated() {
 }
 
 #[test]
-fn r92_the_backup_before_a_migration_does_not_read_the_derived_tables() {
+fn schema_the_backup_before_a_migration_does_not_read_the_derived_tables() {
     let dir = tempfile::tempdir().unwrap();
     let titles = {
         let store = open(&dir).unwrap();
-        let task = add(&store, "с файлом");
-        attach_to(&store, &task, "цифры.txt", b"1 2 3");
-        sorted(view(&store, Scope::All))
+        let note = add(&store, "с файлом");
+        attach_to(&store, &note, "цифры.txt", b"1 2 3");
+        sorted(oldest_first(&store))
     };
     // An earlier version left its derived tables in a shape this one does not know.
     set_schema_version(dir.path(), Some("0"));
     let conn = rusqlite::Connection::open(dir.path().join("notes.sqlite")).unwrap();
     conn.execute_batch(
-        "DROP TABLE tasks; DROP TABLE lists; DROP TABLE attachments; DROP TABLE task_tags; DROP TABLE filters;
+        "DROP TABLE notes; DROP TABLE folders; DROP TABLE attachments; DROP TABLE note_tags; DROP TABLE filters;
          DELETE FROM meta WHERE key = 'derived_version';",
     )
     .unwrap();
@@ -597,17 +590,17 @@ fn r92_the_backup_before_a_migration_does_not_read_the_derived_tables() {
 
     let backups = store.backups().unwrap();
     assert_eq!(backups.len(), 1);
-    assert_eq!(sorted(view(&store, Scope::All)), titles);
+    assert_eq!(sorted(oldest_first(&store)), titles);
     // The content of the attachment is in the copy.
     let fresh = device();
     fresh.restore_backup(backups[0].path.clone(), false).unwrap();
-    let task = fresh.tasks(Scope::All).unwrap().remove(0);
-    let file = fresh.attachments(task.id).unwrap().remove(0);
+    let note = fresh.notes(Scope::All).unwrap().remove(0);
+    let file = fresh.attachments(note.id).unwrap().remove(0);
     assert_eq!(std::fs::read(file.local_path.unwrap()).unwrap(), b"1 2 3");
 }
 
 #[test]
-fn r92_a_database_of_the_present_schema_gets_no_backup() {
+fn schema_a_database_of_the_present_schema_gets_no_backup() {
     // A clean install.
     let dir = tempfile::tempdir().unwrap();
     assert!(open(&dir).unwrap().backups().unwrap().is_empty());
@@ -627,8 +620,8 @@ fn r92_a_database_of_the_present_schema_gets_no_backup() {
 }
 
 #[test]
-fn r92_a_database_from_before_the_number_was_kept_is_of_the_first_schema() {
-    // The second schema is the one where the fields of subtasks are removed (R112): the copy keeps them.
+fn schema_a_database_from_before_the_number_was_kept_is_of_the_first_schema() {
+    // A database without the number is of the first schema: the copy is made all the same.
     let (dir, _) = furnished_folder();
     set_schema_version(dir.path(), None);
     assert_eq!(open(&dir).unwrap().backups().unwrap().len(), 1);
@@ -636,7 +629,7 @@ fn r92_a_database_from_before_the_number_was_kept_is_of_the_first_schema() {
 }
 
 #[test]
-fn r92_without_the_backup_the_migration_does_not_start() {
+fn schema_without_the_backup_the_migration_does_not_start() {
     let (dir, titles) = furnished_folder();
     set_schema_version(dir.path(), Some("0"));
     // Something stands where the folder of the backups would be.
@@ -648,11 +641,11 @@ fn r92_without_the_backup_the_migration_does_not_start() {
     std::fs::remove_file(dir.path().join("backups")).unwrap();
     let store = open(&dir).unwrap();
     assert_eq!(store.backups().unwrap().len(), 1);
-    assert_eq!(sorted(view(&store, Scope::All)), titles);
+    assert_eq!(sorted(oldest_first(&store)), titles);
 }
 
 #[test]
-fn r92_the_backup_before_a_migration_takes_a_place_in_the_rotation() {
+fn schema_the_backup_before_a_migration_takes_a_place_in_the_rotation() {
     let (dir, _) = furnished_folder();
     let oldest = {
         let store = open(&dir).unwrap();
@@ -679,21 +672,21 @@ fn r92_the_backup_before_a_migration_takes_a_place_in_the_rotation() {
 }
 
 #[test]
-fn s51_a_backup_restores_the_tags_the_device_shows() {
+fn s5_a_backup_restores_the_tags_the_device_shows() {
     let d = device();
     let t = add(&d, "задача");
     let fits = "a".repeat(196);
     d.add_tag(t.id.clone(), fits.clone()).unwrap();
     let long = "b".repeat(197);
     // A tag written by an earlier version is in the database but no device can carry it.
-    let d = plant(d, &[("task", &t.id, &format!("tag:{long}"), serde_json::json!(true))]);
-    assert_eq!(d.task(t.id.clone()).unwrap().tags, std::slice::from_ref(&fits));
+    let d = plant(d, &[("note", &t.id, &format!("tag:{long}"), serde_json::json!(true))]);
+    assert_eq!(d.get_note(t.id.clone()).unwrap().tags, std::slice::from_ref(&fits));
 
     let backup = d.create_backup().unwrap();
     let fresh = device();
     fresh.restore_backup(backup.path, false).unwrap();
     assert_eq!(
-        fresh.task(t.id).unwrap().tags,
+        fresh.get_note(t.id).unwrap().tags,
         [fits],
         "the copy has the tags the device showed"
     );
@@ -707,7 +700,7 @@ fn mode(path: &std::path::Path) -> u32 {
 
 #[cfg(unix)]
 #[test]
-fn r142_a_backup_is_for_its_owner_alone() {
+fn private_a_backup_is_for_its_owner_alone() {
     let d = furnished();
     let backup = d.create_backup().unwrap();
     assert_eq!(mode(&d.dir().join("backups")), 0o700);
@@ -716,24 +709,19 @@ fn r142_a_backup_is_for_its_owner_alone() {
 
 #[cfg(unix)]
 #[test]
-fn r142_an_attachment_restored_from_a_backup_is_for_its_owner_alone() {
+fn private_an_attachment_restored_from_a_backup_is_for_its_owner_alone() {
     let old = furnished();
     let backup = old.create_backup().unwrap();
     let fresh = device();
     fresh.restore_backup(backup.path, false).unwrap();
-    let report = fresh
-        .tasks(Scope::Search {
-            text: "отчёт".into()
-        })
-        .unwrap()
-        .remove(0);
+    let report = titled(&fresh, "отчёт");
     let file = fresh.attachments(report.id).unwrap().remove(0);
     assert_eq!(mode(std::path::Path::new(&file.local_path.unwrap())), 0o600);
 }
 
 #[cfg(unix)]
 #[test]
-fn r142_backups_of_an_earlier_version_are_closed_on_open() {
+fn private_backups_of_an_earlier_version_are_closed_on_open() {
     use std::os::unix::fs::PermissionsExt;
     let d = furnished();
     let backup = d.create_backup().unwrap();

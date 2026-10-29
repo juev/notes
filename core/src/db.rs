@@ -1,8 +1,8 @@
 //! SQLite schema, the per-field register table and the tables derived from it.
 //!
 //! `fields` is the source of truth: one last-writer-wins register per
-//! (kind, id, field). `lists`, `tasks`, `task_tags` and `attachments` are
-//! rebuilt from it and exist only to make queries simple.
+//! (kind, id, field). `notes`, `folders`, `note_tags`, `attachments` and
+//! `filters` are rebuilt from it and exist only to make queries simple.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -12,13 +12,12 @@ use serde_json::Value;
 
 use crate::error::Result;
 use crate::hlc;
-use crate::model::INBOX_ID;
 
-pub const KIND_LIST: &str = "list";
-pub const KIND_TASK: &str = "task";
+pub const KIND_NOTE: &str = "note";
+pub const KIND_FOLDER: &str = "folder";
 pub const KIND_ATTACHMENT: &str = "attachment";
 pub const KIND_FILTER: &str = "filter";
-/// S48: attachment content that a device removed from the storage; the id is its hash.
+/// S27: attachment content that a device removed from the storage; the id is its hash.
 pub const KIND_BLOB: &str = "blob";
 /// Settings shared by every device: one entity, `SETTINGS_ID`, read straight from `fields`.
 pub const KIND_SETTINGS: &str = "settings";
@@ -27,7 +26,7 @@ pub const SETTINGS_ID: &str = "app";
 /// Bumped whenever a derived table changes shape or what it holds is built by
 /// another rule: the tables are then dropped and rebuilt from `fields`, which
 /// never changes shape.
-const DERIVED_VERSION: &str = "5";
+const DERIVED_VERSION: &str = "1";
 /// The version of the tables that are not rebuilt from the registers: `fields` and the bookkeeping.
 /// A change that rewrites one of them raises it, and a database with a smaller number is backed up
 /// before it is migrated (R92). Adding a column or a table needs no new number.
@@ -35,7 +34,7 @@ pub const SCHEMA_VERSION: u32 = 2;
 
 pub(crate) const MAX_KEY_LEN: usize = 200;
 
-/// What makes a key of a register acceptable to every device and to a restored backup (S51).
+/// What makes a key of a register acceptable to every device and to a restored backup (S5).
 pub(crate) fn key_ok(key: &str) -> bool {
     !key.is_empty() && key.len() <= MAX_KEY_LEN
 }
@@ -64,72 +63,73 @@ impl Change {
 pub type Touched = BTreeSet<(String, String)>;
 
 const DERIVED_SCHEMA: &str = "
-        CREATE TABLE IF NOT EXISTS lists (
+        CREATE TABLE IF NOT EXISTS notes (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL DEFAULT '',
+            -- as stored; `eff_folder` is where the note is shown (S10)
+            folder_id TEXT,
+            -- milliseconds since the epoch
+            created INTEGER NOT NULL DEFAULT 0,
+            -- the greatest stamp among the registers of the note, in milliseconds
+            edited INTEGER NOT NULL DEFAULT 0,
+            pinned INTEGER NOT NULL DEFAULT 0,
+            starred INTEGER NOT NULL DEFAULT 0,
+            archived INTEGER NOT NULL DEFAULT 0,
+            locked INTEGER NOT NULL DEFAULT 0,
+            deleted INTEGER NOT NULL DEFAULT 0,
+            -- when the note went to the Trash, in milliseconds (S6)
+            deleted_at INTEGER NOT NULL DEFAULT 0,
+            purged INTEGER NOT NULL DEFAULT 0,
+            -- derived by rebuild_folders
+            eff_folder TEXT
+        ) WITHOUT ROWID;
+        CREATE INDEX IF NOT EXISTS notes_folder ON notes (eff_folder);
+
+        CREATE TABLE IF NOT EXISTS folders (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL DEFAULT '',
-            color TEXT NOT NULL DEFAULT '',
             icon TEXT NOT NULL DEFAULT '',
-            sort TEXT NOT NULL DEFAULT 'manual',
-            show_done INTEGER NOT NULL DEFAULT 0,
-            default_priority INTEGER NOT NULL DEFAULT 0,
-            default_due INTEGER NOT NULL DEFAULT 0,
-            pos TEXT NOT NULL DEFAULT '',
-            archived INTEGER NOT NULL DEFAULT 0,
-            deleted INTEGER NOT NULL DEFAULT 0
-        ) WITHOUT ROWID;
-
-        CREATE TABLE IF NOT EXISTS tasks (
-            id TEXT PRIMARY KEY,
-            list_id TEXT NOT NULL DEFAULT 'inbox',
             parent_id TEXT,
             parent_stamp TEXT NOT NULL DEFAULT '',
-            title TEXT NOT NULL DEFAULT '',
-            notes TEXT NOT NULL DEFAULT '',
-            start TEXT,
-            due TEXT,
-            priority INTEGER NOT NULL DEFAULT 0,
-            repeat TEXT,
-            remind TEXT,
             pos TEXT NOT NULL DEFAULT '',
-            done TEXT,
-            -- when `done` was written: the first twelve digits are milliseconds (R68)
-            done_stamp TEXT NOT NULL DEFAULT '',
-            -- closed without being done: the `wont` register equals `done` (S33)
-            wont INTEGER NOT NULL DEFAULT 0,
+            daily INTEGER NOT NULL DEFAULT 0,
+            sort TEXT NOT NULL DEFAULT '',
+            show_preview INTEGER NOT NULL DEFAULT 1,
+            show_date INTEGER NOT NULL DEFAULT 1,
             deleted INTEGER NOT NULL DEFAULT 0,
-            purged INTEGER NOT NULL DEFAULT 0,
-            log_of TEXT,
-            project INTEGER NOT NULL DEFAULT 0,
-            -- derived by rebuild_tree
-            eff_parent TEXT,
-            eff_list TEXT NOT NULL DEFAULT 'inbox',
-            eff_deleted INTEGER NOT NULL DEFAULT 0
+            -- derived by rebuild_folders: the parent once cycles are broken (S9), and the one it is shown under (S10)
+            tree_parent TEXT,
+            eff_parent TEXT
         ) WITHOUT ROWID;
-        CREATE INDEX IF NOT EXISTS tasks_parent ON tasks (eff_parent);
-        CREATE INDEX IF NOT EXISTS tasks_list ON tasks (eff_list);
+        CREATE INDEX IF NOT EXISTS folders_parent ON folders (eff_parent);
 
-        CREATE TABLE IF NOT EXISTS task_tags (
-            task_id TEXT NOT NULL,
+        CREATE TABLE IF NOT EXISTS note_tags (
+            note_id TEXT NOT NULL,
+            -- the name in lower case: tags are one tag whatever the case (R21)
+            key TEXT NOT NULL,
             tag TEXT NOT NULL,
-            PRIMARY KEY (task_id, tag)
+            -- when the register was written: the earliest spelling is the one shown
+            stamp TEXT NOT NULL,
+            PRIMARY KEY (note_id, key)
         ) WITHOUT ROWID;
-        CREATE INDEX IF NOT EXISTS task_tags_tag ON task_tags (tag);
+        CREATE INDEX IF NOT EXISTS note_tags_key ON note_tags (key);
 
         CREATE TABLE IF NOT EXISTS attachments (
             id TEXT PRIMARY KEY,
-            task_id TEXT NOT NULL DEFAULT '',
+            note_id TEXT NOT NULL DEFAULT '',
             name TEXT NOT NULL DEFAULT '',
             mime TEXT NOT NULL DEFAULT '',
             size INTEGER NOT NULL DEFAULT 0,
             sha256 TEXT NOT NULL DEFAULT '',
             deleted INTEGER NOT NULL DEFAULT 0
         ) WITHOUT ROWID;
-        CREATE INDEX IF NOT EXISTS attachments_task ON attachments (task_id);
+        CREATE INDEX IF NOT EXISTS attachments_note ON attachments (note_id);
 
         CREATE TABLE IF NOT EXISTS filters (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL DEFAULT '',
-            spec TEXT NOT NULL DEFAULT '{}',
+            icon TEXT NOT NULL DEFAULT '',
+            query TEXT NOT NULL DEFAULT '{}',
             pos TEXT NOT NULL DEFAULT '',
             deleted INTEGER NOT NULL DEFAULT 0
         ) WITHOUT ROWID;
@@ -161,7 +161,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS outbox (seq INTEGER PRIMARY KEY, body BLOB NOT NULL, changes INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS blobs_uploaded (sha256 TEXT PRIMARY KEY) WITHOUT ROWID;
 
-        -- S38: what this device held when it was told to put its data over the storage's
+        -- S37: what this device held when it was told to put its data over the storage's
         CREATE TABLE IF NOT EXISTS kept (
             kind  TEXT NOT NULL,
             id    TEXT NOT NULL,
@@ -172,10 +172,12 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         ",
     )?;
     if meta_get(conn, "derived_version")?.as_deref() != Some(DERIVED_VERSION) {
-        conn.execute_batch("DROP TABLE IF EXISTS lists; DROP TABLE IF EXISTS tasks; DROP TABLE IF EXISTS task_tags; DROP TABLE IF EXISTS attachments; DROP TABLE IF EXISTS filters;")?;
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS notes; DROP TABLE IF EXISTS folders; DROP TABLE IF EXISTS note_tags;
+             DROP TABLE IF EXISTS attachments; DROP TABLE IF EXISTS filters;",
+        )?;
     }
     conn.execute_batch(DERIVED_SCHEMA)?;
-    conn.execute("INSERT OR IGNORE INTO lists (id) VALUES ('inbox')", [])?;
     if meta_get(conn, "derived_version")?.as_deref() != Some(DERIVED_VERSION) {
         let mut all = Touched::new();
         {
@@ -258,18 +260,18 @@ pub fn apply(conn: &Connection, change: &Change, local: bool, touched: &mut Touc
     Ok(true)
 }
 
-/// Rebuilds derived rows for everything in `touched`, then the task tree.
+/// Rebuilds derived rows for everything in `touched`, then the folder tree.
 pub fn settle(conn: &Connection, touched: &Touched) -> Result<()> {
     if touched.is_empty() {
         return Ok(());
     }
     for (kind, id) in touched {
         match kind.as_str() {
-            KIND_LIST => materialize_list(conn, id)?,
-            KIND_TASK => materialize_task(conn, id)?,
+            KIND_NOTE => materialize_note(conn, id)?,
+            KIND_FOLDER => materialize_folder(conn, id)?,
             KIND_ATTACHMENT => materialize_attachment(conn, id)?,
             KIND_FILTER => materialize_filter(conn, id)?,
-            // S48: the storage may no longer hold it, so this device checks again before it counts on it.
+            // S27: the storage may no longer hold it, so this device checks again before it counts on it.
             KIND_BLOB => {
                 conn.execute("DELETE FROM blobs_uploaded WHERE sha256 = ?1", [id])?;
             }
@@ -277,7 +279,10 @@ pub fn settle(conn: &Connection, touched: &Touched) -> Result<()> {
             _ => {}
         }
     }
-    rebuild_tree(conn)
+    if touched.iter().any(|(kind, _)| kind == KIND_NOTE || kind == KIND_FOLDER) {
+        rebuild_folders(conn)?;
+    }
+    Ok(())
 }
 
 struct Registers(HashMap<String, (Value, String)>);
@@ -303,13 +308,31 @@ impl Registers {
             .map(str::to_string)
     }
     fn flag(&self, field: &str) -> bool {
-        self.0.get(field).and_then(|(v, _)| v.as_bool()).unwrap_or(false)
+        self.flag_or(field, false)
+    }
+    /// A switch that is on until a register says otherwise.
+    fn flag_or(&self, field: &str, default: bool) -> bool {
+        self.0.get(field).and_then(|(v, _)| v.as_bool()).unwrap_or(default)
     }
     fn int(&self, field: &str) -> i64 {
         self.0.get(field).and_then(|(v, _)| v.as_i64()).unwrap_or(0)
     }
     fn stamp(&self, field: &str) -> String {
         self.0.get(field).map(|(_, s)| s.clone()).unwrap_or_default()
+    }
+    /// The moment a field with a time as its value was written (`deleted`, S6): the value when it is a number
+    /// of milliseconds, the time of the stamp for a mark of another kind; none when the field is empty.
+    fn moment(&self, field: &str) -> Option<i64> {
+        let (value, stamp) = self.0.get(field)?;
+        match value {
+            Value::Null | Value::Bool(false) => None,
+            Value::String(s) if s.is_empty() => None,
+            Value::Number(n) => n
+                .as_i64()
+                .filter(|ms| *ms > 0)
+                .or_else(|| Some(hlc::stamp_ms(stamp) as i64)),
+            _ => Some(hlc::stamp_ms(stamp) as i64),
+        }
     }
     /// A structured value kept as JSON text; `null` and absent are the same.
     fn json(&self, field: &str) -> Option<String> {
@@ -321,77 +344,87 @@ impl Registers {
     }
 }
 
-fn materialize_list(conn: &Connection, id: &str) -> Result<()> {
-    let r = Registers::load(conn, KIND_LIST, id)?;
-    let inbox = id == INBOX_ID;
+fn materialize_note(conn: &Connection, id: &str) -> Result<()> {
+    let r = Registers::load(conn, KIND_NOTE, id)?;
+    let stamps = || r.0.values().map(|(_, stamp)| hlc::stamp_ms(stamp));
+    let edited = stamps().max().unwrap_or(0) as i64;
+    // A note whose creation was never recorded counts from its first register.
+    let created = Some(r.int("created"))
+        .filter(|ms| *ms > 0)
+        .unwrap_or_else(|| stamps().min().unwrap_or(0) as i64);
+    let deleted_at = r.moment("deleted");
+    // The folder a note is shown in is corrected by rebuild_folders afterwards.
     conn.execute(
-        "INSERT OR REPLACE INTO lists
-         (id, name, color, icon, sort, show_done, default_priority, default_due, pos, archived, deleted)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        "INSERT INTO notes
+         (id, title, folder_id, created, edited, pinned, starred, archived, locked, deleted, deleted_at, purged)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+         ON CONFLICT (id) DO UPDATE SET
+            title = excluded.title, folder_id = excluded.folder_id, created = excluded.created,
+            edited = excluded.edited, pinned = excluded.pinned, starred = excluded.starred,
+            archived = excluded.archived, locked = excluded.locked, deleted = excluded.deleted,
+            deleted_at = excluded.deleted_at, purged = excluded.purged",
         params![
             id,
-            r.text("name").unwrap_or_default(),
-            r.text("color").unwrap_or_default(),
-            r.text("icon").unwrap_or_default(),
-            r.text("sort").unwrap_or_else(|| "manual".into()),
-            r.flag("show_done"),
-            r.int("default_priority"),
-            r.flag("default_due"),
-            r.text("pos").unwrap_or_default(),
-            !inbox && r.flag("archived"),
-            !inbox && r.flag("deleted"),
+            r.text("title").unwrap_or_default(),
+            r.text("folder"),
+            created,
+            edited,
+            r.flag("pinned"),
+            r.flag("starred"),
+            r.flag("archived"),
+            r.flag("locked"),
+            deleted_at.is_some(),
+            deleted_at.unwrap_or(0),
+            r.flag("purged"),
         ],
     )?;
+    conn.execute("DELETE FROM note_tags WHERE note_id = ?1", [id])?;
+    // Two registers that differ in case are one tag; the one written first gives the spelling (R21).
+    let mut tags: Vec<(&String, &str)> =
+        r.0.iter()
+            .filter_map(|(field, (value, stamp))| {
+                let tag = field.strip_prefix(crate::tag::PREFIX)?;
+                // A tag no register can carry stays out of the view (S5), even if an earlier version wrote it.
+                (value.as_bool() == Some(true) && crate::tag::name_ok(tag)).then_some((field, stamp.as_str()))
+            })
+            .collect();
+    tags.sort_by(|a, b| (a.1, a.0).cmp(&(b.1, b.0)));
+    for (field, stamp) in tags {
+        let tag = &field[crate::tag::PREFIX.len()..];
+        conn.execute(
+            "INSERT OR IGNORE INTO note_tags (note_id, key, tag, stamp) VALUES (?1, ?2, ?3, ?4)",
+            params![id, crate::tag::key(tag), tag, stamp],
+        )?;
+    }
     Ok(())
 }
 
-fn materialize_task(conn: &Connection, id: &str) -> Result<()> {
-    let r = Registers::load(conn, KIND_TASK, id)?;
-    // Derived columns survive the rewrite; rebuild_tree corrects them afterwards.
+fn materialize_folder(conn: &Connection, id: &str) -> Result<()> {
+    let r = Registers::load(conn, KIND_FOLDER, id)?;
+    // Derived columns survive the rewrite; rebuild_folders corrects them afterwards.
     conn.execute(
-        "INSERT INTO tasks
-         (id, list_id, parent_id, parent_stamp, title, notes, start, due, priority, repeat, remind, pos, done, deleted, purged, log_of, project, done_stamp, wont)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+        "INSERT INTO folders
+         (id, name, icon, parent_id, parent_stamp, pos, daily, sort, show_preview, show_date, deleted)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
          ON CONFLICT (id) DO UPDATE SET
-            list_id = excluded.list_id, parent_id = excluded.parent_id, parent_stamp = excluded.parent_stamp,
-            title = excluded.title, notes = excluded.notes, start = excluded.start, due = excluded.due,
-            priority = excluded.priority, repeat = excluded.repeat, remind = excluded.remind, pos = excluded.pos,
-            done = excluded.done, deleted = excluded.deleted, purged = excluded.purged, log_of = excluded.log_of,
-            project = excluded.project, done_stamp = excluded.done_stamp, wont = excluded.wont",
+            name = excluded.name, icon = excluded.icon, parent_id = excluded.parent_id,
+            parent_stamp = excluded.parent_stamp, pos = excluded.pos, daily = excluded.daily,
+            sort = excluded.sort, show_preview = excluded.show_preview, show_date = excluded.show_date,
+            deleted = excluded.deleted",
         params![
             id,
-            r.text("list").unwrap_or_else(|| INBOX_ID.into()),
+            r.text("name").unwrap_or_default(),
+            r.text("icon").unwrap_or_default(),
             r.text("parent"),
             r.stamp("parent"),
-            r.text("title").unwrap_or_default(),
-            r.text("notes").unwrap_or_default(),
-            r.text("start"),
-            r.text("due"),
-            r.int("priority").clamp(0, 3),
-            r.json("repeat"),
-            r.text("remind"),
             r.text("pos").unwrap_or_default(),
-            r.text("done"),
-            r.flag("deleted"),
-            r.flag("purged"),
-            r.text("log_of"),
-            r.flag("project"),
-            r.stamp("done"),
-            r.text("done").is_some() && r.text("wont") == r.text("done"),
+            r.flag("daily"),
+            r.text("sort").unwrap_or_default(),
+            r.flag_or("show_preview", true),
+            r.flag_or("show_date", true),
+            r.moment("deleted").is_some(),
         ],
     )?;
-    conn.execute("DELETE FROM task_tags WHERE task_id = ?1", [id])?;
-    for (field, (value, _)) in &r.0 {
-        if let Some(tag) = field.strip_prefix(crate::tag::PREFIX) {
-            // A tag no register can carry stays out of the view (S51), even if an earlier version wrote it.
-            if value.as_bool() == Some(true) && crate::tag::name_ok(tag) {
-                conn.execute(
-                    "INSERT OR IGNORE INTO task_tags (task_id, tag) VALUES (?1, ?2)",
-                    params![id, tag],
-                )?;
-            }
-        }
-    }
     Ok(())
 }
 
@@ -404,11 +437,11 @@ pub fn is_sha256(s: &str) -> bool {
 fn materialize_attachment(conn: &Connection, id: &str) -> Result<()> {
     let r = Registers::load(conn, KIND_ATTACHMENT, id)?;
     conn.execute(
-        "INSERT OR REPLACE INTO attachments (id, task_id, name, mime, size, sha256, deleted)
+        "INSERT OR REPLACE INTO attachments (id, note_id, name, mime, size, sha256, deleted)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             id,
-            r.text("task").unwrap_or_default(),
+            r.text("note").unwrap_or_default(),
             r.text("name").unwrap_or_default(),
             r.text("mime").unwrap_or_default(),
             r.int("size").max(0),
@@ -422,11 +455,12 @@ fn materialize_attachment(conn: &Connection, id: &str) -> Result<()> {
 fn materialize_filter(conn: &Connection, id: &str) -> Result<()> {
     let r = Registers::load(conn, KIND_FILTER, id)?;
     conn.execute(
-        "INSERT OR REPLACE INTO filters (id, name, spec, pos, deleted) VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT OR REPLACE INTO filters (id, name, icon, query, pos, deleted) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
             id,
             r.text("name").unwrap_or_default(),
-            r.json("spec").unwrap_or_else(|| "{}".into()),
+            r.text("icon").unwrap_or_default(),
+            r.json("query").unwrap_or_else(|| "{}".into()),
             r.text("pos").unwrap_or_default(),
             r.flag("deleted"),
         ],
@@ -437,29 +471,24 @@ fn materialize_filter(conn: &Connection, id: &str) -> Result<()> {
 struct Node {
     parent: Option<String>,
     parent_stamp: String,
-    list: String,
     gone: bool,
+    tree_parent: Option<String>,
     eff_parent: Option<String>,
-    eff_list: String,
-    eff_deleted: bool,
 }
 
-/// Derives the effective tree from the stored `parent` registers.
+/// Derives the tree of folders from the stored `parent` registers (S9), and the folder each note is
+/// shown in (S10).
 ///
 /// Concurrent moves can leave a cycle in the stored parents. Every device
-/// breaks it the same way: inside a cycle, the task whose `parent` register
-/// has the greatest stamp is treated as having no parent.
-pub fn rebuild_tree(conn: &Connection) -> Result<()> {
-    let live_lists: HashSet<String> = conn
-        .prepare("SELECT id FROM lists WHERE deleted = 0")?
-        .query_map([], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-
+/// breaks it the same way: inside a cycle, the folder whose `parent` register
+/// has the greatest stamp is treated as having no parent. A folder whose
+/// parent is deleted is shown at the root, and so is a note whose folder is
+/// deleted or not known here.
+pub fn rebuild_folders(conn: &Connection) -> Result<()> {
     let mut nodes: HashMap<String, Node> = HashMap::new();
     {
-        let mut stmt = conn.prepare(
-            "SELECT id, parent_id, parent_stamp, list_id, deleted OR purged, eff_parent, eff_list, eff_deleted FROM tasks",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT id, parent_id, parent_stamp, deleted, tree_parent, eff_parent FROM folders")?;
         let mut rows = stmt.query([])?;
         while let Some(r) = rows.next()? {
             nodes.insert(
@@ -467,17 +496,15 @@ pub fn rebuild_tree(conn: &Connection) -> Result<()> {
                 Node {
                     parent: r.get(1)?,
                     parent_stamp: r.get(2)?,
-                    list: r.get(3)?,
-                    gone: r.get(4)?,
+                    gone: r.get(3)?,
+                    tree_parent: r.get(4)?,
                     eff_parent: r.get(5)?,
-                    eff_list: r.get(6)?,
-                    eff_deleted: r.get(7)?,
                 },
             );
         }
     }
 
-    // A parent that is unknown here (not synced yet) or is the task itself counts as none.
+    // A parent that is unknown here (not synced yet) or is the folder itself counts as none.
     let mut parent: HashMap<String, String> = nodes
         .iter()
         .filter_map(|(id, n)| {
@@ -518,47 +545,21 @@ pub fn rebuild_tree(conn: &Connection) -> Result<()> {
         settled.extend(path);
     }
 
-    // Root, list and visibility flow down from the topmost ancestor.
-    let mut resolved: HashMap<String, (String, bool)> = HashMap::new();
-    for id in &ids {
-        let mut chain: Vec<&String> = Vec::new();
-        let mut cur: &String = id;
-        let (mut list, mut deleted) = loop {
-            if let Some(known) = resolved.get(cur) {
-                break known.clone();
-            }
-            chain.push(cur);
-            match parent.get(cur) {
-                Some(p) => cur = p,
-                None => {
-                    let root = &nodes[cur];
-                    let list = if live_lists.contains(&root.list) {
-                        root.list.clone()
-                    } else {
-                        INBOX_ID.to_string()
-                    };
-                    chain.pop();
-                    resolved.insert(cur.clone(), (list.clone(), root.gone));
-                    break (list, root.gone);
-                }
-            }
-        };
-        for node in chain.into_iter().rev() {
-            deleted = deleted || nodes[node].gone;
-            resolved.insert(node.clone(), (list.clone(), deleted));
-        }
-        list.clear();
-    }
-
-    let mut update =
-        conn.prepare_cached("UPDATE tasks SET eff_parent = ?2, eff_list = ?3, eff_deleted = ?4 WHERE id = ?1")?;
+    let mut update = conn.prepare_cached("UPDATE folders SET tree_parent = ?2, eff_parent = ?3 WHERE id = ?1")?;
     for id in ids {
         let node = &nodes[id];
-        let eff_parent = parent.get(id);
-        let (eff_list, eff_deleted) = &resolved[id];
-        if node.eff_parent.as_ref() != eff_parent || &node.eff_list != eff_list || node.eff_deleted != *eff_deleted {
-            update.execute(params![id, eff_parent, eff_list, eff_deleted])?;
+        let tree_parent = parent.get(id);
+        let eff_parent = tree_parent.filter(|p| !nodes[*p].gone);
+        if node.tree_parent.as_ref() != tree_parent || node.eff_parent.as_ref() != eff_parent {
+            update.execute(params![id, tree_parent, eff_parent])?;
         }
     }
+    conn.execute(
+        "UPDATE notes SET eff_folder = CASE WHEN folder_id IN (SELECT id FROM folders WHERE deleted = 0)
+                                           THEN folder_id END
+         WHERE eff_folder IS NOT CASE WHEN folder_id IN (SELECT id FROM folders WHERE deleted = 0)
+                                      THEN folder_id END",
+        [],
+    )?;
     Ok(())
 }

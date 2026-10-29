@@ -1,78 +1,59 @@
-//! R131: one history of undo for every action that changes a task: docs/specs/product.md.
+//! R75: one history of undo for every action that changes a note or a folder: docs/specs/product.md.
 
 mod common;
 
 use common::*;
 use notes_core::*;
 
-fn weekly() -> Repeat {
-    Repeat {
-        freq: Freq::Weekly,
-        interval: 1,
-        weekdays: vec![],
-        monthday: None,
-        nth: None,
-        nth_weekday: None,
-        from_done: false,
-        count: None,
-        until: None,
-    }
-}
-
 #[test]
-fn r131_the_last_action_is_taken_back_first_and_an_empty_history_changes_nothing() {
+fn r75_the_last_action_is_taken_back_first_and_an_empty_history_changes_nothing() {
     let d = device();
-    let home = d.create_list("Дом".into()).unwrap();
-    let work = d.create_list("Работа".into()).unwrap();
-    for title in ["раз", "два"] {
-        let t = add(&d, title);
-        d.move_to_list(t.id, home.id.clone()).unwrap();
-    }
-    let a = add(&d, "а");
-    d.move_to_list(a.id.clone(), home.id.clone()).unwrap();
-    d.set_due(a.id.clone(), Some("2026-10-06".into())).unwrap();
+    let home = new_folder(&d, "Дом", None);
+    let work = new_folder(&d, "Работа", None);
+    let a = add_in(&d, "а", &home);
+    let in_folder = |f: &Folder| view(&d, Scope::Folder { id: f.id.clone() });
+    d.set_starred(a.id.clone(), true).unwrap();
     assert!(d.can_undo());
-    let list = |id: &str| view(&d, Scope::List { id: id.into() });
-    assert_eq!(list(&home.id), ["раз", "два", "а"]);
 
-    d.set_due(a.id.clone(), Some("2026-10-05".into())).unwrap();
-    d.move_task(a.id.clone(), Some(work.id.clone()), None, None).unwrap();
-    assert_eq!(list(&work.id), ["а"]);
+    d.set_title(a.id.clone(), "б".into()).unwrap();
+    d.move_note(a.id.clone(), Some(work.id.clone())).unwrap();
+    assert_eq!(in_folder(&work), ["б"]);
 
     assert_eq!(d.undo().unwrap(), 1);
-    assert_eq!(list(&home.id), ["раз", "два", "а"], "back in its list, in its place");
-    assert_eq!(d.task(a.id.clone()).unwrap().due.as_deref(), Some("2026-10-05"));
+    assert_eq!(in_folder(&home), ["б"], "back in its folder");
+    assert!(d.get_note(a.id.clone()).unwrap().starred);
     d.undo().unwrap();
-    assert_eq!(d.task(a.id.clone()).unwrap().due.as_deref(), Some("2026-10-06"));
+    assert_eq!(d.get_note(a.id.clone()).unwrap().title, "а");
+    d.undo().unwrap();
+    assert!(!d.get_note(a.id.clone()).unwrap().starred);
 
-    // Down to the creation of the tasks, which go to the trash.
+    // Down to the creation of the note, which goes to the Trash.
     while d.can_undo() {
         d.undo().unwrap();
     }
     assert_eq!(d.undo().unwrap(), 0);
-    assert!(list(&home.id).is_empty());
-    assert_eq!(view(&d, Scope::Trash).len(), 3);
+    assert!(in_folder(&home).is_empty());
+    assert_eq!(view(&d, Scope::Trash), ["а"]);
 }
 
-/// One action on the task.
+/// One action on the note.
 type Edit<'a> = Box<dyn Fn(&Store) + 'a>;
 
 #[test]
-fn r131_every_field_of_a_task_is_taken_back() {
+fn r75_every_field_of_a_note_is_taken_back() {
     let d = device();
-    let t = add(&d, "а");
-    let before = d.task(t.id.clone()).unwrap();
+    let folder = new_folder(&d, "Папка", None);
+    let n = add(&d, "а");
+    let before = d.get_note(n.id.clone()).unwrap();
     let edits: Vec<Edit> = vec![
-        Box::new(|s| s.set_title(t.id.clone(), "б".into()).unwrap()),
-        Box::new(|s| s.set_notes(t.id.clone(), "заметка".into()).unwrap()),
-        Box::new(|s| s.set_start(t.id.clone(), Some("2026-10-04".into())).unwrap()),
-        Box::new(|s| s.set_due(t.id.clone(), Some("2026-10-07T18:00".into())).unwrap()),
-        Box::new(|s| s.set_remind(t.id.clone(), Some("2026-10-07T17:00".into())).unwrap()),
-        Box::new(|s| s.set_repeat(t.id.clone(), Some(weekly())).unwrap()),
-        Box::new(|s| s.set_priority(t.id.clone(), Priority::High).unwrap()),
-        Box::new(|s| s.add_tag(t.id.clone(), "дом".into()).unwrap()),
-        Box::new(|s| s.set_project(t.id.clone(), true).unwrap()),
-        Box::new(|s| s.delete_task(t.id.clone()).unwrap()),
+        Box::new(|s| s.set_title(n.id.clone(), "б".into()).unwrap()),
+        Box::new(|s| s.add_tag(n.id.clone(), "дом".into()).unwrap()),
+        Box::new(|s| s.set_pinned(n.id.clone(), true).unwrap()),
+        Box::new(|s| s.set_starred(n.id.clone(), true).unwrap()),
+        Box::new(|s| s.set_archived(n.id.clone(), true).unwrap()),
+        Box::new(|s| s.set_locked(n.id.clone(), true).unwrap()),
+        Box::new(|s| s.move_note(n.id.clone(), Some(folder.id.clone())).unwrap()),
+        Box::new(|s| s.delete_note(n.id.clone()).unwrap()),
     ];
     for edit in &edits {
         edit(&d);
@@ -80,182 +61,98 @@ fn r131_every_field_of_a_task_is_taken_back() {
     for _ in &edits {
         assert_eq!(d.undo().unwrap(), 1);
     }
-    let back = d.task(t.id.clone()).unwrap();
+    let back = d.get_note(n.id.clone()).unwrap();
     assert_eq!(
-        (back.title, back.notes, back.start, back.due, back.remind, back.repeat),
-        (
-            before.title,
-            before.notes,
-            before.start,
-            before.due,
-            before.remind,
-            before.repeat
-        )
+        (back.title, back.folder_id, back.tags, back.pinned, back.starred),
+        (before.title, before.folder_id, before.tags, false, false)
     );
-    assert_eq!(back.priority, Priority::None);
-    assert!(back.tags.is_empty());
-    assert!(!back.is_project && !back.deleted);
+    assert!(!(back.archived || back.locked || back.deleted));
 
-    d.add_tag(t.id.clone(), "дом".into()).unwrap();
-    d.remove_tag(t.id.clone(), "дом".into()).unwrap();
+    d.add_tag(n.id.clone(), "дом".into()).unwrap();
+    d.remove_tag(n.id.clone(), "дом".into()).unwrap();
     d.undo().unwrap();
-    assert_eq!(d.task(t.id.clone()).unwrap().tags, ["дом"]);
+    assert_eq!(d.get_note(n.id.clone()).unwrap().tags, ["дом"]);
     drop(edits);
-    d.delete_task(t.id.clone()).unwrap();
-    d.restore_task(t.id.clone()).unwrap();
+    d.delete_note(n.id.clone()).unwrap();
+    d.restore_note(n.id.clone()).unwrap();
     d.undo().unwrap();
-    assert!(d.task(t.id).unwrap().deleted, "restoring is taken back as well");
+    assert!(d.get_note(n.id).unwrap().deleted, "restoring is taken back as well");
 }
 
 #[test]
-fn r131_completion_and_reopening_are_taken_back_whatever_r68_says() {
+fn r75_a_new_note_a_copy_and_an_attachment_are_taken_back() {
     let d = device();
-    d.set_keep_done(KeepDone::Seconds { seconds: 5 }).unwrap();
-    let t = add(&d, "а");
-    let early = add_sub(&d, &t, "раньше");
-    let late = add_sub(&d, &t, "вместе");
-    d.complete_task(early.id.clone()).unwrap();
-    d.complete_task(t.id.clone()).unwrap();
-    d.undo().unwrap();
-    assert!(d.task(t.id.clone()).unwrap().done.is_none());
-    assert!(d.task(late.id.clone()).unwrap().done.is_none());
-    assert!(
-        d.task(early.id.clone()).unwrap().done.is_some(),
-        "R11: closed before stays closed"
-    );
-
-    d.wont_do_task(t.id.clone()).unwrap();
-    d.reopen_task(t.id.clone()).unwrap();
-    d.undo().unwrap();
-    let closed = d.task(t.id.clone()).unwrap();
-    assert!(closed.done.is_some() && closed.wont, "reopening is taken back");
-    d.undo().unwrap();
-    assert!(d.task(t.id).unwrap().done.is_none());
-}
-
-#[test]
-fn r131_r128_the_completion_of_a_repeat_is_taken_back() {
-    let d = device();
-    let t = add(&d, "каждую неделю");
-    d.set_due(t.id.clone(), Some("2026-10-05T19:00".into())).unwrap();
-    d.set_repeat(t.id.clone(), Some(weekly())).unwrap();
-    d.complete_task(t.id.clone()).unwrap();
-    assert_eq!(view(&d, Scope::Completed), ["каждую неделю"]);
-
-    assert_eq!(d.undo().unwrap(), 1);
-    assert_eq!(d.task(t.id.clone()).unwrap().due.as_deref(), Some("2026-10-05T19:00"));
-    assert!(view(&d, Scope::Completed).is_empty(), "the record has gone");
-    assert!(view(&d, Scope::Trash).is_empty(), "and not to the trash");
-
-    // The same occurrence completed again comes back as the same record, and goes the same way.
-    d.complete_task(t.id.clone()).unwrap();
-    assert_eq!(view(&d, Scope::Completed), ["каждую неделю"]);
-    d.undo().unwrap();
-    assert!(view(&d, Scope::Completed).is_empty());
-    assert_eq!(d.task(t.id).unwrap().due.as_deref(), Some("2026-10-05T19:00"));
-}
-
-#[test]
-fn r131_r133_reopening_a_record_from_completed_is_taken_back() {
-    let d = device();
-    let t = add(&d, "каждую неделю");
-    d.set_due(t.id.clone(), Some("2026-10-05T19:00".into())).unwrap();
-    d.set_repeat(t.id.clone(), Some(weekly())).unwrap();
-    d.complete_task(t.id.clone()).unwrap();
-    let record = d.tasks(Scope::Completed).unwrap().remove(0);
-    d.reopen_task(record.id).unwrap();
-    assert!(view(&d, Scope::Completed).is_empty());
-
-    assert_eq!(d.undo().unwrap(), 1);
-    assert_eq!(view(&d, Scope::Completed), ["каждую неделю"], "completed again");
-    assert_eq!(d.task(t.id).unwrap().due.as_deref(), Some("2026-10-12T19:00"));
-    assert!(d.tasks(Scope::Completed).unwrap()[0].undoable);
-}
-
-#[test]
-fn r131_a_new_task_a_copy_a_project_and_an_attachment_are_taken_back() {
-    let d = device();
-    let t = d.quick_add("а завтра".into(), None, false, None).unwrap();
-    let project = d.create_project("п".into(), None).unwrap();
-    let copy = d.duplicate_task(t.id.clone()).unwrap();
-    let subs = d.add_subtasks(t.id.clone(), vec!["б".into(), "в".into()]).unwrap();
+    let n = add(&d, "а");
+    let copy = d.duplicate_note(n.id.clone()).unwrap();
     let file = d.dir().join("note.txt");
     std::fs::write(&file, "x").unwrap();
-    d.add_attachment(t.id.clone(), file.to_string_lossy().into_owned(), None)
+    d.add_attachment(n.id.clone(), file.to_string_lossy().into_owned(), None)
         .unwrap();
 
     d.undo().unwrap();
-    assert!(d.attachments(t.id.clone()).unwrap().is_empty());
+    assert!(d.attachments(n.id.clone()).unwrap().is_empty());
     d.undo().unwrap();
-    assert!(
-        subs.iter().all(|s| d.task(s.id.clone()).unwrap().deleted),
-        "both subtasks in one step"
-    );
+    assert!(d.get_note(copy.id).unwrap().deleted);
     d.undo().unwrap();
-    assert!(d.task(copy.id).unwrap().deleted);
-    d.undo().unwrap();
-    assert!(d.task(project.id).unwrap().deleted);
-    d.undo().unwrap();
-    let gone = d.task(t.id).unwrap();
-    assert!(gone.deleted, "a created task goes to the trash");
+    let gone = d.get_note(n.id).unwrap();
+    assert!(gone.deleted, "a created note goes to the Trash");
     assert_eq!(gone.title, "а", "with its title");
 }
 
 #[test]
-fn r131_edits_of_the_same_text_in_a_row_are_one_step() {
+fn r75_edits_of_the_same_text_in_a_row_are_one_step() {
     let d = device();
-    let t = add(&d, "а");
-    d.set_title(t.id.clone(), "аб".into()).unwrap();
-    d.set_title(t.id.clone(), "абв".into()).unwrap();
-    d.set_notes(t.id.clone(), "x".into()).unwrap();
-    d.set_notes(t.id.clone(), "xy".into()).unwrap();
+    let n = add(&d, "а");
+    d.set_title(n.id.clone(), "аб".into()).unwrap();
+    d.set_title(n.id.clone(), "абв".into()).unwrap();
     d.undo().unwrap();
-    assert_eq!(d.task(t.id.clone()).unwrap().notes, "");
-    d.undo().unwrap();
-    assert_eq!(d.task(t.id.clone()).unwrap().title, "а");
-    assert!(!d.task(t.id).unwrap().deleted, "the creation is still there");
+    assert_eq!(d.get_note(n.id.clone()).unwrap().title, "а");
+    assert!(!d.get_note(n.id).unwrap().deleted, "the creation is still there");
 }
 
 #[test]
-fn r131_an_action_on_several_tasks_is_one_step_and_leaves_a_task_changed_since() {
+fn r75_an_action_on_several_notes_is_one_step_and_leaves_a_note_changed_since() {
     let d = device();
-    let tasks: Vec<TaskItem> = ["а", "б", "в"].iter().map(|t| add(&d, t)).collect();
+    let notes: Vec<Note> = ["а", "б", "в"].iter().map(|t| add(&d, t)).collect();
     d.begin_group();
-    for t in &tasks {
-        d.set_due(t.id.clone(), Some("2026-10-12".into())).unwrap();
+    for n in &notes {
+        d.set_pinned(n.id.clone(), true).unwrap();
     }
     d.end_group();
     d.end_group(); // a second end changes nothing
-    d.set_priority(tasks[1].id.clone(), Priority::High).unwrap();
-    d.set_due(tasks[1].id.clone(), Some("2026-11-01".into())).unwrap();
+    d.set_starred(notes[1].id.clone(), true).unwrap();
+    d.set_pinned(notes[1].id.clone(), false).unwrap();
     // Taken back in turn, the edits of "б" leave the action on all three current again.
     d.undo().unwrap();
     d.undo().unwrap();
     assert_eq!(d.undo().unwrap(), 3);
-    assert!(tasks.iter().all(|t| d.task(t.id.clone()).unwrap().due.is_none()));
+    assert!(notes.iter().all(|n| !d.get_note(n.id.clone()).unwrap().pinned));
 
     d.begin_group();
-    for t in &tasks {
-        d.set_due(t.id.clone(), Some("2026-10-12".into())).unwrap();
+    for n in &notes {
+        d.set_title(n.id.clone(), format!("{} новое", n.title)).unwrap();
     }
     d.end_group();
-    // Changed by something that is not in the history: CalDAV, an older version.
-    d.set_task_field_for_tests(&tasks[1].id, "due", serde_json::json!("2026-11-01"));
+    // Changed by something that is not in the history: an older version of the app.
+    d.set_note_field_for_tests(&notes[1].id, "title", serde_json::json!("чужое"));
     assert_eq!(d.undo().unwrap(), 2);
-    let due = |i: usize| d.task(tasks[i].id.clone()).unwrap().due;
-    assert_eq!((due(0), due(1), due(2)), (None, Some("2026-11-01".into()), None));
+    let title = |i: usize| d.get_note(notes[i].id.clone()).unwrap().title;
+    assert_eq!(
+        (title(0), title(1), title(2)),
+        ("а".to_string(), "чужое".to_string(), "в".to_string())
+    );
 }
 
 #[test]
-fn r131_the_history_is_in_memory_and_its_own_for_each_actor() {
+fn r75_the_history_is_in_memory_and_its_own_for_each_actor() {
     let d = device();
-    let t = add(&d, "а");
-    d.as_actor("A", || d.set_due(t.id.clone(), Some("2026-10-06".into())).unwrap());
+    let n = add(&d, "а");
+    d.as_actor("A", || d.set_starred(n.id.clone(), true).unwrap());
     assert!(!d.as_actor("B", || d.can_undo()));
     assert_eq!(d.as_actor("B", || d.undo().unwrap()), 0);
-    assert_eq!(d.task(t.id.clone()).unwrap().due.as_deref(), Some("2026-10-06"));
+    assert!(d.get_note(n.id.clone()).unwrap().starred);
     assert_eq!(d.as_actor("A", || d.undo().unwrap()), 1);
-    assert!(d.task(t.id.clone()).unwrap().due.is_none());
+    assert!(!d.get_note(n.id.clone()).unwrap().starred);
     assert!(d.can_undo(), "the creation is in the history of the app");
 
     let again = Store::open(d.dir().to_string_lossy().into_owned()).unwrap();
@@ -264,31 +161,37 @@ fn r131_the_history_is_in_memory_and_its_own_for_each_actor() {
 }
 
 #[test]
-fn r131_undo_itself_is_not_taken_back_and_settings_are_not_in_the_history() {
+fn r75_undo_itself_is_not_taken_back_and_settings_are_not_in_the_history() {
     let d = device();
-    let t = add(&d, "а");
-    d.set_due(t.id.clone(), Some("2026-10-06".into())).unwrap();
+    let n = add(&d, "а");
+    d.set_starred(n.id.clone(), true).unwrap();
     d.undo().unwrap();
-    d.set_keep_done(KeepDone::Seconds { seconds: 0 }).unwrap();
-    d.create_list("Дом".into()).unwrap();
+    d.set_settings(AppSettings {
+        trash_days: 7,
+        ..AppSettings::default()
+    })
+    .unwrap();
+    d.create_filter("Все".into(), String::new(), FilterQuery::default())
+        .unwrap();
     d.undo().unwrap();
     assert!(
-        d.task(t.id).unwrap().deleted,
+        d.get_note(n.id).unwrap().deleted,
         "the step under the undone one is the creation"
     );
     assert!(!d.can_undo());
+    assert_eq!(d.settings().unwrap().trash_days, 7);
 }
 
 #[test]
-fn r131_the_revision_grows_with_each_action_and_stays_when_a_text_edit_joins_the_last() {
+fn r75_the_revision_grows_with_each_action_and_stays_when_a_text_edit_joins_the_last() {
     let d = device();
     assert_eq!(d.undo_revision(), 0);
-    let t = add(&d, "а");
+    let n = add(&d, "а");
     assert_eq!(d.undo_revision(), 1);
     // As the app on macOS makes every change: one group, whatever it holds.
     for title in ["аб", "абв"] {
         d.begin_group();
-        d.set_title(t.id.clone(), title.into()).unwrap();
+        d.set_title(n.id.clone(), title.into()).unwrap();
         d.end_group();
     }
     assert_eq!(d.undo_revision(), 2, "the second edit of the title joins the first");
@@ -296,30 +199,29 @@ fn r131_the_revision_grows_with_each_action_and_stays_when_a_text_edit_joins_the
     d.end_group();
     assert_eq!(d.undo_revision(), 2, "an empty group is no action");
     d.begin_group();
-    d.set_due(t.id.clone(), Some("2026-10-06".into())).unwrap();
-    d.set_priority(t.id.clone(), Priority::High).unwrap();
+    d.set_starred(n.id.clone(), true).unwrap();
+    d.set_pinned(n.id.clone(), true).unwrap();
     d.end_group();
     assert_eq!(d.undo_revision(), 3);
     d.undo().unwrap();
     assert_eq!(d.undo_revision(), 3, "undo takes nothing in");
-    let back = d.task(t.id.clone()).unwrap();
-    assert_eq!((back.due, back.priority), (None, Priority::None));
+    let back = d.get_note(n.id.clone()).unwrap();
+    assert_eq!((back.starred, back.pinned), (false, false));
     d.undo().unwrap();
-    assert_eq!(d.task(t.id).unwrap().title, "а");
+    assert_eq!(d.get_note(n.id).unwrap().title, "а");
 }
 
 #[test]
-fn r139_a_new_task_that_failed_half_way_is_taken_back_whole_and_saving_again_makes_no_twin() {
+fn r75_a_new_note_that_failed_half_way_is_taken_back_whole_and_saving_again_makes_no_twin() {
     let d = device();
-    // As both apps save the card of a new task: one group, taken back at once when a write in it fails.
-    let save = |tag: &str| -> std::result::Result<TaskItem, AppError> {
+    // As both apps save the card of a new note: one group, taken back at once when a write in it fails.
+    let save = |tag: &str| -> std::result::Result<Note, AppError> {
         let revision = d.undo_revision();
         d.begin_group();
         let result = (|| {
-            let t = add(&d, "а");
-            d.set_notes(t.id.clone(), "заметка".into())?;
-            d.add_tag(t.id.clone(), tag.into())?;
-            Ok(t)
+            let n = add(&d, "а");
+            d.add_tag(n.id.clone(), tag.into())?;
+            Ok(n)
         })();
         d.end_group();
         if result.is_err() && d.undo_revision() != revision {
@@ -328,11 +230,27 @@ fn r139_a_new_task_that_failed_half_way_is_taken_back_whole_and_saving_again_mak
         result
     };
     assert!(save(&"т".repeat(99)).is_err(), "a tag of 198 bytes is refused");
-    assert!(view(&d, Scope::Inbox).is_empty());
+    assert!(view(&d, Scope::All).is_empty());
     assert_eq!(view(&d, Scope::Trash), ["а"]);
 
-    let t = save("дом").unwrap();
-    assert_eq!(view(&d, Scope::Inbox), ["а"]);
-    let back = d.task(t.id).unwrap();
-    assert_eq!((back.notes.as_str(), back.tags), ("заметка", vec!["дом".to_string()]));
+    let n = save("дом").unwrap();
+    assert_eq!(view(&d, Scope::All), ["а"]);
+    assert_eq!(d.get_note(n.id).unwrap().tags, ["дом"]);
+}
+
+#[test]
+fn r75_deleting_a_folder_is_one_step_and_one_undo_brings_back_the_folder_and_its_notes() {
+    let d = device();
+    let folder = new_folder(&d, "Папка", None);
+    let sub = new_folder(&d, "Вложенная", Some(&folder));
+    add_in(&d, "в папке", &folder);
+    add_in(&d, "во вложенной", &sub);
+    d.delete_folder(folder.id.clone()).unwrap();
+    assert!(d.folders().unwrap().is_empty());
+    assert_eq!(view(&d, Scope::Trash).len(), 2);
+
+    assert_eq!(d.undo().unwrap(), 1);
+    assert_eq!(d.folders().unwrap().len(), 2);
+    assert!(view(&d, Scope::Trash).is_empty());
+    assert_eq!(view(&d, Scope::Folder { id: sub.id }), ["во вложенной"]);
 }

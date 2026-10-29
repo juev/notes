@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use notes_core::{NewTask, Scope, Store, TaskItem};
+use notes_core::{Folder, NewNote, Note, Scope, Store};
 use tempfile::TempDir;
 
 /// 2026-10-05 is a Monday.
@@ -34,31 +34,42 @@ pub fn device() -> Device {
     Device { store, _dir: dir }
 }
 
-pub fn add(store: &Store, title: &str) -> TaskItem {
+pub fn add(store: &Store, title: &str) -> Note {
     store
-        .create_task(NewTask {
+        .create_note(NewNote {
             title: title.into(),
-            ..NewTask::default()
+            ..NewNote::default()
         })
         .unwrap()
 }
 
-pub fn add_sub(store: &Store, parent: &TaskItem, title: &str) -> TaskItem {
+pub fn add_in(store: &Store, title: &str, folder: &Folder) -> Note {
     store
-        .create_task(NewTask {
+        .create_note(NewNote {
             title: title.into(),
-            parent_id: Some(parent.id.clone()),
-            ..NewTask::default()
+            folder_id: Some(folder.id.clone()),
+            ..NewNote::default()
         })
         .unwrap()
 }
 
-pub fn titles(tasks: &[TaskItem]) -> Vec<&str> {
-    tasks.iter().map(|t| t.title.as_str()).collect()
+pub fn new_folder(store: &Store, name: &str, parent: Option<&Folder>) -> Folder {
+    store.create_folder(name.into(), parent.map(|p| p.id.clone())).unwrap()
+}
+
+pub fn titles(notes: &[Note]) -> Vec<&str> {
+    notes.iter().map(|n| n.title.as_str()).collect()
 }
 
 pub fn view(store: &Store, view: Scope) -> Vec<String> {
-    store.tasks(view).unwrap().into_iter().map(|t| t.title).collect()
+    store.notes(view).unwrap().into_iter().map(|t| t.title).collect()
+}
+
+/// The titles of the notes in view All, the oldest first: the order the notes were made in.
+pub fn oldest_first(store: &Store) -> Vec<String> {
+    let mut all = store.notes(Scope::All).unwrap();
+    all.sort_by(|a, b| (a.created_ms, &a.id).cmp(&(b.created_ms, &b.id)));
+    all.into_iter().map(|n| n.title).collect()
 }
 
 /// Writes registers straight into the database of a closed device, the way an earlier version of the

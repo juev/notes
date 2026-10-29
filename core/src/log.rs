@@ -1,6 +1,6 @@
 //! The log of the app (R102): a text file in the data folder that the core
 //! writes on macOS and Android alike. It holds what happened, never what the
-//! tasks say: counts, outcomes and the text of errors.
+//! notes say: counts, outcomes and the text of errors.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -143,7 +143,7 @@ impl Store {
     }
 
     /// A line from the app around the core: its start, a failure of its own.
-    /// The caller keeps the content of tasks, passwords and tokens out of it.
+    /// The caller keeps the content of notes, passwords and tokens out of it.
     pub fn log(&self, level: LogLevel, source: String, message: String) {
         self.note(level, &source, || message);
     }
