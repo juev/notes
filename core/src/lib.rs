@@ -17,6 +17,7 @@ mod markdown;
 mod model;
 mod order;
 mod push;
+mod search;
 mod store;
 pub mod sync;
 mod tag;
@@ -34,6 +35,7 @@ pub use markdown::{
 };
 pub use model::*;
 pub use push::finish_pushes;
+pub use search::{NoteLinkState, NoteLinkTarget, SearchHit};
 pub use store::Store;
 pub use sync::check_sync_connection;
 pub use sync::{StorageBackup, StorageBackupStatus};

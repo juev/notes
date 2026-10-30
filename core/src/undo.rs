@@ -45,6 +45,9 @@ pub(crate) struct Step {
     existed: HashMap<(String, String), bool>,
     /// Edits of the same text of the same note in a row make one step (R75).
     text: Option<(String, String)>,
+    /// Texts of notes the action changed, as (note, before, after): an action that also edits a
+    /// text, such as a new note from a selection (R53) or a version restored (R42).
+    texts: Vec<(String, String, String)>,
 }
 
 impl Step {
@@ -82,8 +85,25 @@ impl Step {
         Ok(())
     }
 
+    /// Called after a text of a note was changed by the action.
+    pub(crate) fn note_text(&mut self, note: &str, before: String, after: String) {
+        match self.texts.iter_mut().find(|(n, _, _)| n == note) {
+            Some(known) => known.2 = after,
+            None => self.texts.push((note.to_string(), before, after)),
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.registers.is_empty() && self.texts.is_empty()
+    }
+
     /// Whether nothing has written over the step since: by this device or another one, by sync.
     fn current(&self, conn: &Connection) -> Result<bool> {
+        for (note, _, after) in &self.texts {
+            if crate::body::text(conn, note)? != *after {
+                return Ok(false);
+            }
+        }
         for r in &self.registers {
             let stamp: Option<String> = conn
                 .query_row(
@@ -111,6 +131,11 @@ impl Step {
             gone.insert((kind.as_str(), id.as_str()));
             // What the action made goes to the Trash.
             w.set(kind, id, "deleted", json!(true))?;
+        }
+        for (note, before, _) in self.texts.iter().rev() {
+            if !gone.contains(&(crate::db::KIND_NOTE, note.as_str())) {
+                crate::body::replace(w, note, before)?;
+            }
         }
         for r in self.registers.iter().rev() {
             if gone.contains(&(r.kind.as_str(), r.id.as_str())) {
@@ -165,6 +190,9 @@ impl History {
                         None => last.registers.push(r),
                     }
                 }
+                for (note, before, after) in std::mem::take(&mut step.texts) {
+                    last.note_text(&note, before, after);
+                }
                 return;
             }
         }
@@ -211,7 +239,7 @@ impl Store {
         f: impl FnOnce(&mut Writer) -> Result<T>,
     ) -> Result<T> {
         let (out, step) = self.lock().write_noted(f)?;
-        if !step.registers.is_empty() {
+        if !step.is_empty() {
             let step = Step { text, ..step };
             self.history().push(actor(), step);
         }
