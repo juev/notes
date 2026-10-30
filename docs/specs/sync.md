@@ -4,7 +4,7 @@ Status: stage 1 of the core is implemented in `core/`. The mechanism is copied f
 
 ## Purpose and scope
 
-This document describes how the data is laid out on a device, how edits are merged and what lies in the remote storage. The project has no server of its own: the storage is a WebDAV directory or a local folder, and all it has to do is read, write, list, move and delete files.
+This document describes how the data is laid out on a device, how edits are merged and what lies in the remote storage. The project has no server of its own: the storage is a WebDAV directory or, on macOS and the web server, a local folder, and all it has to do is read, write, list, move and delete files.
 
 Out of scope for the first version: CalDAV and S3 transports, shared access for several people, real-time co-editing of one note, encryption of the data folder on the device.
 
