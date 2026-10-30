@@ -6,17 +6,33 @@ struct MainWindow: View {
     @Environment(\.undoManager) private var undoManager
 
     var body: some View {
+        @Bindable var model = model
         NavigationSplitView {
-            List {}
-                .navigationSplitViewColumnWidth(min: 180, ideal: 220)
+            Sidebar()
+                .navigationSplitViewColumnWidth(min: 180, ideal: 230)
         } content: {
-            Text(model.startupError ?? "")
-                .foregroundStyle(.secondary)
-                .navigationSplitViewColumnWidth(min: 220, ideal: 300)
+            NoteList()
+                .navigationSplitViewColumnWidth(min: 240, ideal: 300)
         } detail: {
-            Text("")
+            Text(model.startupError ?? "")
         }
+        .navigationTitle(title)
         .onAppear { model.undoManager = undoManager }
         .onChange(of: undoManager) { _, manager in model.undoManager = manager }
+        .alert(model.alert ?? "", isPresented: Binding(get: { model.alert != nil }, set: { if !$0 { model.alert = nil } })) {}
+    }
+
+    private var title: String {
+        switch model.scope {
+        case .all: L("All notes")
+        case .starred: L("Starred")
+        case .archived: L("Archived")
+        case .trash: L("Trash")
+        case .untagged: L("Untagged")
+        case .noFolder: L("No folder")
+        case .folder: model.folderOfScope?.name ?? "Notes"
+        case .tag(let name): "#\(name)"
+        case .filter(let id): model.filters.first { $0.id == id }?.name ?? "Notes"
+        }
     }
 }
