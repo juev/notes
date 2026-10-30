@@ -101,6 +101,9 @@ pub struct NewNote {
     pub folder_id: Option<String>,
     #[uniffi(default = [])]
     pub tags: Vec<String>,
+    /// The Markdown source the note starts with (R1); empty for a new empty note.
+    #[uniffi(default = "")]
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Enum)]
@@ -182,6 +185,10 @@ pub enum Condition {
         text: String,
     },
     TitleContains {
+        text: String,
+    },
+    /// The text of the note contains it, whatever the case (R45).
+    TextContains {
         text: String,
     },
     Created {

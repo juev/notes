@@ -31,11 +31,13 @@ use serde::{Deserialize, Serialize};
 use crate::LogLevel;
 use sha2::{Digest, Sha256};
 
+use crate::body;
 use crate::db::{
-    self, is_sha256, Change, Touched, KIND_ATTACHMENT, KIND_BLOB, KIND_FILTER, KIND_FOLDER, KIND_NOTE, KIND_SETTINGS,
+    self, is_sha256, key_ok, Change, Touched, KIND_ATTACHMENT, KIND_BLOB, KIND_FILTER, KIND_FOLDER, KIND_NOTE,
+    KIND_SETTINGS,
 };
 use crate::error::{AppError, Result};
-use crate::hlc::Clock;
+use crate::hlc::{self, Clock};
 use crate::model::{Attachment, AttachmentReport, ConnectionCheck, SyncConfig, SyncReport, SyncSide, SyncStatus};
 use crate::store::{hex, new_device_id, Store};
 use remote::{DirRemote, Remote};
@@ -140,16 +142,61 @@ struct Header {
     covers: BTreeMap<String, u64>,
 }
 
-struct Batch {
-    header: Header,
-    changes: Vec<Change>,
+/// S13: the text of a note in the log. `crdt` is the base64 of the Automerge changes (or of the
+/// whole saved document in a snapshot); `t` is the stamp of the last edit and decides nothing
+/// between two values, it only gives the moment the note was last edited.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct BodyLine {
+    #[serde(rename = "k")]
+    kind: String,
+    #[serde(rename = "i")]
+    id: String,
+    #[serde(rename = "f")]
+    field: String,
+    crdt: String,
+    #[serde(rename = "t")]
+    stamp: String,
 }
 
-fn encode(header: &Header, changes: &[Change]) -> Result<Vec<u8>> {
+/// The field of a note that holds its text.
+const BODY: &str = "body";
+
+impl BodyLine {
+    fn new(piece: body::Piece) -> Self {
+        BodyLine {
+            kind: KIND_NOTE.into(),
+            id: piece.note,
+            field: BODY.into(),
+            crdt: piece.crdt,
+            stamp: piece.stamp,
+        }
+    }
+
+    /// A line this version applies: the text of a note, with a key and a stamp every device accepts (S5).
+    fn is_well_formed(&self) -> bool {
+        self.kind == KIND_NOTE && self.field == BODY && key_ok(&self.id) && hlc::is_valid(&self.stamp)
+    }
+}
+
+/// A line of a log file: a register, or the text of a note (S13). A line is tried as a body
+/// first, which a register never is: it has no `crdt`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum Line {
+    Body(BodyLine),
+    Register(Change),
+}
+
+struct Batch {
+    header: Header,
+    lines: Vec<Line>,
+}
+
+fn encode<L: Serialize>(header: &Header, lines: &[L]) -> Result<Vec<u8>> {
     let mut out = serde_json::to_vec(header)?;
-    for change in changes {
+    for line in lines {
         out.push(b'\n');
-        serde_json::to_writer(&mut out, change)?;
+        serde_json::to_writer(&mut out, line)?;
     }
     out.push(b'\n');
     Ok(out)
@@ -188,11 +235,11 @@ fn decode(data: &[u8]) -> Option<Batch> {
     if header.v == 0 || header.v > FORMAT {
         return None;
     }
-    let mut changes = Vec::with_capacity(header.count);
+    let mut parsed = Vec::with_capacity(header.count);
     for line in lines {
-        changes.push(serde_json::from_str(line).ok()?);
+        parsed.push(serde_json::from_str(line).ok()?);
     }
-    (changes.len() == header.count && text.ends_with('\n')).then_some(Batch { header, changes })
+    (parsed.len() == header.count && text.ends_with('\n')).then_some(Batch { header, lines: parsed })
 }
 
 /// Batches of changes: log files and snapshots.
@@ -410,30 +457,62 @@ impl Store {
             .unwrap_or(0))
     }
 
-    /// Merges a batch and moves cursors in one transaction. Returns how many registers changed.
+    /// Merges a batch and moves cursors in one transaction. Returns how many registers and texts changed.
     fn merge(&self, batch: &Batch, cursors: &BTreeMap<String, u64>) -> Result<u32> {
-        let mut inner = self.lock();
-        let inner = &mut *inner;
-        let tx = inner
-            .conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let mut touched = Touched::new();
-        let mut changed = 0;
-        for change in batch.changes.iter().filter(|c| c.is_well_formed()) {
-            inner.clock.observe(&change.stamp);
-            if db::apply(&tx, change, false, &mut touched)? {
-                changed += 1;
+        let mut troubles: Vec<(String, &'static str)> = Vec::new();
+        let changed = {
+            let mut inner = self.lock();
+            let inner = &mut *inner;
+            let tx = inner
+                .conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let mut touched = Touched::new();
+            let mut changed = 0;
+            // S22: what could not be applied before is tried again once this file is in.
+            let kept = body::kept(&tx)?;
+            for line in &batch.lines {
+                match line {
+                    Line::Register(change) if change.is_well_formed() => {
+                        inner.clock.observe(&change.stamp);
+                        if db::apply(&tx, change, false, &mut touched)? {
+                            changed += 1;
+                        }
+                    }
+                    Line::Body(text) if text.is_well_formed() => {
+                        inner.clock.observe(&text.stamp);
+                        match body::apply(&tx, &text.id, &text.crdt, &text.stamp)? {
+                            Some(outcome) => {
+                                changed += u32::from(outcome.changed);
+                                touched.insert((KIND_NOTE.to_string(), text.id.clone()));
+                                if outcome.waiting {
+                                    troubles.push((text.id.clone(), "changes wait for others it does not have yet"));
+                                }
+                            }
+                            None => {
+                                if body::keep(&tx, &text.id, &batch.header.device, &text.crdt, &text.stamp)? {
+                                    troubles.push((text.id.clone(), "the bytes are not changes of a text, kept"));
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
             }
+            changed += body::retry(&tx, kept, &mut touched)?;
+            db::settle(&tx, &touched)?;
+            for (device, seq) in cursors {
+                tx.execute(
+                    "INSERT INTO peers (device, seq) VALUES (?1, ?2)
+                     ON CONFLICT (device) DO UPDATE SET seq = max(seq, excluded.seq)",
+                    params![device, *seq as i64],
+                )?;
+            }
+            tx.commit()?;
+            changed
+        };
+        for (note, what) in troubles {
+            self.note_body_trouble(&note, &batch.header.device, what);
         }
-        db::settle(&tx, &touched)?;
-        for (device, seq) in cursors {
-            tx.execute(
-                "INSERT INTO peers (device, seq) VALUES (?1, ?2)
-                 ON CONFLICT (device) DO UPDATE SET seq = max(seq, excluded.seq)",
-                params![device, *seq as i64],
-            )?;
-        }
-        tx.commit()?;
         Ok(changed)
     }
 
@@ -605,24 +684,29 @@ impl Store {
             let tx = inner
                 .conn
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let changes: Vec<Change> = {
+            let mut lines: Vec<Line> = {
                 let mut stmt =
                     tx.prepare("SELECT kind, id, field, value, stamp FROM fields WHERE dirty = 1 ORDER BY stamp")?;
                 let rows = stmt.query_map([], change_from_row)?;
-                rows.collect::<rusqlite::Result<_>>()?
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+                    .into_iter()
+                    .map(Line::Register)
+                    .collect()
             };
-            if !changes.is_empty() {
+            // S20: the first text of a note goes in the file of its first registers.
+            lines.extend(body::take_dirty(&tx)?.into_iter().map(BodyLine::new).map(Line::Body));
+            if !lines.is_empty() {
                 let seq = own_seq(&tx)? + 1;
                 let header = Header {
                     v: FORMAT,
                     device: me.to_string(),
                     seq,
-                    count: changes.len(),
+                    count: lines.len(),
                     covers: BTreeMap::new(),
                 };
                 tx.execute(
                     "INSERT INTO outbox (seq, body, changes) VALUES (?1, ?2, ?3)",
-                    params![seq as i64, encode(&header, &changes)?, changes.len() as i64],
+                    params![seq as i64, encode(&header, &lines)?, lines.len() as i64],
                 )?;
                 tx.execute("UPDATE fields SET dirty = 0 WHERE dirty = 1", [])?;
                 db::meta_set(&tx, "own_seq", &seq.to_string())?;
@@ -709,13 +793,18 @@ impl Store {
     /// The full state of this device as a snapshot numbered `seq`, compressed (S10, S46).
     fn snapshot(&self, me: &str, seq: u64) -> Result<Vec<u8>> {
         let inner = self.lock();
-        let changes: Vec<Change> = {
+        let mut lines: Vec<Line> = {
             let mut stmt = inner
                 .conn
                 .prepare("SELECT kind, id, field, value, stamp FROM fields ORDER BY kind, id, field")?;
             let rows = stmt.query_map([], change_from_row)?;
-            rows.collect::<rusqlite::Result<_>>()?
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+                .into_iter()
+                .map(Line::Register)
+                .collect()
         };
+        // S15, S21: the text of every note whole, with its history; a note deleted for good has none (S7).
+        lines.extend(body::all(&inner.conn)?.into_iter().map(BodyLine::new).map(Line::Body));
         let mut covers: BTreeMap<String, u64> = {
             let mut stmt = inner.conn.prepare("SELECT device, seq FROM peers")?;
             let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64)))?;
@@ -726,10 +815,10 @@ impl Store {
             v: FORMAT,
             device: me.to_string(),
             seq,
-            count: changes.len(),
+            count: lines.len(),
             covers,
         };
-        compress(&encode(&header, &changes)?)
+        compress(&encode(&header, &lines)?)
     }
 
     /// Replaces this device's log files with one snapshot of its full state.
@@ -1329,10 +1418,12 @@ impl Store {
         Ok(())
     }
 
-    /// Count and greatest stamp of the registers: the same while nothing was written.
+    /// Count and greatest stamp of the registers, and the size of the texts: the same while nothing was written.
     fn registers_mark(conn: &rusqlite::Connection) -> Result<String> {
         Ok(conn.query_row(
-            "SELECT count(*) || ':' || coalesce(max(stamp), '') FROM fields",
+            "SELECT (SELECT count(*) || ':' || coalesce(max(stamp), '') FROM fields) || '/' ||
+                    (SELECT count(*) || ':' || coalesce(max(stamp), '') || ':' || coalesce(sum(length(doc)), 0)
+                       FROM bodies)",
             [],
             |r| r.get(0),
         )?)
@@ -1350,8 +1441,10 @@ impl Store {
                 .conn
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             if db::meta_get(&tx, KEPT_AT)?.is_none() {
+                // S37: the text of every note is remembered as well.
                 tx.execute_batch(
-                    "DELETE FROM kept; INSERT INTO kept (kind, id, field, value) SELECT kind, id, field, value FROM fields;",
+                    "DELETE FROM kept; INSERT INTO kept (kind, id, field, value) SELECT kind, id, field, value FROM fields;
+                     DELETE FROM kept_bodies; INSERT INTO kept_bodies (note_id, text) SELECT note_id, text FROM bodies;",
                 )?;
                 db::meta_set(&tx, KEPT_AT, &Self::registers_mark(&tx)?)?;
             }
@@ -1364,7 +1457,7 @@ impl Store {
                 // remembers anew, with whatever is edited until then.
                 let inner = self.lock();
                 if db::meta_get(&inner.conn, KEPT_AT)? == Some(Self::registers_mark(&inner.conn)?) {
-                    inner.conn.execute("DELETE FROM kept", [])?;
+                    inner.conn.execute_batch("DELETE FROM kept; DELETE FROM kept_bodies;")?;
                     db::meta_del(&inner.conn, KEPT_AT)?;
                 }
                 return Err(e);
@@ -1421,7 +1514,17 @@ impl Store {
                 };
                 w.set(&kind, &id, "deleted", value)?;
             }
-            w.tx.execute("DELETE FROM kept", [])?;
+            // The edit that turns the text of each note into the one remembered; a note whose text
+            // is gone (deleted for good elsewhere) is left alone.
+            let texts: Vec<(String, String)> = {
+                let mut stmt = w.tx.prepare("SELECT note_id, text FROM kept_bodies ORDER BY note_id")?;
+                let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                rows.collect::<rusqlite::Result<_>>()?
+            };
+            for (note, text) in texts {
+                body::restore(w, &note, &text)?;
+            }
+            w.tx.execute_batch("DELETE FROM kept; DELETE FROM kept_bodies;")?;
             db::meta_del(w.tx, REPLACE)?;
             db::meta_del(w.tx, KEPT_AT)
         })
@@ -1519,13 +1622,15 @@ impl Store {
             tx.execute("DELETE FROM fields", [])?;
         }
         tx.execute_batch(
-            "DELETE FROM kept;
+            "DELETE FROM kept; DELETE FROM kept_bodies; DELETE FROM bodies; DELETE FROM body_pending;
              DELETE FROM notes; DELETE FROM note_tags; DELETE FROM folders; DELETE FROM attachments; DELETE FROM filters;
              DELETE FROM peers; DELETE FROM outbox; DELETE FROM blobs_uploaded;
              DELETE FROM meta WHERE key IN ('sync_ok', 'sync_error', 'push_published',
                                             'own_seq', 'force_snapshot', 'replace_remote', 'replace_kept_at',
                                             'log_bytes', 'snap_bytes', 'blobs_whole', 'sealed_vault');",
         )?;
+        // S4: a new device identifier takes a new actor identifier with it, before any text is opened.
+        db::meta_set(&tx, "actor", &body::new_actor())?;
         if restore {
             // The file comes from outside: only registers this version would accept from a peer get in.
             let changes: Vec<Change> = {
@@ -1538,6 +1643,8 @@ impl Store {
                 // Everything is to be uploaded: the storage has not seen this device (S40).
                 db::apply(&tx, change, true, &mut touched)?;
             }
+            // S38: the texts of the notes that got in, all of them to be uploaded.
+            body::import_restored(&tx, &touched)?;
             db::settle(&tx, &touched)?;
             db::meta_set(&tx, "force_snapshot", "1")?;
         } else if keep_settings {
@@ -1557,7 +1664,7 @@ impl Store {
     /// S37 without the lock: the caller holds it.
     pub(crate) fn ask_to_replace_remote(&self) -> Result<()> {
         let inner = self.lock();
-        inner.conn.execute("DELETE FROM kept", [])?;
+        inner.conn.execute_batch("DELETE FROM kept; DELETE FROM kept_bodies;")?;
         db::meta_del(&inner.conn, KEPT_AT)?;
         db::meta_set(&inner.conn, REPLACE, "1")
     }
@@ -1587,10 +1694,12 @@ impl Store {
         // and the first run publishes a snapshot so that readers there can start from it.
         tx.execute_batch(
             "DELETE FROM peers; DELETE FROM outbox; DELETE FROM blobs_uploaded; DELETE FROM kept;
+             DELETE FROM kept_bodies; DELETE FROM body_pending;
              DELETE FROM meta WHERE key IN ('sync_ok', 'sync_error', 'push_published',
                                             'replace_remote', 'replace_kept_at', 'log_bytes', 'snap_bytes',
                                             'blobs_whole', 'sealed_vault', 'clear_files');
-             UPDATE fields SET dirty = 1;",
+             UPDATE fields SET dirty = 1;
+             UPDATE bodies SET dirty = 1, uploaded = x'';",
         )?;
         db::meta_set(&tx, "force_snapshot", "1")?;
         tx.commit()?;
@@ -1889,7 +1998,8 @@ impl Store {
         let inner = self.lock();
         let encrypted = files && (seen_sealed || db::meta_get(&inner.conn, SEALED_VAULT)?.is_some());
         let pending: u32 = inner.conn.query_row(
-            "SELECT (SELECT count(*) FROM fields WHERE dirty = 1) + (SELECT coalesce(sum(changes), 0) FROM outbox)",
+            "SELECT (SELECT count(*) FROM fields WHERE dirty = 1) + (SELECT count(*) FROM bodies WHERE dirty = 1)
+                    + (SELECT coalesce(sum(changes), 0) FROM outbox)",
             [],
             |r| r.get(0),
         )?;

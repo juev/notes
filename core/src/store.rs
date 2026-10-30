@@ -182,6 +182,14 @@ impl Writer<'_> {
     pub(crate) fn now_ms(&self) -> u64 {
         self.now_ms
     }
+    /// A stamp for something that is not a register, the edit of a text (S13).
+    pub(crate) fn stamp(&mut self) -> String {
+        self.clock.tick(self.now_ms)
+    }
+    /// Asks for the derived rows of an entity to be rebuilt before the transaction commits.
+    pub(crate) fn touch(&mut self, kind: &str, id: &str) {
+        self.touched.insert((kind.into(), id.into()));
+    }
 }
 
 thread_local! {
@@ -398,14 +406,14 @@ pub(crate) fn query_notes(conn: &Connection, tail: &str, args: &[&str]) -> Resul
 }
 
 /// A note that is not deleted for good (S7).
-fn get_note(conn: &Connection, id: &str) -> Result<Note> {
+pub(crate) fn get_note(conn: &Connection, id: &str) -> Result<Note> {
     query_notes(conn, "WHERE n.id = ?1 AND n.purged = 0", &[id])?
         .pop()
         .ok_or_else(|| AppError::not_found(format!("note {id}")))
 }
 
 /// R28: a locked note keeps its title, tags and attachments as they are.
-fn get_unlocked_note(conn: &Connection, id: &str) -> Result<Note> {
+pub(crate) fn get_unlocked_note(conn: &Connection, id: &str) -> Result<Note> {
     let note = get_note(conn, id)?;
     if note.locked {
         return Err(AppError::invalid("the note is locked"));
@@ -753,6 +761,8 @@ impl Store {
                 d
             }
         };
+        // S4: an older database has a device identifier and no actor yet.
+        crate::body::ensure_actor(&conn)?;
         let clock = Clock::new(&device, db::max_stamp(&conn)?.as_deref());
         let store = Arc::new_cyclic(|me| Store {
             me: me.clone(),
@@ -882,7 +892,8 @@ impl Store {
         default_folder_id(&self.lock().conn, last_used.as_deref())
     }
 
-    /// R1, R2: a new note in the folder, with the tags. The text is added to it by the editor.
+    /// R1, R2: a new note in the folder, with the tags and the text it starts with. S3: the document
+    /// of the text is made here, by the device that creates the note.
     pub fn create_note(&self, new: NewNote) -> Result<Note> {
         let tags = new.tags.iter().map(|t| tag::clean(t)).collect::<Result<Vec<_>>>()?;
         self.act(|w| {
@@ -897,6 +908,7 @@ impl Store {
             if let Some(folder) = &new.folder_id {
                 w.note(&id, "folder", json!(folder))?;
             }
+            crate::body::create(w, &id, &new.text)?;
             w.flush()?;
             for name in &tags {
                 add_tag_in(w, &id, name)?;
@@ -911,12 +923,14 @@ impl Store {
     pub fn duplicate_note(&self, id: String) -> Result<Note> {
         self.act(|w| {
             let original = get_note(w.tx, &id)?;
+            let text = crate::body::text(w.tx, &id)?;
             let copy = new_id();
             w.note(&copy, "title", json!(format!("{} (copy)", original.title).trim()))?;
             w.note(&copy, "created", json!(w.now_ms()))?;
             if let Some(folder) = &original.folder_id {
                 w.note(&copy, "folder", json!(folder))?;
             }
+            crate::body::create(w, &copy, &text)?;
             w.flush()?;
             for name in &original.tags {
                 add_tag_in(w, &copy, name)?;
@@ -1839,6 +1853,16 @@ fn filter_notes(inner: &Inner, query: &FilterQuery) -> Result<Vec<Note>> {
         "WHERE n.deleted = 0 AND n.purged = 0 AND n.archived = 0"
     };
     let notes = query_notes(conn, tail, &[])?;
+    // R45: read only when a condition asks for it.
+    let texts = if query
+        .conditions
+        .iter()
+        .any(|c| matches!(c, Condition::TextContains { .. }))
+    {
+        crate::body::texts(conn)?
+    } else {
+        HashMap::new()
+    };
     let mut subtrees: HashMap<&str, Vec<String>> = HashMap::new();
     for condition in &query.conditions {
         if let Condition::InFolder {
@@ -1882,6 +1906,9 @@ fn filter_notes(inner: &Inner, query: &FilterQuery) -> Result<Vec<Note>> {
             Condition::HasAttachments => note.attachments > 0,
             Condition::TitleIs { text } => note.title.to_lowercase() == text.to_lowercase(),
             Condition::TitleContains { text } => note.title.to_lowercase().contains(&text.to_lowercase()),
+            Condition::TextContains { text } => texts
+                .get(&note.id)
+                .is_some_and(|body| body.to_lowercase().contains(&text.to_lowercase())),
             Condition::Created { when } => on_time(when, note.created_ms),
             Condition::Edited { when } => on_time(when, note.edited_ms),
         }

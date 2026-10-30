@@ -3,6 +3,7 @@
 //! `fields` is the source of truth: one last-writer-wins register per
 //! (kind, id, field). `notes`, `folders`, `note_tags`, `attachments` and
 //! `filters` are rebuilt from it and exist only to make queries simple.
+//! The text of a note is not a register: it is an Automerge document in `bodies` (S3).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -54,8 +55,13 @@ pub struct Change {
 }
 
 impl Change {
+    /// S2: the text of a note is no register; a line that claims it is one is not applied.
     pub fn is_well_formed(&self) -> bool {
-        key_ok(&self.kind) && key_ok(&self.id) && key_ok(&self.field) && hlc::is_valid(&self.stamp)
+        key_ok(&self.kind)
+            && key_ok(&self.id)
+            && key_ok(&self.field)
+            && hlc::is_valid(&self.stamp)
+            && !(self.kind == KIND_NOTE && self.field == "body")
     }
 }
 
@@ -169,6 +175,34 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             value TEXT NOT NULL,
             PRIMARY KEY (kind, id, field)
         ) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS kept_bodies (note_id TEXT PRIMARY KEY, text TEXT NOT NULL) WITHOUT ROWID;
+
+        -- S3: the text of a note, one saved Automerge document per note, outside `fields`
+        CREATE TABLE IF NOT EXISTS bodies (
+            note_id  TEXT PRIMARY KEY,
+            -- `save()` of the document, with its full history (S21)
+            doc      BLOB NOT NULL,
+            -- the heads of the version last put into a log file, 32 bytes each (S20)
+            uploaded BLOB NOT NULL DEFAULT x'',
+            -- the document has changes that no log file carries yet
+            dirty    INTEGER NOT NULL DEFAULT 0,
+            -- the stamp of the last edit seen, issued here or read from a log line (S13)
+            stamp    TEXT NOT NULL DEFAULT '',
+            -- the text of the document as the filter and the search read it, kept in step with `doc`
+            text     TEXT NOT NULL DEFAULT ''
+        ) WITHOUT ROWID;
+        CREATE INDEX IF NOT EXISTS bodies_dirty ON bodies (dirty) WHERE dirty = 1;
+
+        -- S22: body changes that could not be applied, kept as they were received
+        CREATE TABLE IF NOT EXISTS body_pending (
+            id     INTEGER PRIMARY KEY,
+            note_id TEXT NOT NULL,
+            device TEXT NOT NULL,
+            crdt   TEXT NOT NULL,
+            stamp  TEXT NOT NULL,
+            digest TEXT NOT NULL,
+            UNIQUE (note_id, digest)
+        );
         ",
     )?;
     if meta_get(conn, "derived_version")?.as_deref() != Some(DERIVED_VERSION) {
@@ -235,8 +269,13 @@ pub fn meta_del(conn: &Connection, key: &str) -> Result<()> {
     Ok(())
 }
 
+/// The greatest stamp this device holds, in a register or on a text.
 pub fn max_stamp(conn: &Connection) -> Result<Option<String>> {
-    Ok(conn.query_row("SELECT max(stamp) FROM fields", [], |r| r.get(0))?)
+    Ok(conn.query_row(
+        "SELECT max(s) FROM (SELECT max(stamp) AS s FROM fields UNION ALL SELECT max(stamp) FROM bodies)",
+        [],
+        |r| r.get(0),
+    )?)
 }
 
 /// Writes one register if the incoming stamp is newer. Returns whether state changed.
@@ -346,8 +385,24 @@ impl Registers {
 
 fn materialize_note(conn: &Connection, id: &str) -> Result<()> {
     let r = Registers::load(conn, KIND_NOTE, id)?;
+    // A text that arrived ahead of the registers of its note does not make a note of its own.
+    if r.0.is_empty() {
+        return Ok(());
+    }
+    // S7: the text of a note deleted for good is dropped with its pending changes.
+    if r.flag("purged") {
+        conn.execute("DELETE FROM bodies WHERE note_id = ?1", [id])?;
+        conn.execute("DELETE FROM body_pending WHERE note_id = ?1", [id])?;
+    }
     let stamps = || r.0.values().map(|(_, stamp)| hlc::stamp_ms(stamp));
-    let edited = stamps().max().unwrap_or(0) as i64;
+    // The last edit of the text counts as an edit of the note (S13).
+    let body: Option<String> = conn
+        .query_row("SELECT stamp FROM bodies WHERE note_id = ?1", [id], |row| row.get(0))
+        .optional()?;
+    let edited = stamps()
+        .chain(body.map(|stamp| hlc::stamp_ms(&stamp)))
+        .max()
+        .unwrap_or(0) as i64;
     // A note whose creation was never recorded counts from its first register.
     let created = Some(r.int("created"))
         .filter(|ms| *ms > 0)

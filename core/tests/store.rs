@@ -31,6 +31,7 @@ fn r1_a_note_has_a_title_a_folder_tags_flags_and_moments() {
             title: "План".into(),
             folder_id: Some(folder.id.clone()),
             tags: vec!["срочно".into(), "Дом".into()],
+            ..NewNote::default()
         })
         .unwrap();
     assert_eq!(note.title, "План");
