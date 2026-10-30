@@ -7,10 +7,19 @@ import AppKit
 /// and replace, and this view does it with attributes and at the glyph level,
 /// so nothing but typing and the edits of the core changes the text.
 class MarkdownTextView: NSTextView, NSLayoutManagerDelegate {
-    /// The font of plain text; headings and code are derived from it.
-    var baseFont = NSFont.systemFont(ofSize: NSFont.systemFontSize) {
-        didSet { if baseFont != oldValue { restyle() } }
-    }
+    /// The font of plain text; headings are derived from it.
+    var baseFont = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+    /// E40: the font of code, at the size of plain text.
+    var codeFont = NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+    /// E42, E43, E45: the shape of a paragraph, as settings give it.
+    var lineHeight: CGFloat = 1.5
+    var paragraphSpacing: CGFloat = 0.5
+    var justified = false
+    var hyphenates = false
+    /// E44: about how many characters a line holds; nil for the width of the window.
+    var columnCharacters: Int?
+    /// E51: whether spelling is checked; it never is in the ranges of the core.
+    private var noSpellcheck: [NSRange] = []
     /// An edit of the text has been made, with the whole text after it.
     var onEdit: (TextEdit, String) -> Void = { _, _ in }
     /// Opens the address of a link clicked with ⌘ (E13): the web, mail or a note.
@@ -62,6 +71,7 @@ class MarkdownTextView: NSTextView, NSLayoutManagerDelegate {
     private var touchedReveals: [Int] = []
     private var blocks: [NSRange] = []
     private var focused = false
+    private var lastLineWasBlank = false
 
     /// TextKit 1: hiding works on glyphs, which TextKit 2 does not expose.
     func prepare() {
@@ -325,7 +335,13 @@ class MarkdownTextView: NSTextView, NSLayoutManagerDelegate {
 
     override func setSelectedRanges(_ ranges: [NSValue], affinity: NSSelectionAffinity, stillSelecting: Bool) {
         super.setSelectedRanges(ranges, affinity: affinity, stillSelecting: stillSelecting)
-        if !stillSelecting, focused, touched() != touchedReveals { restyle() }
+        guard !stillSelecting, focused else { return }
+        // The blank line the cursor is on gets its height back, and the one it left loses it.
+        let line = (string as NSString).lineRange(for: NSRange(location: min(selectedRange().location, (string as NSString).length), length: 0))
+        if touched() != touchedReveals || line.length <= 1 || lastLineWasBlank {
+            lastLineWasBlank = line.length <= 1
+            restyle()
+        }
     }
 
     override func becomeFirstResponder() -> Bool {
@@ -349,7 +365,23 @@ class MarkdownTextView: NSTextView, NSLayoutManagerDelegate {
 
     /// E47: code is 0.9 of the text size.
     private func code(_ font: NSFont) -> NSFont {
-        NSFont.monospacedSystemFont(ofSize: font.pointSize * 0.9, weight: .regular)
+        NSFont(descriptor: codeFont.fontDescriptor, size: font.pointSize * 0.9) ?? codeFont
+    }
+
+    /// E41–E46: the settings came in, or the width changed.
+    func applyTypography() {
+        restyle()
+    }
+
+    /// E44: the text is centred in the window, in a column of about this many characters.
+    private func placeColumn() {
+        guard let columnCharacters, let scroll = enclosingScrollView else {
+            textContainerInset = NSSize(width: 16, height: 12)
+            return
+        }
+        let glyph = ("n" as NSString).size(withAttributes: [.font: baseFont]).width
+        let column = glyph * CGFloat(columnCharacters) * 1.05
+        textContainerInset = NSSize(width: max(16, (scroll.contentSize.width - column) / 2), height: 12)
     }
 
     /// E3: the colour of a token of code.
@@ -390,7 +422,24 @@ class MarkdownTextView: NSTextView, NSLayoutManagerDelegate {
         let selection = selectedRange()
         let shows = { (start: Int, end: Int) in self.focused && Reveal.touches(selection: selection, start: start, end: end) }
         let dim = NSColor.tertiaryLabelColor
-        let plain: [NSAttributedString.Key: Any] = [.font: baseFont, .foregroundColor: NSColor.labelColor]
+        placeColumn()
+        noSpellcheck = info.noSpellcheck.map { NSRange(location: Int($0.start), length: Int($0.end - $0.start)) }
+        let shape = NSMutableParagraphStyle()
+        shape.lineHeightMultiple = lineHeight
+        shape.paragraphSpacing = paragraphSpacing * lineHeight * baseFont.pointSize
+        shape.alignment = justified ? .justified : .natural
+        shape.hyphenationFactor = hyphenates ? 1 : 0
+        let plain: [NSAttributedString.Key: Any] = [.font: baseFont, .foregroundColor: NSColor.labelColor, .paragraphStyle: shape]
+        /// E46: headings, code and tables are not hyphenated, and get no justification.
+        func unbroken(_ range: NSRange, before: CGFloat = 0) {
+            let paragraph = text.paragraphRange(for: range)
+            let current = storage.attribute(.paragraphStyle, at: paragraph.location, effectiveRange: nil) as? NSParagraphStyle
+            let style = (current?.mutableCopy() as? NSMutableParagraphStyle) ?? NSMutableParagraphStyle()
+            style.hyphenationFactor = 0
+            style.alignment = .natural
+            style.paragraphSpacingBefore = before
+            storage.addAttribute(.paragraphStyle, value: style, range: paragraph)
+        }
 
         var hidden = IndexSet(), bullets = IndexSet(), tabs = IndexSet()
         var boxes2: [Int: NSSize] = [:]
@@ -439,6 +488,21 @@ class MarkdownTextView: NSTextView, NSLayoutManagerDelegate {
 
         storage.beginEditing()
         storage.setAttributes(plain, range: full)
+        // E43: the space between paragraphs is the paragraph spacing: the blank line between two
+        // blocks takes no room of its own, unless the cursor is on it.
+        text.enumerateSubstrings(in: full, options: [.byParagraphs, .substringNotRequired]) { _, line, enclosing, _ in
+            let onCursor = self.focused && NSLocationInRange(selection.location, enclosing)
+            guard line.length == 0, enclosing.length > 0, NSMaxRange(enclosing) < length, !onCursor else { return }
+            let gone = NSMutableParagraphStyle()
+            gone.maximumLineHeight = 0.01
+            storage.addAttributes([.font: NSFont.systemFont(ofSize: 0.01), .paragraphStyle: gone], range: enclosing)
+        }
+        // E46: hyphenation follows the language of each paragraph.
+        if hyphenates {
+            text.enumerateSubstrings(in: full, options: [.byParagraphs]) { paragraph, _, enclosing, _ in
+                storage.addAttribute(NSAttributedString.Key("NSLanguage"), value: Typography.language(of: paragraph ?? ""), range: enclosing)
+            }
+        }
         for span in info.spans {
             let range = NSRange(location: Int(span.start), length: Int(span.end - span.start))
             guard NSMaxRange(range) <= length, Int(span.block) < blocks.count else { continue }
@@ -449,6 +513,8 @@ class MarkdownTextView: NSTextView, NSLayoutManagerDelegate {
                 let scale: [CGFloat] = [1.6, 1.35, 1.15, 1.15, 1.15, 1.15]
                 let size = baseFont.pointSize * scale[max(0, min(5, Int(level) - 1))]
                 storage.addAttributes([.font: derived(baseFont, .bold, size: size), .foregroundColor: NSColor.labelColor], range: range)
+                // E47: the space before a heading is twice the paragraph spacing.
+                unbroken(range, before: 2 * paragraphSpacing * lineHeight * baseFont.pointSize)
             case .strong:
                 retrait(range) { self.derived($0, .bold) }
             case .emphasis:
@@ -463,10 +529,12 @@ class MarkdownTextView: NSTextView, NSLayoutManagerDelegate {
             case .codeBlock:
                 retrait(range) { self.code($0) }
                 codeBlocks.append(range)
+                unbroken(range)
             case .token(let kind):
                 storage.addAttribute(.foregroundColor, value: Self.color(kind), range: range)
             case .tableRow:
                 if !inGrid(range) { retrait(range) { self.code($0) } }
+                unbroken(range)
             case .quote:
                 quotes.append(range)
                 indent(range, first: 12, rest: 12)
@@ -716,6 +784,16 @@ class MarkdownTextView: NSTextView, NSLayoutManagerDelegate {
         guard changed else { return 0 }
         layoutManager.setGlyphs(newGlyphs, properties: newProperties, characterIndexes: characterIndexes, font: font, forGlyphRange: range)
         return range.length
+    }
+
+    /// E48: a one-letter Russian word stays with the next word, an em dash with the word before it.
+    func layoutManager(_ layoutManager: NSLayoutManager, shouldBreakLineByWordBeforeCharacterAt charIndex: Int) -> Bool {
+        Typography.mayBreak(Array(string.utf16), before: charIndex)
+    }
+
+    /// E51: the system underlines misspelled words only in text.
+    func spellingState(_ value: Int, at range: NSRange) -> Int {
+        noSpellcheck.contains { NSIntersectionRange($0, range).length > 0 } ? 0 : value
     }
 
     /// E15: the bar between two cells of a grid acts as a tab to the next column.

@@ -25,7 +25,13 @@ targets:
     type: application
     platform: macOS
     sources:
-      - App
+      - path: App
+        excludes:
+          - Fonts
+      # E40: copied as a folder, for ATSApplicationFontsPath.
+      - path: App/Fonts
+        type: folder
+        buildPhase: resources
       - Shared
       - path: Generated/notes_core.swift
         group: Generated

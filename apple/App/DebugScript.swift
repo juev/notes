@@ -25,6 +25,7 @@ import SwiftUI
 /// `files` (opens the view of files, `files:off` closes it), `attachments` (prints those of the open note, with whether the text has them),
 /// `find:text` (searches, `find:` ends it), `hits`, `picker` (prints what the picker of links offers), `linked`, `fromselection`, `keycmd:insertNewline:`,
 /// `versions` (prints them and the oldest with what differs), `restoreoldest`, `history` (opens the panel), `panelshot:/path/to.png` (draws the sheet on show),
+/// `set:font=Literata` (also `mono`, `lineheight`, `spacing`, `align=justify`, `hyphenate=on`, `size`, `column`), `settingsshot:/path/to.png` (with the tab of `settingsTab`),
 /// `attach:/path` (attaches the file to the open note with a link at the cursor),
 /// `corewrite:5,text` (an edit of the core under the open editor, as a sync brings one),
 /// `newnote` (the way ⌘N does), `newentry`, `undo`, `importsn:/path` (imports a backup of Standard Notes).
@@ -239,6 +240,35 @@ enum DebugScript {
             view.cacheDisplay(in: view.bounds, to: image)
             try? image.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: argument))
             print("debug: sheet drawn")
+        case "set":
+            // A setting, as the settings window changes it.
+            let (key, value) = cut(argument, "=")
+            var settings = model.settings
+            switch key {
+            case "font": settings.fontBody = value
+            case "mono": settings.fontMono = value
+            case "lineheight": settings.lineHeight = Double(value) ?? 1.5
+            case "spacing": settings.paragraphSpacing = Double(value) ?? 0.5
+            case "align": settings.align = value == "justify" ? .justify : .left
+            case "hyphenate": settings.hyphenate = value == "on"
+            case "size": model.textSize = Int(value) ?? 14
+            case "column": model.columnWidth = ColumnWidth(rawValue: value) ?? .medium
+            default: print("debug: no setting \(key)")
+            }
+            model.saveSettings(settings)
+        case "settingsshot":
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 620), styleMask: [.titled], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentView = NSHostingView(rootView: SettingsView().environment(model))
+            window.alphaValue = 0
+            window.orderFrontRegardless()
+            try? await Task.sleep(for: .seconds(1))
+            if let view = window.contentView, let image = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+                view.cacheDisplay(in: view.bounds, to: image)
+                try? image.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: argument))
+                print("debug: settings drawn")
+            }
+            window.close()
         case "files": model.filesOpen = argument != "off"
         case "attachments":
             print("debug: attachments \(model.attachments.map { "\($0.name) \(model.isInText($0) ? "in the text" : "not in the text")" })")
