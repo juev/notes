@@ -32,8 +32,20 @@ final class AppModel {
         hyphenate: false, smartTypography: true, spellcheck: true, spellLanguage: "auto", newNoteFolder: "root")
     /// The note open in the editor.
     var selectedNote: String? {
+        willSet { flushEdits() }
         didSet { if selectedNote != oldValue, let left = oldValue { dropIfUntouched(left) } }
     }
+    /// Grows when the data was read again, so that an open text compares itself with the core.
+    var textRevision = 0
+    /// Grows to ask the text of the open note to take the keyboard.
+    var textFocusRequests = 0
+    /// R2: a new note opens with the cursor in its title.
+    @ObservationIgnored private var titleFocusAsked = false
+    /// What was typed and has not reached the core yet, with the note and the whole text it gives.
+    @ObservationIgnored private var edits = EditCoalescer()
+    @ObservationIgnored private var editedNote: String?
+    @ObservationIgnored private var editedText = ""
+    @ObservationIgnored private var editFlush: DispatchWorkItem?
     /// R3: a note made here and not edited yet; it is deleted without going to the Trash when left so.
     @ObservationIgnored private var freshNote: String?
 
@@ -101,6 +113,11 @@ final class AppModel {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.reload(); self?.syncNow() }
         }
+        for name in [NSApplication.willResignActiveNotification, NSApplication.willTerminateNotification] {
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.flushEdits() }
+            }
+        }
         timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.syncNow(); self?.backupIfDue() }
         }
@@ -112,6 +129,7 @@ final class AppModel {
     /// Reads again what the window shows.
     func reload() {
         guard let store else { return }
+        flushEdits()
         syncStatus = (try? store.syncStatus()) ?? syncStatus
         counts = (try? store.counts()) ?? counts
         folders = (try? store.folders()) ?? folders
@@ -126,6 +144,7 @@ final class AppModel {
         default: break
         }
         reloadNotes()
+        textRevision += 1
     }
 
     /// The notes of the open view, in the order of its display (R16, R25).
@@ -138,6 +157,86 @@ final class AppModel {
         self.notes = notes
         if let selected = selectedNote, !notes.contains(where: { $0.id == selected }), (try? store.getNote(id: selected)) == nil {
             selectedNote = nil
+        }
+    }
+
+    // MARK: The open note
+
+    var openNote: Note? {
+        guard let id = selectedNote else { return nil }
+        return notes.first { $0.id == id } ?? (try? store?.getNote(id: id))
+    }
+
+    func text(of id: String) -> String { (try? store?.getText(id: id)) ?? "" }
+
+    var hasPendingEdits: Bool { edits.pending != nil }
+
+    func focusText() { textFocusRequests += 1 }
+
+    /// Whether a note was opened new, once: its title takes the cursor (R2).
+    func takeTitleFocus() -> Bool {
+        defer { titleFocusAsked = false }
+        return titleFocusAsked
+    }
+
+    /// R4: what is typed is saved as it is typed. The edits of a word reach the core together: it
+    /// opens the document for each edit, and a large note takes it tens of milliseconds.
+    func textEdited(_ id: String, _ edit: TextEdit, whole: String) {
+        touched(id)
+        if editedNote != id { flushEdits() }
+        editedNote = id
+        editedText = whole
+        if let earlier = edits.add(edit) { apply(earlier, to: id) }
+        editFlush?.cancel()
+        let work = DispatchWorkItem { [weak self] in MainActor.assumeIsolated { self?.flushEdits() } }
+        editFlush = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
+    }
+
+    /// Everything typed so far goes to the core: before another note opens, before the data is read
+    /// again, and when the app leaves the foreground.
+    func flushEdits() {
+        editFlush?.cancel()
+        guard let id = editedNote, let edit = edits.take() else { return }
+        apply(edit, to: id)
+        // S3: the core must hold what the editor shows; whatever got past the edits is put right.
+        if let store, (try? store.getText(id: id)) != editedText {
+            do { try store.setText(id: id, text: editedText) } catch { alert = describe(error) }
+        }
+        reloadNotes()
+        scheduleSync()
+    }
+
+    private func apply(_ edit: TextEdit, to id: String) {
+        guard let store else { return }
+        do {
+            try store.spliceUtf16(id: id, pos: UInt32(edit.position), deleteLen: UInt32(edit.deleted), insert: edit.inserted)
+        } catch {
+            alert = describe(error)
+        }
+    }
+
+    func setTitle(_ id: String, _ title: String) {
+        touched(id)
+        perform(named: L("Typing")) { try $0.setTitle(id: id, title: title) }
+    }
+
+    func addTag(_ id: String, _ tag: String) {
+        touched(id)
+        perform(named: L("Add Tag")) { try $0.addTag(id: id, tag: tag) }
+    }
+
+    func removeTag(_ id: String, _ tag: String) {
+        perform(named: L("Remove Tag")) { try $0.removeTag(id: id, tag: tag) }
+    }
+
+    /// E13: a link clicked with ⌘: a note opens here, an address in the system.
+    func openLink(_ url: URL) {
+        if url.scheme == "note" {
+            let id = url.absoluteString.dropFirst("note:".count)
+            open(String(id))
+        } else {
+            NSWorkspace.shared.open(url)
         }
     }
 
@@ -218,6 +317,7 @@ final class AppModel {
         guard let note = perform(named: L("New Note"), { try $0.createNote(new: NewNote(title: title, folderId: folderId, tags: [], text: "")) }) else { return }
         if let folderId { Storage.defaults.set(folderId, forKey: "lastFolder") }
         freshNote = daily ? nil : note.id
+        titleFocusAsked = !daily
         if !notes.contains(where: { $0.id == note.id }) { scope = folderId.map { .folder(id: $0) } ?? .all }
         open(note.id)
     }
@@ -397,6 +497,7 @@ final class AppModel {
     }
 
     func syncNow() {
+        flushEdits()
         guard let store, !syncing, syncStatus.configured || (try? store.syncConfig()) != .off else { return }
         syncing = true
         Task.detached(priority: .utility) {

@@ -17,6 +17,9 @@ import SwiftUI
 /// `trash:Title`, `restore:Title`, `star:Title`, `pin:Title`, `archive:Title`, `lock:Title`, `tag:Title=name`,
 /// `delfolder:Parent/Name` (prints the number the confirmation names, and deletes), `fold:Parent/Name`, `daily:Parent/Name`,
 /// `sort:title` or `sort:created` or `sort:edited` (with `+asc`), `hide:preview`, `hide:date`,
+/// `focus` (gives the text the keyboard), `caret:5`, `cursor` (prints the place of the cursor), `seen` (prints the text without what is hidden),
+/// `typein:text` (types into the editor), `text` (prints the text in the core), `flush` (sends what is typed to the core),
+/// `corewrite:5,text` (an edit of the core under the open editor, as a sync brings one),
 /// `newnote` (the way ⌘N does), `newentry`, `undo`, `importsn:/path` (imports a backup of Standard Notes).
 /// With `NOTES_DEBUG_DIR=/folder` the run has its data and settings in that folder. With
 /// `NOTES_DEBUG_QUIET` the app stays in the background; key presses then go straight to the main
@@ -164,6 +167,24 @@ enum DebugScript {
             var display = model.display
             if argument == "preview" { display.showPreview = false } else { display.showDate = false }
             model.setDisplay(display)
+        case "focus":
+            // The keyboard to the text, in a window that is not the key one as well.
+            if let view = editor { view.window?.makeFirstResponder(view) }
+        case "caret": editor?.debugCaret(Int(argument) ?? 0)
+        case "seen": print("debug: seen \(editor?.debugSeen.debugDescription ?? "no editor")")
+        case "text": print("debug: core text \(model.selectedNote.map { model.text(of: $0) }.debugDescription)")
+        case "flush": model.flushEdits()
+        case "typein":
+            // Text into the editor the way typing does.
+            editor?.insertText(argument, replacementRange: editor?.selectedRange() ?? NSRange())
+        case "corewrite":
+            // An edit of the core under the open editor, as a sync brings one: position,text.
+            let (position, text) = cut(argument, ",")
+            if let id = model.selectedNote {
+                try? model.store?.spliceUtf16(id: id, pos: UInt32(position) ?? 0, deleteLen: 0, insert: text)
+                model.reload()
+            }
+        case "cursor": print("debug: cursor \(editor?.selectedRange().location ?? -1)")
         case "newnote": model.newNote()
         case "newentry": model.newEntryForToday()
         case "undo":
@@ -180,6 +201,14 @@ enum DebugScript {
     }
 
     private static var model: AppModel { AppModel.shared }
+
+    /// The text view of the open note.
+    private static var editor: MarkdownTextView? {
+        func find(_ view: NSView) -> MarkdownTextView? {
+            (view as? MarkdownTextView) ?? view.subviews.lazy.compactMap(find).first
+        }
+        return target?.contentView.flatMap(find)
+    }
 
     /// The tables under a view, the leftmost first.
     private static func tables(in view: NSView) -> [NSTableView] {
