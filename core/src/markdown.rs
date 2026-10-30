@@ -140,12 +140,14 @@ pub struct MarkdownLayout {
     pub no_spellcheck: Vec<MarkdownRange>,
 }
 
-/// A replacement in the note: `start..end` becomes `text`, the cursor moves to `cursor`.
+/// A replacement in the note: `start..end` becomes `text`, then `anchor..cursor` is selected, in
+/// the text after the replacement; nothing is selected when the two are equal.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct MarkdownEdit {
     pub start: u32,
     pub end: u32,
     pub text: String,
+    pub anchor: u32,
     pub cursor: u32,
 }
 
@@ -252,6 +254,7 @@ pub fn markdown_newline(text: String, cursor: u32) -> Option<MarkdownEdit> {
             start,
             end: units.at(line_end),
             text: String::new(),
+            anchor: start,
             cursor: start,
         });
     }
@@ -272,28 +275,29 @@ pub fn markdown_newline(text: String, cursor: u32) -> Option<MarkdownEdit> {
         start: cursor,
         end: cursor,
         text: insert,
+        anchor: cursor + moved,
         cursor: cursor + moved,
     })
 }
 
-enum Marker {
+pub(crate) enum Marker {
     Bullet(char),
     Number(u64, char),
 }
 
 /// What a line starts with before its text.
-struct Prefix {
+pub(crate) struct Prefix {
     /// Indentation and `>` signs: what the next line repeats as it is.
-    lead: usize,
-    quoted: bool,
-    marker: Option<Marker>,
-    checkbox: bool,
+    pub(crate) lead: usize,
+    pub(crate) quoted: bool,
+    pub(crate) marker: Option<Marker>,
+    pub(crate) checkbox: bool,
     /// Where the text begins.
-    end: usize,
+    pub(crate) end: usize,
 }
 
 impl Prefix {
-    fn of(line: &str) -> Prefix {
+    pub(crate) fn of(line: &str) -> Prefix {
         let bytes = line.as_bytes();
         let blank = |i: usize| matches!(bytes.get(i), Some(b' ' | b'\t'));
         let ends = |i: usize| i >= bytes.len() || blank(i);
@@ -354,10 +358,10 @@ impl Prefix {
 }
 
 /// Byte offsets to UTF-16 offsets and back.
-struct Utf16(Vec<u32>);
+pub(crate) struct Utf16(Vec<u32>);
 
 impl Utf16 {
-    fn of(text: &str) -> Utf16 {
+    pub(crate) fn of(text: &str) -> Utf16 {
         let mut map = vec![0; text.len() + 1];
         let mut units = 0;
         for (i, c) in text.char_indices() {
@@ -368,12 +372,12 @@ impl Utf16 {
         Utf16(map)
     }
 
-    fn at(&self, byte: usize) -> u32 {
+    pub(crate) fn at(&self, byte: usize) -> u32 {
         self.0[byte]
     }
 
     /// `None` for an offset past the end or inside a surrogate pair.
-    fn byte(&self, units: u32) -> Option<usize> {
+    pub(crate) fn byte(&self, units: u32) -> Option<usize> {
         if units == 0 {
             return Some(0);
         }
@@ -381,11 +385,11 @@ impl Utf16 {
     }
 }
 
-struct Span {
-    range: Range<usize>,
-    kind: MarkdownKind,
-    block: usize,
-    reveal: Range<usize>,
+pub(crate) struct Span {
+    pub(crate) range: Range<usize>,
+    pub(crate) kind: MarkdownKind,
+    pub(crate) block: usize,
+    pub(crate) reveal: Range<usize>,
 }
 
 /// A span as the parse finds it; without a reveal range it reveals with its block.
@@ -427,7 +431,7 @@ fn is_inline(tag: &Tag) -> bool {
 
 /// The address of a web or mail link with its scheme in lower case, or nothing when the
 /// scheme is not one of those. The rest stays as typed.
-fn address(url: &str) -> Option<String> {
+pub(crate) fn address(url: &str) -> Option<String> {
     ["http://", "https://", "mailto:"].iter().find_map(|scheme| {
         let head = url.get(..scheme.len())?;
         head.eq_ignore_ascii_case(scheme)
@@ -524,16 +528,16 @@ struct Mark {
 }
 
 /// What the parse of a note gives, in bytes.
-struct Parsed {
-    spans: Vec<Span>,
-    blocks: Vec<Range<usize>>,
+pub(crate) struct Parsed {
+    pub(crate) spans: Vec<Span>,
+    pub(crate) blocks: Vec<Range<usize>>,
     tables: Vec<Table>,
-    no_spellcheck: Vec<Range<usize>>,
+    pub(crate) no_spellcheck: Vec<Range<usize>>,
 }
 
 /// `highlight`: whether code blocks get the tokens of their language (E3), which only the layout
 /// shows.
-fn layout(text: &str, highlight: bool) -> Parsed {
+pub(crate) fn layout(text: &str, highlight: bool) -> Parsed {
     let mut tables: Vec<Table> = Vec::new();
     let mut rows: Vec<(bool, Vec<Range<usize>>)> = Vec::new();
     let mut cells: Vec<Range<usize>> = Vec::new();
