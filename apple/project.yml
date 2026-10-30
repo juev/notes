@@ -40,6 +40,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: org.evsyukov.notes
         INFOPLIST_FILE: App/Info.plist
         CODE_SIGN_ENTITLEMENTS: App/Notes.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     # The tests of Shared/ run in a bundle of their own, with no host app: a test run does not
     # start Notes (make apple-test).
     scheme:

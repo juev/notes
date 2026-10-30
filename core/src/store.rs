@@ -532,6 +532,24 @@ fn folder_is_live(conn: &Connection, id: &str) -> Result<bool> {
         .is_some())
 }
 
+impl Store {
+    /// R36: a blob this call wrote is removed when no attachment kept it, as after a failed add.
+    pub(crate) fn drop_blob_if_unused(&self, sha256: &str) {
+        let used: bool = self
+            .lock()
+            .conn
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM attachments WHERE sha256 = ?1)",
+                [sha256],
+                |r| r.get(0),
+            )
+            .unwrap_or(true);
+        if !used {
+            let _ = std::fs::remove_file(self.blob_path(sha256));
+        }
+    }
+}
+
 fn new_id() -> String {
     Uuid::now_v7().to_string()
 }
@@ -1597,22 +1615,6 @@ impl Store {
         }
         *self.limits.lock().unwrap_or_else(|p| p.into_inner()) = limits;
         Ok(())
-    }
-
-    /// R36: a blob this call wrote is removed when no attachment kept it, as after a failed add.
-    pub(crate) fn drop_blob_if_unused(&self, sha256: &str) {
-        let used: bool = self
-            .lock()
-            .conn
-            .query_row(
-                "SELECT EXISTS (SELECT 1 FROM attachments WHERE sha256 = ?1)",
-                [sha256],
-                |r| r.get(0),
-            )
-            .unwrap_or(true);
-        if !used {
-            let _ = std::fs::remove_file(self.blob_path(sha256));
-        }
     }
 
     /// R33: removes the attachment from its note. R28: refused for a locked note.
