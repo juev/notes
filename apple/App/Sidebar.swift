@@ -16,9 +16,16 @@ struct Sidebar: View {
 
     var body: some View {
         @Bindable var model = model
-        List(selection: $model.scope) {
+        List(selection: Binding(get: { model.filesOpen ? nil : model.scope }, set: { scope in
+            model.filesOpen = false
+            if let scope { model.scope = scope }
+        })) {
             Section {
                 row(.all, L("All notes"), "tray.full", model.counts.all)
+                Button { model.filesOpen = true } label: {
+                    Label(L("Files"), systemImage: "paperclip").foregroundStyle(model.filesOpen ? Color.accentColor : Color.primary)
+                }
+                .buttonStyle(.plain)
                 row(.noFolder, L("No folder"), "tray", model.counts.noFolder)
                     .dropDestination(for: String.self) { items, _ in drop(items, into: nil) }
                 row(.starred, L("Starred"), "star", model.counts.starred)

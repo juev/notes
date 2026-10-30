@@ -23,6 +23,12 @@ class MarkdownTextView: NSTextView, NSLayoutManagerDelegate {
     override var undoManager: UndoManager? { nil }
     /// E26: whether typing replaces quotes, dashes, dots and arrows.
     var smartTypography = true
+    /// The attachments of the note by identifier, for what a link in the text shows (E14, E30).
+    var attachment: (String) -> Attachment? = { _ in nil }
+    /// A click on an attachment in the text (R31, R32, R35).
+    var openAttachment: (String) -> Void = { _ in }
+    /// Files dropped on the text or pasted into it (R30).
+    var addFiles: ([URL]) -> Void = { _ in }
     /// The edit `shouldChangeText` let through and `didChangeText` reports, with what it takes out.
     private var coming: TextEdit?
     private var comingRemoved = ""
@@ -32,6 +38,11 @@ class MarkdownTextView: NSTextView, NSLayoutManagerDelegate {
     private var replaying = false
 
     private var concealed = IndexSet()
+    /// E14: the first character of each attachment link shown as its attachment, with the size of
+    /// the box and the view that lies over it. The rest of the link has no glyphs.
+    private var embedded: [Int: NSSize] = [:]
+    private var embeds: [(location: Int, id: String)] = []
+    private var embedViews: [String: EmbeddedAttachment] = [:]
     private var bullets = IndexSet()
     private var boxes: [(range: NSRange, checked: Bool)] = []
     private var links: [(range: NSRange, url: String)] = []
@@ -185,6 +196,12 @@ class MarkdownTextView: NSTextView, NSLayoutManagerDelegate {
 
     /// Whether the core had something to do with what is on the pasteboard.
     func paste(from pasteboard: NSPasteboard) -> Bool {
+        let files = IncomingFiles.pasted(pasteboard)
+        if !files.isEmpty {
+            addFiles(files)
+            files.forEach(IncomingFiles.discard)
+            return true
+        }
         let selection = selectedRange()
         guard let edit = markdownPaste(
             text: string, start: UInt32(selection.location), end: UInt32(NSMaxRange(selection)),
@@ -293,6 +310,8 @@ class MarkdownTextView: NSTextView, NSLayoutManagerDelegate {
         let plain: [NSAttributedString.Key: Any] = [.font: baseFont, .foregroundColor: NSColor.labelColor]
 
         var hidden = IndexSet(), bullets = IndexSet(), tabs = IndexSet()
+        var boxes2: [Int: NSSize] = [:]
+        var newEmbeds: [(location: Int, id: String)] = []
         boxes = []; links = []; quotes = []; rules = []; codeBlocks = []; grids = []
         styledWidth = textContainer?.size.width ?? 0
 
@@ -374,9 +393,22 @@ class MarkdownTextView: NSTextView, NSLayoutManagerDelegate {
             case .noteLink(let id):
                 links.append((range, "note:\(id)"))
                 storage.addAttributes([.foregroundColor: NSColor.linkColor, .underlineStyle: NSUnderlineStyle.single.rawValue], range: range)
-            case .attachmentLink:
-                // E14: replaced by the attachment in the step of attachments.
-                storage.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor, range: range)
+            case .attachmentLink(let id, _):
+                // E14: the line of the link is source while the cursor is on it.
+                if shown {
+                    storage.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor, range: range)
+                } else {
+                    let view = embedView(id)
+                    let size = view.size(forWidth: columnWidth)
+                    boxes2[range.location] = size
+                    newEmbeds.append((range.location, id))
+                    hidden.insert(integersIn: (range.location + 1)..<NSMaxRange(range))
+                    let paragraph = text.paragraphRange(for: range)
+                    let current = storage.attribute(.paragraphStyle, at: paragraph.location, effectiveRange: nil) as? NSParagraphStyle
+                    let style = (current?.mutableCopy() as? NSMutableParagraphStyle) ?? NSMutableParagraphStyle()
+                    style.minimumLineHeight = max(style.minimumLineHeight, size.height + 4)
+                    storage.addAttribute(.paragraphStyle, value: style, range: paragraph)
+                }
             case .listMarker(let ordered):
                 if shown, !ordered { storage.addAttribute(.foregroundColor, value: dim, range: range) }
                 if !ordered, !shown, range.length == 1 { bullets.insert(range.location) }
@@ -488,15 +520,82 @@ class MarkdownTextView: NSTextView, NSLayoutManagerDelegate {
         storage.endEditing()
         typingAttributes = plain
 
-        if hidden != concealed || bullets != self.bullets || tabs != cellTabs {
+        embeds = newEmbeds
+        if hidden != concealed || bullets != self.bullets || tabs != cellTabs || boxes2 != embedded {
             concealed = hidden
             self.bullets = bullets
             cellTabs = tabs
+            embedded = boxes2
             layout.invalidateGlyphs(forCharacterRange: full, changeInLength: 0, actualCharacterRange: nil)
             layout.invalidateLayout(forCharacterRange: full, actualCharacterRange: nil)
         }
+        placeAttachments()
         invalidateIntrinsicContentSize()
         needsDisplay = true
+    }
+
+    /// The width a box may take: the column without the padding of the line.
+    private var columnWidth: CGFloat {
+        (textContainer?.size.width ?? 400) - 2 * (textContainer?.lineFragmentPadding ?? 0)
+    }
+
+    private func embedView(_ id: String) -> EmbeddedAttachment {
+        if let known = embedViews[id] { return known }
+        let view = EmbeddedAttachment(id: id, file: attachment(id))
+        view.onClick = { [weak self] in self?.openAttachment(id) }
+        embedViews[id] = view
+        addSubview(view)
+        return view
+    }
+
+    /// Puts each attachment over its box, and takes away those no longer shown.
+    private func placeAttachments() {
+        guard let layout = layoutManager, let container = textContainer else { return }
+        layout.ensureLayout(for: container)
+        let shown = Set(embeds.map(\.id))
+        for (id, view) in embedViews where !shown.contains(id) {
+            view.removeFromSuperview()
+            embedViews[id] = nil
+        }
+        for embed in embeds {
+            let glyphs = layout.glyphRange(forCharacterRange: NSRange(location: embed.location, length: 1), actualCharacterRange: nil)
+            let box = layout.boundingRect(forGlyphRange: glyphs, in: container)
+            let size = embedded[embed.location] ?? box.size
+            embedViews[embed.id]?.frame = NSRect(
+                x: box.minX + textContainerOrigin.x, y: box.minY + textContainerOrigin.y + 2, width: size.width, height: size.height)
+        }
+    }
+
+    /// The content of an attachment reached this device, or a link changed what it leads to.
+    func reloadAttachments() {
+        for (id, view) in embedViews where view.kind != EmbeddedAttachment(id: id, file: attachment(id)).kind {
+            view.removeFromSuperview()
+            embedViews[id] = nil
+        }
+        restyle()
+    }
+
+    /// E30: a link to the file at the cursor.
+    func insert(link: String) {
+        replace(selectedRange(), with: link)
+        setSelectedRange(NSRange(location: selectedRange().location + (link as NSString).length, length: 0))
+    }
+
+    /// R37: scrolls to the place of a piece of the text and puts the cursor there.
+    func reveal(_ piece: String) {
+        let found = (string as NSString).range(of: piece)
+        guard found.location != NSNotFound else { return }
+        setSelectedRange(NSRange(location: found.location, length: 0))
+        scrollRangeToVisible(found)
+    }
+
+    // MARK: Files
+
+    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        if urls.isEmpty || !isEditable { return super.performDragOperation(sender) }
+        addFiles(urls)
+        return true
     }
 
     // MARK: Glyphs
@@ -514,7 +613,7 @@ class MarkdownTextView: NSTextView, NSLayoutManagerDelegate {
             if concealed.contains(character) {
                 newProperties[i] = .null
                 changed = true
-            } else if cellTabs.contains(character) {
+            } else if embedded[character] != nil || cellTabs.contains(character) {
                 newProperties[i] = .controlCharacter
                 changed = true
             } else if bullets.contains(character) {
@@ -535,13 +634,23 @@ class MarkdownTextView: NSTextView, NSLayoutManagerDelegate {
     func layoutManager(
         _ layoutManager: NSLayoutManager, shouldUse action: NSLayoutManager.ControlCharacterAction, forControlCharacterAt charIndex: Int
     ) -> NSLayoutManager.ControlCharacterAction {
-        cellTabs.contains(charIndex) ? .horizontalTab : action
+        if embedded[charIndex] != nil { return .whitespace }
+        return cellTabs.contains(charIndex) ? .horizontalTab : action
+    }
+
+    /// E14: the box of an attachment: its width. The height of its line comes from the paragraph.
+    func layoutManager(
+        _ layoutManager: NSLayoutManager, boundingBoxForControlGlyphAt glyphIndex: Int, for textContainer: NSTextContainer,
+        proposedLineFragment proposedRect: NSRect, glyphPosition: NSPoint, characterIndex: Int
+    ) -> NSRect {
+        let size = embedded[characterIndex] ?? .zero
+        return NSRect(x: glyphPosition.x, y: 0, width: size.width, height: size.height)
     }
 
     /// Whether a table fits depends on the width, so the note is styled again when that changes.
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
-        if let width = textContainer?.size.width, width != styledWidth, !markdownLayout(text: string).tables.isEmpty { restyle() }
+        if let width = textContainer?.size.width, width != styledWidth, !embeds.isEmpty || !markdownLayout(text: string).tables.isEmpty { restyle() }
     }
 
     // MARK: Drawing

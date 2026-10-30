@@ -169,3 +169,28 @@ private struct MoveSheet: View {
         dismiss()
     }
 }
+
+/// R37: all attachments of notes that are not in the Trash, with their note.
+struct FileList: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let files = model.allFiles()
+        List(files, id: \.file.id) { entry in
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.file.name).fontWeight(.medium).lineLimit(1)
+                Text("\(entry.file.mime) — \(ByteCountFormatter.string(fromByteCount: Int64(entry.file.size), countStyle: .file))")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text(entry.note.shownTitle).font(.callout).foregroundStyle(.secondary).lineLimit(1)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture { model.showInNote(entry.note.id, then: entry.file.id, open: true) }
+            .contextMenu {
+                Button(L("Show in Note")) { model.showInNote(entry.note.id, then: entry.file.id, open: false) }
+            }
+        }
+        .overlay {
+            if files.isEmpty { Text(L("No files")).foregroundStyle(.secondary) }
+        }
+    }
+}

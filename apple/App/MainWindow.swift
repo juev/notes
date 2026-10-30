@@ -11,8 +11,10 @@ struct MainWindow: View {
             Sidebar()
                 .navigationSplitViewColumnWidth(min: 180, ideal: 230)
         } content: {
-            NoteList()
-                .navigationSplitViewColumnWidth(min: 240, ideal: 300)
+            Group {
+                if model.filesOpen { FileList() } else { NoteList() }
+            }
+            .navigationSplitViewColumnWidth(min: 240, ideal: 300)
         } detail: {
             Editor()
         }
@@ -23,7 +25,8 @@ struct MainWindow: View {
     }
 
     private var title: String {
-        switch model.scope {
+        if model.filesOpen { return L("Files") }
+        return switch model.scope {
         case .all: L("All notes")
         case .starred: L("Starred")
         case .archived: L("Archived")

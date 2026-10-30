@@ -29,6 +29,7 @@ struct Editor: View {
                 if !note.locked, !note.deleted { formatBar }
                 Divider()
                 MarkdownEditor(noteId: note.id, editable: !note.locked && !note.deleted, revision: model.textRevision, focus: model.textFocusRequests)
+                if !model.attachments.isEmpty { AttachmentPanel(locked: note.locked) }
             }
             .id(note.id)
             .onAppear {
@@ -49,6 +50,11 @@ struct Editor: View {
                     .labelStyle(.iconOnly)
                     .buttonStyle(.plain)
             }
+            Button(L("Attach File…"), systemImage: "paperclip") {
+                if let id = model.selectedNote { model.attach(IncomingFiles.pick(), to: id) }
+            }
+            .labelStyle(.iconOnly)
+            .buttonStyle(.plain)
             Spacer()
         }
         .foregroundStyle(.secondary)
@@ -156,19 +162,23 @@ struct MarkdownEditor: NSViewRepresentable {
         view.allowsUndo = false
         view.smartTypography = model.settings.smartTypography
         model.activeEditor = view
+        view.attachment = { id in MainActor.assumeIsolated { model.attachment(id) } }
+        view.openAttachment = { id in MainActor.assumeIsolated { model.openAttachment(id) } }
+        view.addFiles = { urls in MainActor.assumeIsolated { model.attach(urls, to: noteId) } }
         view.sharedUndoManager = { [weak model] in MainActor.assumeIsolated { model?.undoManager } }
         view.baseFont = .systemFont(ofSize: NSFont.systemFontSize + 2)
         let model = model
         let noteId = noteId
         view.onEdit = { edit, text in MainActor.assumeIsolated { model.textEdited(noteId, edit, whole: text) } }
         view.openLink = { url in MainActor.assumeIsolated { model.openLink(url) } }
-        view.setText(model.text(of: noteId))
         let scroll = NSScrollView()
         scroll.documentView = view
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
         view.drawsBackground = false
         context.coordinator.focus = focus
+        view.frame.size.width = max(scroll.contentSize.width, 400)
+        view.setText(model.text(of: noteId))
         return scroll
     }
 
@@ -186,5 +196,36 @@ struct MarkdownEditor: NSViewRepresentable {
         }
         guard !model.hasPendingEdits else { return }
         if let edit = TextEdit.between(view.string, model.text(of: noteId)) { view.apply(outside: edit) }
+    }
+}
+
+/// R33: all the attachments of the note; one whose link left the text says so, and can go back
+/// into the text or be deleted.
+struct AttachmentPanel: View {
+    @Environment(AppModel.self) private var model
+    let locked: Bool
+
+    var body: some View {
+        DisclosureGroup(L("Attachments (%d)", model.attachments.count)) {
+            ForEach(model.attachments, id: \.id) { file in
+                HStack {
+                    Button(file.name) { model.openAttachment(file.id) }
+                        .buttonStyle(.plain)
+                        .lineLimit(1)
+                    Text(ByteCountFormatter.string(fromByteCount: Int64(file.size), countStyle: .file)).foregroundStyle(.secondary)
+                    Spacer()
+                    if !model.isInText(file) {
+                        Text(L("Not in the text")).foregroundStyle(.secondary)
+                        if !locked {
+                            Button(L("Insert at Cursor")) { model.activeEditor?.insert(link: AttachmentFiles.link(file)) }
+                            Button(L("Delete")) { model.removeAttachment(file.id) }
+                        }
+                    }
+                }
+                .font(.callout)
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 6)
     }
 }
