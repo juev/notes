@@ -43,6 +43,15 @@ android {
     buildFeatures {
         compose = true
     }
+    // E40: the same font files as the macOS app.
+    androidResources {
+        noCompress += "ttf"
+    }
+    sourceSets {
+        getByName("main") {
+            assets.directories.add("build/generated/fontAssets")
+        }
+    }
     testOptions {
         unitTests.isIncludeAndroidResources = true
     }
@@ -53,6 +62,16 @@ kotlin {
         jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
     }
 }
+
+tasks.withType<Test>().configureEach {
+    systemProperty("jna.library.path", rootDir.resolve("../core/target/debug").absolutePath)
+}
+
+val copyFonts by tasks.registering(Copy::class) {
+    from("../../apple/App/Fonts") { include("*.ttf", "OFL-*.txt") }
+    into(layout.buildDirectory.dir("generated/fontAssets/fonts"))
+}
+tasks.named("preBuild") { dependsOn(copyFonts) }
 
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2026.09.00")
@@ -69,4 +88,6 @@ dependencies {
     implementation("net.java.dev.jna:jna:5.17.0@aar")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.17")
+    // The tests reach the core built for this machine through the same bindings.
+    testImplementation("net.java.dev.jna:jna:5.17.0")
 }

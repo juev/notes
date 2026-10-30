@@ -1,5 +1,7 @@
 package org.evsyukov.notes.ui
 
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -382,6 +384,35 @@ object AppModel {
         touched(id)
         perform<Unit> { it.setTitle(id, title) }
     }
+
+    fun addTag(id: String, tag: String) {
+        touched(id)
+        perform<Unit> { it.addTag(id, tag) }
+    }
+
+    fun removeTag(id: String, tag: String) = perform<Unit> { it.removeTag(id, tag) }
+
+    /** E13: a tapped link: a note opens here, an address in the system. */
+    fun openLink(url: String) {
+        if (url.startsWith("note:")) {
+            val id = url.removePrefix("note:")
+            linkState(id) { state ->
+                when (state) {
+                    NoteLinkState.LIVE -> open(id)
+                    // R52: a tap on a link to a note in the Trash offers to restore it.
+                    NoteLinkState.IN_TRASH -> restoreOffer = id
+                    NoteLinkState.GONE -> {}
+                }
+            }
+        } else {
+            val context = NotesApp.instance
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            runCatching { context.startActivity(intent) }.onFailure { alert = describe(it) }
+        }
+    }
+
+    /** R53: the selection moves into a new note, and a link stays in its place. */
+    fun noteFromSelection(id: String, start: Int, end: Int) = perform<Unit> { it.noteFromSelection(id, start.toUInt(), end.toUInt()) }
 
     // Notes
 
