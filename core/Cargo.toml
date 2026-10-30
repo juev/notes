@@ -30,6 +30,7 @@ hmac = "0.12"
 pulldown-cmark = { version = "0.13", default-features = false }
 roxmltree = "0.20"
 rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
+scraper = "0.29"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

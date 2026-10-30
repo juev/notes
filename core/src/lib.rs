@@ -7,6 +7,7 @@ uniffi::setup_scaffolding!();
 mod backup;
 mod body;
 mod db;
+mod editing;
 mod error;
 mod highlight;
 mod hlc;
@@ -21,6 +22,7 @@ mod tag;
 mod undo;
 
 pub use backup::{Backup, BackupSettings};
+pub use editing::{markdown_format, markdown_indent, markdown_paste, markdown_typed, MarkdownFormat};
 pub use error::{AppError, Result};
 pub use highlight::{code_highlight_acknowledgements, CodeClass};
 pub use log::LogLevel;
