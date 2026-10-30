@@ -14,7 +14,7 @@ struct MainWindow: View {
             NoteList()
                 .navigationSplitViewColumnWidth(min: 240, ideal: 300)
         } detail: {
-            Text(model.startupError ?? "")
+            Editor()
         }
         .navigationTitle(title)
         .onAppear { model.undoManager = undoManager }

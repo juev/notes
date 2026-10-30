@@ -1,0 +1,511 @@
+import AppKit
+
+/// A text view that shows its text as Markdown while it is typed (E10–E16 in docs/specs/editor.md),
+/// after the one of Lists.
+///
+/// The string stays what was typed: the core says which ranges to style, hide
+/// and replace, and this view does it with attributes and at the glyph level,
+/// so nothing but typing and the edits of the core changes the text.
+class MarkdownTextView: NSTextView, NSLayoutManagerDelegate {
+    /// The font of plain text; headings and code are derived from it.
+    var baseFont = NSFont.systemFont(ofSize: NSFont.systemFontSize) {
+        didSet { if baseFont != oldValue { restyle() } }
+    }
+    /// An edit of the text has been made, with the whole text after it.
+    var onEdit: (TextEdit, String) -> Void = { _, _ in }
+    /// Opens the address of a link clicked with ⌘ (E13): the web, mail or a note.
+    var openLink: (URL) -> Void = { NSWorkspace.shared.open($0) }
+    /// The edit `shouldChangeText` let through and `didChangeText` reports.
+    private var coming: TextEdit?
+
+    private var concealed = IndexSet()
+    private var bullets = IndexSet()
+    private var boxes: [(range: NSRange, checked: Bool)] = []
+    private var links: [(range: NSRange, url: String)] = []
+    private var quotes: [NSRange] = []
+    private var rules: [NSRange] = []
+    private var codeBlocks: [NSRange] = []
+    /// E15: the bars that stand for a tab between two cells, and the tables drawn as a grid.
+    private var cellTabs = IndexSet()
+    private var grids: [(header: NSRange, width: CGFloat)] = []
+    private var styledWidth: CGFloat = 0
+    /// The reveal ranges of the spans, with those the selection touches now.
+    private var reveals: [(start: Int, end: Int)] = []
+    private var touchedReveals: [Int] = []
+    private var blocks: [NSRange] = []
+    private var focused = false
+
+    /// TextKit 1: hiding works on glyphs, which TextKit 2 does not expose.
+    func prepare() {
+        layoutManager?.delegate = self
+        isRichText = false
+    }
+
+    func setText(_ text: String) {
+        coming = nil
+        string = text
+        restyle()
+    }
+
+    /// An edit that comes from outside the editor: another device (S40). It keeps the selection on
+    /// the same characters and is nothing the user typed.
+    func apply(outside edit: TextEdit) {
+        guard let storage = textStorage else { return }
+        let selection = selectedRange()
+        let start = edit.moved(selection.location)
+        let end = edit.moved(selection.location + selection.length)
+        storage.replaceCharacters(in: NSRange(location: edit.position, length: edit.deleted), with: edit.inserted)
+        super.setSelectedRanges([NSValue(range: NSRange(location: start, length: end - start))], affinity: .downstream, stillSelecting: false)
+        restyle()
+    }
+
+    /// The edit the text is about to get, as `didChangeText` then reports it.
+    override func shouldChangeText(in range: NSRange, replacementString: String?) -> Bool {
+        let allowed = super.shouldChangeText(in: range, replacementString: replacementString)
+        if allowed, let replacementString {
+            coming = TextEdit(position: range.location, deleted: range.length, inserted: replacementString)
+        }
+        return allowed
+    }
+
+    // MARK: Styling
+
+    override func didChangeText() {
+        super.didChangeText()
+        let edit = coming ?? TextEdit(position: 0, deleted: 0, inserted: "")
+        coming = nil
+        onEdit(edit, string)
+        restyle()
+    }
+
+    override func setSelectedRanges(_ ranges: [NSValue], affinity: NSSelectionAffinity, stillSelecting: Bool) {
+        super.setSelectedRanges(ranges, affinity: affinity, stillSelecting: stillSelecting)
+        if !stillSelecting, focused, touched() != touchedReveals { restyle() }
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        let became = super.becomeFirstResponder()
+        if became { focused = true; restyle() }
+        return became
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned { focused = false; restyle() }
+        return resigned
+    }
+
+    /// The reveal ranges the selection touches, by number. None without the keyboard.
+    private func touched() -> [Int] {
+        guard focused else { return [] }
+        let selection = selectedRange()
+        return reveals.indices.filter { Reveal.touches(selection: selection, start: reveals[$0].start, end: reveals[$0].end) }
+    }
+
+    /// E47: code is 0.9 of the text size.
+    private func code(_ font: NSFont) -> NSFont {
+        NSFont.monospacedSystemFont(ofSize: font.pointSize * 0.9, weight: .regular)
+    }
+
+    /// E3: the colour of a token of code.
+    private static func color(_ kind: CodeClass) -> NSColor {
+        switch kind {
+        case .keyword: .systemPink
+        case .operator: .secondaryLabelColor
+        case .string: .systemRed
+        case .number, .constant: .systemPurple
+        case .comment: .systemGray
+        case .type: .systemTeal
+        case .function: .systemBlue
+        case .tag: .systemBlue
+        case .attribute: .systemOrange
+        case .property: .systemIndigo
+        case .inserted: .systemGreen
+        case .deleted: .systemRed
+        case .heading: .systemBlue
+        case .markup: .secondaryLabelColor
+        }
+    }
+
+    private func derived(_ font: NSFont, _ traits: NSFontDescriptor.SymbolicTraits, size: CGFloat? = nil) -> NSFont {
+        let descriptor = font.fontDescriptor.withSymbolicTraits(font.fontDescriptor.symbolicTraits.union(traits))
+        return NSFont(descriptor: descriptor, size: size ?? font.pointSize) ?? font
+    }
+
+    private func restyle() {
+        // Attributes set under text that is still being composed would end the composition.
+        guard let storage = textStorage, let layout = layoutManager, !hasMarkedText() else { return }
+        let info = markdownLayout(text: string)
+        let length = storage.length
+        let full = NSRange(location: 0, length: length)
+        let text = storage.string as NSString
+        blocks = info.blocks.map { NSRange(location: Int($0.start), length: Int($0.end - $0.start)) }
+        reveals = info.spans.map { (Int($0.revealStart), Int($0.revealEnd)) }
+        touchedReveals = touched()
+        let selection = selectedRange()
+        let shows = { (start: Int, end: Int) in self.focused && Reveal.touches(selection: selection, start: start, end: end) }
+        let dim = NSColor.tertiaryLabelColor
+        let plain: [NSAttributedString.Key: Any] = [.font: baseFont, .foregroundColor: NSColor.labelColor]
+
+        var hidden = IndexSet(), bullets = IndexSet(), tabs = IndexSet()
+        boxes = []; links = []; quotes = []; rules = []; codeBlocks = []; grids = []
+        styledWidth = textContainer?.size.width ?? 0
+
+        // E15: the tables to draw as a grid, each with the lines of its rows. A table
+        // stays as typed while the cursor is in it, and where it does not start its
+        // line: in a list item or a quote.
+        var tables: [(table: MarkdownTable, lines: [NSRange], rule: NSRange)] = []
+        for table in info.tables {
+            let range = NSRange(location: Int(table.start), length: Int(table.end - table.start))
+            guard NSMaxRange(range) <= length, !shows(range.location, NSMaxRange(range)),
+                  text.lineRange(for: NSRange(location: range.location, length: 0)).location == range.location else { continue }
+            var lines: [NSRange] = []
+            text.enumerateSubstrings(in: range, options: [.byLines, .substringNotRequired]) { _, line, _, _ in lines.append(line) }
+            guard lines.count == table.rows.count + 1 else { continue }
+            tables.append((table, [lines[0]] + lines[2...], lines[1]))
+        }
+        let inGrid = { (range: NSRange) in tables.contains { $0.lines.contains { NSIntersectionRange($0, range).length > 0 } || $0.rule == range } }
+
+        func retrait(_ range: NSRange, _ change: (NSFont) -> NSFont) {
+            storage.enumerateAttribute(.font, in: range) { value, run, _ in
+                if let font = value as? NSFont { storage.addAttribute(.font, value: change(font), range: run) }
+            }
+        }
+        func indent(_ range: NSRange, first: CGFloat, rest: CGFloat) {
+            let paragraph = text.paragraphRange(for: range)
+            let current = storage.attribute(.paragraphStyle, at: paragraph.location, effectiveRange: nil) as? NSParagraphStyle
+            let style = (current?.mutableCopy() as? NSMutableParagraphStyle) ?? NSMutableParagraphStyle()
+            style.firstLineHeadIndent += first
+            style.headIndent += rest
+            storage.addAttribute(.paragraphStyle, value: style, range: paragraph)
+        }
+        /// Markup that is a whole line, a code fence, leaves no empty line behind when hidden.
+        func collapse(_ range: NSRange) {
+            let line = text.lineRange(for: range)
+            let content = text.substring(with: line).trimmingCharacters(in: .newlines)
+            guard content.utf16.count == range.length, NSMaxRange(line) < length || line.location > 0 else { return }
+            let style = NSMutableParagraphStyle()
+            style.maximumLineHeight = 0.01
+            storage.addAttributes([.font: NSFont.systemFont(ofSize: 0.01), .paragraphStyle: style], range: line)
+        }
+        let boxSide = ceil(baseFont.pointSize * 1.05)
+
+        storage.beginEditing()
+        storage.setAttributes(plain, range: full)
+        for span in info.spans {
+            let range = NSRange(location: Int(span.start), length: Int(span.end - span.start))
+            guard NSMaxRange(range) <= length, Int(span.block) < blocks.count else { continue }
+            let shown = shows(Int(span.revealStart), Int(span.revealEnd))
+            switch span.kind {
+            case .heading(let level):
+                // E2, E47: levels 4 to 6 look like level 3.
+                let scale: [CGFloat] = [1.6, 1.35, 1.15, 1.15, 1.15, 1.15]
+                let size = baseFont.pointSize * scale[max(0, min(5, Int(level) - 1))]
+                storage.addAttributes([.font: derived(baseFont, .bold, size: size), .foregroundColor: NSColor.labelColor], range: range)
+            case .strong:
+                retrait(range) { self.derived($0, .bold) }
+            case .emphasis:
+                retrait(range) { self.derived($0, .italic) }
+            case .strikethrough:
+                storage.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue, range: range)
+            case .highlight:
+                storage.addAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.35), range: range)
+            case .code:
+                retrait(range) { self.code($0) }
+                storage.addAttribute(.backgroundColor, value: NSColor.quaternaryLabelColor, range: range)
+            case .codeBlock:
+                retrait(range) { self.code($0) }
+                codeBlocks.append(range)
+            case .token(let kind):
+                storage.addAttribute(.foregroundColor, value: Self.color(kind), range: range)
+            case .tableRow:
+                if !inGrid(range) { retrait(range) { self.code($0) } }
+            case .quote:
+                quotes.append(range)
+                indent(range, first: 12, rest: 12)
+            case .link(let url):
+                links.append((range, url))
+                storage.addAttributes([.foregroundColor: NSColor.linkColor, .underlineStyle: NSUnderlineStyle.single.rawValue], range: range)
+            case .noteLink(let id):
+                links.append((range, "note:\(id)"))
+                storage.addAttributes([.foregroundColor: NSColor.linkColor, .underlineStyle: NSUnderlineStyle.single.rawValue], range: range)
+            case .attachmentLink:
+                // E14: replaced by the attachment in the step of attachments.
+                storage.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor, range: range)
+            case .listMarker(let ordered):
+                if shown, !ordered { storage.addAttribute(.foregroundColor, value: dim, range: range) }
+                if !ordered, !shown, range.length == 1 { bullets.insert(range.location) }
+                // Wrapped lines of an item start under its text, not under its marker. Not
+                // so behind a hidden quote sign: a line that begins with hidden glyphs is
+                // set at the indent of the wrapped ones, and the marker would move.
+                let line = text.lineRange(for: range)
+                if !hidden.contains(line.location) {
+                    let lead = text.substring(with: NSRange(location: line.location, length: NSMaxRange(range) - line.location)) + " "
+                    indent(range, first: 0, rest: (lead as NSString).size(withAttributes: [.font: baseFont]).width)
+                }
+            case .quoteMarker:
+                if shown { storage.addAttribute(.foregroundColor, value: dim, range: range) } else { hidden.insert(integersIn: range.location..<NSMaxRange(range)) }
+            case .checkbox(let checked):
+                // The brackets come back only when the cursor is right at them.
+                let touched = focused && selection.location <= NSMaxRange(range) && range.location <= NSMaxRange(selection)
+                if touched || range.length != 3 {
+                    storage.addAttribute(.foregroundColor, value: dim, range: range)
+                } else {
+                    let mark = NSRange(location: range.location + 1, length: 1)
+                    let width = (text.substring(with: mark) as NSString).size(withAttributes: [.font: baseFont]).width
+                    hidden.insert(range.location)
+                    hidden.insert(range.location + 2)
+                    storage.addAttributes([.font: baseFont, .foregroundColor: NSColor.clear, .kern: boxSide - width], range: mark)
+                    boxes.append((range, checked))
+                }
+            case .rule:
+                if shown {
+                    storage.addAttribute(.foregroundColor, value: dim, range: range)
+                } else {
+                    rules.append(range)
+                    storage.addAttribute(.foregroundColor, value: NSColor.clear, range: range)
+                }
+            case .markup:
+                if shown {
+                    storage.addAttribute(.foregroundColor, value: dim, range: range)
+                } else {
+                    hidden.insert(integersIn: range.location..<NSMaxRange(range))
+                    collapse(range)
+                }
+            }
+        }
+        for (table, lines, rule) in tables {
+            let cells = table.rows.map { $0.cells.map { NSRange(location: Int($0.start), length: Int($0.end - $0.start)) } }
+            let columns = table.columns.count
+            // What the parser made of a row has to lie in its line, in order; otherwise the table stays as typed.
+            let sound = columns > 0 && zip(cells, lines).allSatisfy { row, line in
+                row.count == columns && row.first!.location >= line.location && NSMaxRange(row.last!) <= NSMaxRange(line)
+                    && zip(row, row.dropFirst()).allSatisfy { NSMaxRange($0) <= $1.location }
+            }
+            for (row, header) in zip(cells, table.rows.map(\.header)) where sound && header {
+                row.forEach { cell in retrait(cell) { self.derived($0, .bold) } }
+                storage.addAttribute(.foregroundColor, value: NSColor.labelColor, range: NSUnionRange(row.first!, row.last!))
+            }
+            /// The width of a cell as it is seen: without the markup hidden in it.
+            func width(_ cell: NSRange) -> CGFloat {
+                let seen = NSMutableAttributedString(attributedString: storage.attributedSubstring(from: cell))
+                for index in (0..<cell.length).reversed() where hidden.contains(cell.location + index) {
+                    seen.deleteCharacters(in: NSRange(location: index, length: 1))
+                }
+                return ceil(seen.size().width)
+            }
+            let widths = sound ? cells.map { $0.map(width) } : []
+            let column = (0..<columns).map { index in widths.map { $0[index] }.max() ?? 0 }
+            let gap = ceil(baseFont.pointSize * 1.4)
+            let total = column.reduce(0, +) + gap * CGFloat(max(0, columns - 1))
+            // A grid is not wrapped: a table wider than the note stays as typed.
+            guard sound, styledWidth <= 0 || total <= styledWidth else {
+                for line in lines + [rule] { retrait(line) { self.code($0) } }
+                continue
+            }
+            var stops: [NSTextTab] = [], left: CGFloat = 0
+            for index in 0..<columns {
+                if index > 0 {
+                    switch table.columns[index] {
+                    case .right: stops.append(NSTextTab(textAlignment: .right, location: left + column[index]))
+                    case .center: stops.append(NSTextTab(textAlignment: .center, location: left + column[index] / 2))
+                    default: stops.append(NSTextTab(textAlignment: .left, location: left))
+                    }
+                }
+                left += column[index] + gap
+            }
+            for (number, (row, line)) in zip(cells, lines).enumerated() {
+                hidden.insert(integersIn: line.location..<row[0].location)
+                hidden.insert(integersIn: NSMaxRange(row[columns - 1])..<NSMaxRange(line))
+                for (cell, next) in zip(row, row.dropFirst()) {
+                    let between = NSRange(location: NSMaxRange(cell), length: next.location - NSMaxRange(cell))
+                    let bar = text.range(of: "|", range: between)
+                    for index in between.location..<NSMaxRange(between) {
+                        if index == bar.location { tabs.insert(index) } else { hidden.insert(index) }
+                    }
+                }
+                let style = NSMutableParagraphStyle()
+                style.tabStops = stops
+                style.lineBreakMode = .byClipping
+                style.paragraphSpacing = 3
+                // The first cell has no tab before it: it is moved by the indent of its line.
+                let spare = column[0] - widths[number][0]
+                style.firstLineHeadIndent = table.columns[0] == .right ? spare : table.columns[0] == .center ? spare / 2 : 0
+                storage.addAttribute(.paragraphStyle, value: style, range: text.paragraphRange(for: line))
+            }
+            // The line of dashes takes no room.
+            hidden.insert(integersIn: rule.location..<NSMaxRange(rule))
+            let gone = NSMutableParagraphStyle()
+            gone.maximumLineHeight = 0.01
+            storage.addAttributes([.font: NSFont.systemFont(ofSize: 0.01), .paragraphStyle: gone], range: text.lineRange(for: rule))
+            grids.append((lines[0], total))
+        }
+        storage.endEditing()
+        typingAttributes = plain
+
+        if hidden != concealed || bullets != self.bullets || tabs != cellTabs {
+            concealed = hidden
+            self.bullets = bullets
+            cellTabs = tabs
+            layout.invalidateGlyphs(forCharacterRange: full, changeInLength: 0, actualCharacterRange: nil)
+            layout.invalidateLayout(forCharacterRange: full, actualCharacterRange: nil)
+        }
+        invalidateIntrinsicContentSize()
+        needsDisplay = true
+    }
+
+    // MARK: Glyphs
+
+    func layoutManager(
+        _ layoutManager: NSLayoutManager, shouldGenerateGlyphs glyphs: UnsafePointer<CGGlyph>,
+        properties: UnsafePointer<NSLayoutManager.GlyphProperty>, characterIndexes: UnsafePointer<Int>,
+        font: NSFont, forGlyphRange range: NSRange
+    ) -> Int {
+        var newGlyphs = Array(UnsafeBufferPointer(start: glyphs, count: range.length))
+        var newProperties = Array(UnsafeBufferPointer(start: properties, count: range.length))
+        var changed = false
+        for i in 0..<range.length {
+            let character = characterIndexes[i]
+            if concealed.contains(character) {
+                newProperties[i] = .null
+                changed = true
+            } else if cellTabs.contains(character) {
+                newProperties[i] = .controlCharacter
+                changed = true
+            } else if bullets.contains(character) {
+                var bullet: [UniChar] = [0x2022]
+                var glyph: [CGGlyph] = [0]
+                if CTFontGetGlyphsForCharacters(font as CTFont, &bullet, &glyph, 1) {
+                    newGlyphs[i] = glyph[0]
+                    changed = true
+                }
+            }
+        }
+        guard changed else { return 0 }
+        layoutManager.setGlyphs(newGlyphs, properties: newProperties, characterIndexes: characterIndexes, font: font, forGlyphRange: range)
+        return range.length
+    }
+
+    /// E15: the bar between two cells of a grid acts as a tab to the next column.
+    func layoutManager(
+        _ layoutManager: NSLayoutManager, shouldUse action: NSLayoutManager.ControlCharacterAction, forControlCharacterAt charIndex: Int
+    ) -> NSLayoutManager.ControlCharacterAction {
+        cellTabs.contains(charIndex) ? .horizontalTab : action
+    }
+
+    /// Whether a table fits depends on the width, so the note is styled again when that changes.
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        if let width = textContainer?.size.width, width != styledWidth, !markdownLayout(text: string).tables.isEmpty { restyle() }
+    }
+
+    // MARK: Drawing
+
+    private func rect(of range: NSRange) -> NSRect? {
+        guard let layout = layoutManager, let container = textContainer, NSMaxRange(range) <= (textStorage?.length ?? 0) else { return nil }
+        // Hidden glyphs have no place of their own and would stretch the rectangle.
+        var range = range
+        while range.length > 1, concealed.contains(range.location) { range = NSRange(location: range.location + 1, length: range.length - 1) }
+        let glyphs = layout.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        return layout.boundingRect(forGlyphRange: glyphs, in: container).offsetBy(dx: textContainerOrigin.x, dy: textContainerOrigin.y)
+    }
+
+    private func boxRect(_ range: NSRange) -> NSRect? {
+        guard let mark = rect(of: NSRange(location: range.location + 1, length: 1)) else { return nil }
+        let side = ceil(baseFont.pointSize * 1.05)
+        return NSRect(x: mark.minX, y: mark.midY - side / 2, width: side, height: side)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.tertiaryLabelColor.setFill()
+        for quote in quotes {
+            guard let rect = rect(of: quote) else { continue }
+            NSRect(x: textContainerOrigin.x, y: rect.minY, width: 3, height: rect.height).fill()
+        }
+        for rule in rules {
+            guard let rect = rect(of: rule) else { continue }
+            NSRect(x: textContainerOrigin.x, y: rect.midY, width: bounds.width - textContainerOrigin.x * 2, height: 1).fill()
+        }
+        for grid in grids {
+            guard let rect = rect(of: grid.header) else { continue }
+            NSRect(x: textContainerOrigin.x, y: rect.maxY + 1, width: grid.width, height: 1).fill()
+        }
+        NSColor.quaternaryLabelColor.setFill()
+        for block in codeBlocks {
+            guard let rect = rect(of: block) else { continue }
+            let width = bounds.width - textContainerOrigin.x * 2
+            NSBezierPath(roundedRect: NSRect(x: textContainerOrigin.x, y: rect.minY, width: width, height: rect.height), xRadius: 4, yRadius: 4).fill()
+        }
+        super.draw(dirtyRect)
+        for box in boxes {
+            guard let rect = boxRect(box.range) else { continue }
+            let configuration = NSImage.SymbolConfiguration(pointSize: rect.height * 0.85, weight: .regular)
+                .applying(.init(paletteColors: box.checked ? [.white, .controlAccentColor] : [.secondaryLabelColor]))
+            let name = box.checked ? "checkmark.square.fill" : "square"
+            let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?.withSymbolConfiguration(configuration)
+            image?.draw(in: rect.insetBy(dx: 1, dy: 1))
+        }
+    }
+
+    // MARK: Clicks and Return
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        // E13: a click with ⌘ opens a link; a plain click on it places the cursor.
+        if event.modifierFlags.contains(.command), let url = link(at: point) {
+            openLink(url)
+            return
+        }
+        if !click(at: point) { super.mouseDown(with: event) }
+    }
+
+    /// Toggles the checkbox under the point (E12).
+    @discardableResult
+    func click(at point: NSPoint) -> Bool {
+        guard let box = box(at: point), isEditable else { return false }
+        toggle(box.range, checked: box.checked)
+        return true
+    }
+
+    private func box(at point: NSPoint) -> (range: NSRange, checked: Bool)? {
+        boxes.first { boxRect($0.range)?.insetBy(dx: -2, dy: -2).contains(point) == true }
+    }
+
+    /// The address of the link whose text is under the point.
+    private func link(at point: NSPoint) -> URL? {
+        guard let layout = layoutManager, let container = textContainer else { return nil }
+        let inContainer = NSPoint(x: point.x - textContainerOrigin.x, y: point.y - textContainerOrigin.y)
+        var fraction: CGFloat = 0
+        let glyph = layout.glyphIndex(for: inContainer, in: container, fractionOfDistanceThroughGlyph: &fraction)
+        guard layout.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: container).contains(inContainer) else { return nil }
+        let character = layout.characterIndexForGlyph(at: glyph)
+        return links.first { NSLocationInRange(character, $0.range) }.flatMap { URL(string: $0.url) }
+    }
+
+    private func toggle(_ range: NSRange, checked: Bool) {
+        replace(NSRange(location: range.location + 1, length: 1), with: checked ? " " : "x")
+    }
+
+    /// An edit the way typing makes one, so that Undo takes it back.
+    func replace(_ range: NSRange, with text: String) {
+        guard shouldChangeText(in: range, replacementString: text) else { return }
+        textStorage?.replaceCharacters(in: range, with: text)
+        didChangeText()
+    }
+
+    #if DEBUG
+    /// What a person would see, for the debug script: the text without the hidden characters.
+    var debugSeen: String {
+        String(decoding: Array(string.utf16).enumerated().compactMap { index, unit -> UInt16? in
+            if concealed.contains(index) { return nil }
+            if bullets.contains(index) { return 0x2022 }
+            return unit
+        }, as: UTF16.self)
+    }
+
+    /// The cursor goes to this offset, as a click there would put it.
+    func debugCaret(_ offset: Int) {
+        setSelectedRange(NSRange(location: min(offset, (string as NSString).length), length: 0))
+    }
+    #endif
+}
