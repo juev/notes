@@ -254,3 +254,52 @@ fn r75_deleting_a_folder_is_one_step_and_one_undo_brings_back_the_folder_and_its
     assert!(view(&d, Scope::Trash).is_empty());
     assert_eq!(view(&d, Scope::Folder { id: sub.id }), ["во вложенной"]);
 }
+
+#[test]
+fn r75_redo_puts_back_what_undo_took_and_a_new_action_ends_it() {
+    let d = device();
+    let note = add(&d, "заметка");
+    d.set_starred(note.id.clone(), true).unwrap();
+    d.undo().unwrap();
+    assert!(!d.get_note(note.id.clone()).unwrap().starred);
+    assert!(d.can_redo());
+    assert_eq!(d.redo().unwrap(), 1);
+    assert!(d.get_note(note.id.clone()).unwrap().starred);
+    assert!(!d.can_redo());
+    // And undo takes it back again.
+    d.undo().unwrap();
+    assert!(!d.get_note(note.id.clone()).unwrap().starred);
+    d.redo().unwrap();
+    assert!(d.get_note(note.id.clone()).unwrap().starred);
+    d.undo().unwrap();
+    d.set_pinned(note.id.clone(), true).unwrap();
+    assert!(!d.can_redo(), "a new action ends what could be put again");
+    assert_eq!(d.redo().unwrap(), 0);
+}
+
+#[test]
+fn r75_redo_of_a_deleted_folder_deletes_it_again() {
+    let d = device();
+    let folder = new_folder(&d, "Папка", None);
+    add_in(&d, "в папке", &folder);
+    d.delete_folder(folder.id.clone()).unwrap();
+    d.undo().unwrap();
+    assert_eq!(d.folders().unwrap().len(), 1);
+    d.redo().unwrap();
+    assert!(d.folders().unwrap().is_empty());
+    assert_eq!(view(&d, Scope::Trash), ["в папке"]);
+}
+
+#[test]
+fn r75_a_note_made_undone_and_redone_is_back() {
+    let d = device();
+    let source = add(&d, "исходная");
+    d.set_text(source.id.clone(), "тема\nтекст\nдальше".into()).unwrap();
+    let made = d.note_from_selection(source.id.clone(), 0, 10).unwrap();
+    let linked = d.get_text(source.id.clone()).unwrap();
+    d.undo().unwrap();
+    assert_eq!(d.get_text(source.id.clone()).unwrap(), "тема\nтекст\nдальше");
+    d.redo().unwrap();
+    assert_eq!(d.get_text(source.id).unwrap(), linked);
+    assert!(!d.get_note(made.id).unwrap().deleted);
+}

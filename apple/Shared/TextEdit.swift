@@ -23,6 +23,12 @@ struct TextEdit: Equatable {
         return TextEdit(position: start, deleted: a.count - start - tail, inserted: String(decoding: b[start..<(b.count - tail)], as: UTF16.self))
     }
 
+    /// The same edit for a text that `other` has changed meanwhile (S3): both stay.
+    func rebased(over other: TextEdit) -> TextEdit {
+        let start = other.moved(position)
+        return TextEdit(position: start, deleted: max(0, other.moved(position + deleted) - start), inserted: inserted)
+    }
+
     /// Where a position of the text before this edit is in the text after it: behind the edit it moves
     /// with the text, inside what was replaced it goes to the end of the new text (S40).
     func moved(_ offset: Int) -> Int {

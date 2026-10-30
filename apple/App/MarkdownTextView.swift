@@ -45,6 +45,8 @@ class MarkdownTextView: NSTextView, NSLayoutManagerDelegate {
     /// The edit `shouldChangeText` let through and `didChangeText` reports, with what it takes out.
     private var coming: TextEdit?
     private var comingRemoved = ""
+    /// The text before an edit of several ranges.
+    private var textBefore: String?
     /// E25: what the user typed, for ⌘Z. The text view keeps no history of its own.
     private var history = TypingHistory()
     /// An undo or a redo is being applied: it is not new typing.
@@ -116,8 +118,25 @@ class MarkdownTextView: NSTextView, NSLayoutManagerDelegate {
 
     // MARK: Styling
 
+    /// Several ranges at once, Replace All of the find bar: the edit is read off the text afterwards.
+    override func shouldChangeText(inRanges ranges: [NSValue], replacementStrings: [String]?) -> Bool {
+        let allowed = super.shouldChangeText(inRanges: ranges, replacementStrings: replacementStrings)
+        if allowed, ranges.count > 1 {
+            textBefore = string
+        } else if allowed, let range = ranges.first?.rangeValue, let replacement = replacementStrings?.first {
+            coming = TextEdit(position: range.location, deleted: range.length, inserted: replacement)
+            comingRemoved = (string as NSString).substring(with: range)
+        }
+        return allowed
+    }
+
     override func didChangeText() {
         super.didChangeText()
+        if let before = textBefore {
+            textBefore = nil
+            coming = TextEdit.between(before, string)
+            comingRemoved = coming.map { (before as NSString).substring(with: NSRange(location: $0.position, length: $0.deleted)) } ?? ""
+        }
         let edit = coming ?? TextEdit(position: 0, deleted: 0, inserted: "")
         coming = nil
         if !replaying, edit.deleted > 0 || !edit.inserted.isEmpty {
@@ -733,8 +752,11 @@ class MarkdownTextView: NSTextView, NSLayoutManagerDelegate {
 
     /// E30: a link to the file at the cursor.
     func insert(link: String) {
+        let start = selectedRange().location
+        history.close()
         replace(selectedRange(), with: link)
-        setSelectedRange(NSRange(location: selectedRange().location + (link as NSString).length, length: 0))
+        history.close()
+        setSelectedRange(NSRange(location: start + (link as NSString).length, length: 0))
     }
 
     /// R37: scrolls to the place of a piece of the text and puts the cursor there.
