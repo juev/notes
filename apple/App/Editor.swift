@@ -216,6 +216,7 @@ struct MarkdownEditor: NSViewRepresentable {
         view.frame.size.width = max(scroll.contentSize.width, 400)
         apply(typography: view)
         view.setText(model.text(of: noteId))
+        model.editorShows(view.string)
         return scroll
     }
 
@@ -237,7 +238,10 @@ struct MarkdownEditor: NSViewRepresentable {
             view.window?.makeFirstResponder(view)
         }
         guard !model.hasPendingEdits else { return }
-        if let edit = TextEdit.between(view.string, model.text(of: noteId)) { view.apply(outside: edit) }
+        if let edit = TextEdit.between(view.string, model.text(of: noteId)) {
+            view.apply(outside: edit)
+            model.editorShows(view.string)
+        }
     }
 }
 

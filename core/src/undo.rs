@@ -210,7 +210,7 @@ impl History {
     /// is still current, since what it wrote is there again.
     fn restamp(&mut self, moved: &[(String, String)]) {
         let moved: HashMap<&str, &str> = moved.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
-        for step in self.stacks.values_mut().flatten().flatten() {
+        for step in self.stacks.values_mut().chain(self.redos.values_mut()).flatten().flatten() {
             for r in &mut step.registers {
                 if let Some(now) = moved.get(r.written.as_str()) {
                     r.written = (*now).to_string();

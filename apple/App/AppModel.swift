@@ -64,8 +64,9 @@ final class AppModel {
     @ObservationIgnored private var edits = EditCoalescer()
     @ObservationIgnored private var editedNote: String?
     @ObservationIgnored private var editedText = ""
-    /// The text of the core the pending edits were typed over.
+    /// The text of the editor the pending edits were typed over.
     @ObservationIgnored private var editBase = ""
+    @ObservationIgnored private var editorText = ""
     @ObservationIgnored private var editFlush: DispatchWorkItem?
     /// R3: a note made here and not edited yet; it is deleted without going to the Trash when left so.
     @ObservationIgnored private var freshNote: String?
@@ -227,7 +228,8 @@ final class AppModel {
         if editedNote != id { flushEdits() }
         editedNote = id
         editedText = whole
-        if edits.pending == nil { editBase = text(of: id) }
+        if edits.pending == nil { editBase = editorText }
+        editorText = whole
         if let earlier = edits.add(edit) { deliver(earlier, to: id) }
         editFlush?.cancel()
         let work = DispatchWorkItem { [weak self] in MainActor.assumeIsolated { self?.flushEdits() } }
@@ -251,8 +253,15 @@ final class AppModel {
         scheduleSync()
     }
 
-    /// One edit into the core. A sync may have changed the text since the edit was typed: it then
-    /// goes to where its place is now, so that both stay (S3). Says whether that happened.
+    /// What the editor of the open note holds, as it came to be: by its own edits and the ones it
+    /// took from the core. Whatever else the core holds came by sync and the editor has not seen.
+    func editorShows(_ text: String) {
+        editorText = text
+    }
+
+    /// One edit into the core. Its positions are those of the text in the editor; what a sync added
+    /// to the core since, seen or not, moves it to its place now, so that both stay (S3). Says
+    /// whether that happened.
     @discardableResult
     private func deliver(_ edit: TextEdit, to id: String) -> Bool {
         guard let store else { return false }
@@ -263,7 +272,8 @@ final class AppModel {
         } catch {
             alert = describe(error)
         }
-        editBase = text(of: id)
+        // The next edit waiting was typed over this one, in the text of the editor.
+        editBase = edit.applied(to: editBase)
         return other != nil
     }
 
