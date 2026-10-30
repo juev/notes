@@ -1,6 +1,6 @@
 # Notes: design decisions
 
-Status: decisions made on 2026-10-29 in the discussion with the author of the project; the core is being built in stage 1 (copied from Lists, notes and folders in place, note text not yet). Sources: the request of the author of the project, the design of [juev/lists](https://github.com/juev/lists) (its `docs/architecture.md` and `docs/specs/sync.md`), the source of Standard Notes (`standardnotes/app`, branch `main` as of 2026-10-28), a decrypted Standard Notes backup of the author of the project from 2026-10-29, the documentation and source of Automerge, Loro and yrs, the RustSec advisory database, the documentation of jtx Board (links at the end).
+Status: decisions made on 2026-10-29 in the discussion with the author of the project; stage 1 of the core is implemented (copied from Lists, notes and folders, note text on Automerge); the apps, the editor, search, version history and import are not built yet. Sources: the request of the author of the project, the design of [juev/lists](https://github.com/juev/lists) (its `docs/architecture.md` and `docs/specs/sync.md`), the source of Standard Notes (`standardnotes/app`, branch `main` as of 2026-10-28), a decrypted Standard Notes backup of the author of the project from 2026-10-29, the documentation and source of Automerge, Loro and yrs, the RustSec advisory database, the documentation of jtx Board (links at the end).
 
 ## Name
 
