@@ -35,6 +35,8 @@ final class AppModel {
         willSet { flushEdits() }
         didSet { if selectedNote != oldValue, let left = oldValue { dropIfUntouched(left) } }
     }
+    /// The text view of the open note, for the formats of the menu.
+    @ObservationIgnored weak var activeEditor: MarkdownTextView?
     /// Grows when the data was read again, so that an open text compares itself with the core.
     var textRevision = 0
     /// Grows to ask the text of the open note to take the keyboard.

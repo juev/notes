@@ -26,6 +26,7 @@ struct Editor: View {
                 tagRow(note)
                     .padding(.horizontal, 20)
                     .padding(.vertical, 6)
+                if !note.locked, !note.deleted { formatBar }
                 Divider()
                 MarkdownEditor(noteId: note.id, editable: !note.locked && !note.deleted, revision: model.textRevision, focus: model.textFocusRequests)
             }
@@ -39,6 +40,28 @@ struct Editor: View {
             Text(model.startupError ?? L("No note selected")).foregroundStyle(.secondary)
         }
     }
+
+    /// E20: the formats at hand.
+    private var formatBar: some View {
+        HStack(spacing: 10) {
+            ForEach(Self.bar, id: \.0) { symbol, title, format in
+                Button(title, systemImage: symbol) { model.activeEditor?.format(format) }
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.plain)
+            }
+            Spacer()
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 20)
+        .padding(.bottom, 6)
+    }
+
+    private static let bar: [(String, String, MarkdownFormat)] = [
+        ("bold", L("Bold"), .bold), ("italic", L("Italic"), .italic), ("strikethrough", L("Strikethrough"), .strikethrough),
+        ("chevron.left.forwardslash.chevron.right", L("Code"), .code), ("highlighter", L("Highlight"), .highlight), ("link", L("Link"), .link),
+        ("textformat.size", L("Heading 1"), .heading(level: 1)), ("list.bullet", L("Bulleted List"), .bulletList),
+        ("list.number", L("Numbered List"), .numberedList), ("checklist", L("Task List"), .taskList), ("text.quote", L("Quote"), .quote),
+    ]
 
     /// R28: a locked note opens read-only, with the way out.
     private func lockBar(_ note: Note) -> some View {
@@ -129,7 +152,11 @@ struct MarkdownEditor: NSViewRepresentable {
         view.isAutomaticQuoteSubstitutionEnabled = false
         view.isAutomaticDashSubstitutionEnabled = false
         view.isAutomaticTextReplacementEnabled = false
-        view.allowsUndo = true
+        // E25: the view keeps the history of typing itself.
+        view.allowsUndo = false
+        view.smartTypography = model.settings.smartTypography
+        model.activeEditor = view
+        view.sharedUndoManager = { [weak model] in MainActor.assumeIsolated { model?.undoManager } }
         view.baseFont = .systemFont(ofSize: NSFont.systemFontSize + 2)
         let model = model
         let noteId = noteId
@@ -145,9 +172,14 @@ struct MarkdownEditor: NSViewRepresentable {
         return scroll
     }
 
+    static func dismantleNSView(_ scroll: NSScrollView, coordinator: Coordinator) {
+        (scroll.documentView as? MarkdownTextView)?.forgetHistory()
+    }
+
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         guard let view = scroll.documentView as? MarkdownTextView else { return }
         view.isEditable = editable
+        view.smartTypography = model.settings.smartTypography
         if context.coordinator.focus != focus {
             context.coordinator.focus = focus
             view.window?.makeFirstResponder(view)
