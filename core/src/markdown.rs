@@ -11,6 +11,8 @@ use std::ops::Range;
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, LinkType, Options, Parser, Tag};
 
+use crate::highlight::{self, CodeClass};
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum MarkdownKind {
     Heading {
@@ -49,6 +51,10 @@ pub enum MarkdownKind {
         checked: bool,
     },
     Rule,
+    /// A token of the code in a fenced code block, by the language after the fence (E3).
+    Token {
+        class: CodeClass,
+    },
     /// A line of a table as it is typed: monospaced. While the cursor is outside
     /// the table it is drawn as a grid from `MarkdownLayout::tables` (E15).
     TableRow,
@@ -151,7 +157,7 @@ pub fn markdown_layout(text: String) -> MarkdownLayout {
         blocks,
         tables,
         no_spellcheck,
-    } = layout(&text);
+    } = layout(&text, true);
     let units = Utf16::of(&text);
     MarkdownLayout {
         tables: tables
@@ -225,7 +231,7 @@ pub fn markdown_newline(text: String, cursor: u32) -> Option<MarkdownEdit> {
         return None;
     }
     // The parser has the last word: `- - -` is a rule and a `-` in a code block is text.
-    let marked = layout(&text).spans.iter().any(|s| {
+    let marked = layout(&text, false).spans.iter().any(|s| {
         (line_start..line_start + prefix.end.max(1)).contains(&s.range.start)
             && matches!(
                 s.kind,
@@ -525,7 +531,9 @@ struct Parsed {
     no_spellcheck: Vec<Range<usize>>,
 }
 
-fn layout(text: &str) -> Parsed {
+/// `highlight`: whether code blocks get the tokens of their language (E3), which only the layout
+/// shows.
+fn layout(text: &str, highlight: bool) -> Parsed {
     let mut tables: Vec<Table> = Vec::new();
     let mut rows: Vec<(bool, Vec<Range<usize>>)> = Vec::new();
     let mut cells: Vec<Range<usize>> = Vec::new();
@@ -577,6 +585,9 @@ fn layout(text: &str) -> Parsed {
                     _ => {}
                 }
                 close(text, &mut frame, depth, &mut found, &mut leaves, &mut quiet);
+                if highlight {
+                    code_tokens(text, &frame, &mut found);
+                }
                 if let Some(parent) = stack.last_mut() {
                     if is_inline(&frame.tag) {
                         extend(&mut parent.inline, &frame.range);
@@ -825,6 +836,34 @@ fn bare_links(text: &str, range: &Range<usize>, found: &mut Vec<Found>, quiet: &
         }
     }
     quiet.extend(links.into_iter().map(|l| range.start + l.start..range.start + l.end));
+}
+
+/// E3: the tokens of a fenced code block. The parser gives its code as pieces, one per line
+/// without the signs of the quotes and the indentation of the list items around it; the tokens of
+/// the pieces joined are cut back into them.
+fn code_tokens(text: &str, frame: &Frame, found: &mut Vec<Found>) {
+    let Tag::CodeBlock(CodeBlockKind::Fenced(info)) = &frame.tag else {
+        return;
+    };
+    let language = info.split_whitespace().next().unwrap_or_default();
+    let mut code = String::new();
+    let mut pieces: Vec<(usize, usize)> = Vec::new();
+    for piece in &frame.children {
+        pieces.push((code.len(), piece.start));
+        code.push_str(&text[piece.clone()]);
+    }
+    let block = trimmed(text, &frame.range);
+    for (range, class) in highlight::tokens(language, &code) {
+        for (i, &(joined, source)) in pieces.iter().enumerate() {
+            let next = pieces.get(i + 1).map_or(code.len(), |p| p.0);
+            let start = range.start.max(joined);
+            let end = range.end.min(next);
+            if start < end {
+                let piece = source + start - joined..source + end - joined;
+                put(found, piece, MarkdownKind::Token { class }, block.clone());
+            }
+        }
+    }
 }
 
 fn close(
