@@ -151,7 +151,7 @@ class NoteEditText(context: Context) : EditText(context, null, 0, R.style.NoteEd
         isVerticalScrollBarEnabled = true
         // E22: Return in a list item; the core decides the edit.
         filters = arrayOf(InputFilter { source, start, end, dest, dstart, dend ->
-            if (applying || outside || end - start != 1 || source[start] != '\n' || dstart != dend) return@InputFilter null
+            if (applying || replaying || outside || end - start != 1 || source[start] != '\n' || dstart != dend) return@InputFilter null
             val edit = markdownNewline(dest.toString(), dstart.toUInt()) ?: return@InputFilter null
             post { apply(edit) }
             ""
@@ -174,6 +174,7 @@ class NoteEditText(context: Context) : EditText(context, null, 0, R.style.NoteEd
 
     private fun changed(start: Int, removed: String, inserted: String) {
         generation++
+        if (findQuery.isNotEmpty()) post { refreshFind() }
         if (outside) return
         // A keyboard replaces the word it composes at every key: what reaches the core is the key.
         val narrow = TextEdit.between(removed, inserted)?.let { it.copy(position = it.position + start) } ?: return
@@ -378,8 +379,19 @@ class NoteEditText(context: Context) : EditText(context, null, 0, R.style.NoteEd
 
     // Find (R48)
 
+    /** Hears the number of places when the text changed them. */
+    var onFound: (Int) -> Unit = {}
+
+    private var findQuery = ""
+
+    /** The text moved under the places found: they are looked for again. */
+    private fun refreshFind() {
+        if (findQuery.isNotEmpty()) onFound(find(findQuery))
+    }
+
     /** The places of [query], and the one to go to first. */
     fun find(query: String): Int {
+        findQuery = query
         val value = text.toString()
         val places = mutableListOf<IntRange>()
         if (query.isNotEmpty()) {
@@ -410,11 +422,13 @@ class NoteEditText(context: Context) : EditText(context, null, 0, R.style.NoteEd
     }
 
     fun replaceFound(query: String, with: String, all: Boolean) {
+        // The places are read now: an edit may have come since the last time.
+        find(query)
         history.close()
         val places = if (all) found.reversed() else listOfNotNull(found.firstOrNull { it.first == start && it.last + 1 == end })
         places.forEach { text.replace(it.first, it.last + 1, with) }
         history.close()
-        find(query)
+        onFound(find(query))
         if (!all) findStep(true)
     }
 

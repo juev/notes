@@ -135,7 +135,6 @@ object AppModel {
     /** What was typed and has not reached the core yet, the text it was typed over and the whole text it gives. */
     private val edits = EditCoalescer()
     private var editedNote: String? = null
-    private var editedText = ""
     private var editBase = ""
     private var editorText = ""
     private var editFlush: Job? = null
@@ -339,7 +338,6 @@ object AppModel {
         touched(id)
         if (editedNote != id) flushEdits()
         editedNote = id
-        editedText = whole
         if (edits.pending == null) editBase = editorText
         editorText = whole
         val earlier = edits.add(edit)
@@ -370,28 +368,23 @@ object AppModel {
         val id = editedNote ?: return null
         val edit = edits.take() ?: return null
         val base = editBase
-        val whole = editedText
         return {
-            val merged = deliver(edit, base, id)
-            // The core must hold what the editor shows; whatever got past the edits is put right. Not
-            // when a sync changed the text meanwhile: then the core holds both, and the editor follows.
-            if (!merged && runCatching { Repo.store.getText(id) }.getOrNull() != whole) {
-                message { Repo.store.setText(id, whole) }
-            }
+            // Nothing is put right with the whole text: a sync runs beside this, and writing the
+            // string would delete what it just brought. Where the two differ, the editor follows the core.
+            deliver(edit, base, id)
             Repo.changed()
         }
     }
 
     /**
      * One edit into the core. Its positions are those of [base], the text in the editor; what a sync added
-     * to the core since, seen or not, moves it to its place now, so that both stay (S3). Says whether that happened.
+     * to the core since, seen or not, moves it to its place now, so that both stay (S3).
      */
-    private fun deliver(edit: TextEdit, base: String, id: String): Boolean {
+    private fun deliver(edit: TextEdit, base: String, id: String) {
         val store = Repo.store
         val other = runCatching { TextEdit.between(base, store.getText(id)) }.getOrNull()
         val placed = other?.let(edit::rebased) ?: edit
         message { store.spliceUtf16(id, placed.position.toUInt(), placed.deleted.toUInt(), placed.inserted) }
-        return other != null
     }
 
     fun setTitle(id: String, title: String) {

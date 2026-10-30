@@ -13,7 +13,7 @@ import uniffi.notes_core.NewNote
 
 /**
  * R86: what is shared into the app becomes a new note: the text, and each file as an attachment with its
- * link in the text. It shows nothing of its own: the note opens in the main screen.
+ * link in the text. It shows nothing of its own and stays until the files are copied: the note opens in the main screen.
  */
 class ShareActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -27,7 +27,11 @@ class ShareActivity : Activity() {
             val store = Repo.store
             val note = runCatching { store.createNote(NewNote(title, null, emptyList(), text)) }
                 .onFailure { logError("share", "a shared note was not made: ${logged(it)}") }
-                .getOrNull() ?: return@launch
+                .getOrNull()
+            if (note == null) {
+                finish()
+                return@launch
+            }
             val links = uris.mapNotNull { uri ->
                 val file = AttachmentFiles.copyToCache(context, uri) ?: return@mapNotNull null
                 val added = runCatching { store.addAttachment(note.id, file.absolutePath, file.name) }
@@ -41,8 +45,9 @@ class ShareActivity : Activity() {
             }
             Repo.changed()
             startActivity(Intent(context, MainActivity::class.java).putExtra(MainActivity.EXTRA_NOTE, note.id).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            // Only now: the right to read a shared file ends with this activity.
+            finish()
         }
-        finish()
     }
 
     private fun streams(intent: Intent): List<Uri> {

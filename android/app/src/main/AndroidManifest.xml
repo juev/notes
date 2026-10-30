@@ -29,14 +29,14 @@
                 android:resource="@xml/shortcuts" />
         </activity>
 
-        <!-- R86: what is shared into the app becomes a new note. It shows nothing of its own. -->
+        <!-- R86: what is shared into the app becomes a new note. Transparent: it stays while the files are copied. -->
         <activity
             android:name=".ShareActivity"
             android:exported="true"
             android:excludeFromRecents="true"
             android:label="@string/new_note"
             android:taskAffinity=""
-            android:theme="@android:style/Theme.NoDisplay">
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
