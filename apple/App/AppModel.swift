@@ -107,6 +107,8 @@ final class AppModel {
             if let server = read("push", "push settings", opened.pushServer) ?? nil {
                 opened.setPushToken(token: Keychain.load(account: Keychain.pushAccount(server: server)))
             }
+            // S71: the other devices name this one in the history of versions.
+            read("app", "name of the device") { try opened.setDeviceName(name: Host.current().localizedName ?? "Mac") }
             // R95: where a log of events begins for this run.
             let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
             let system = ProcessInfo.processInfo.operatingSystemVersion
@@ -278,6 +280,25 @@ final class AppModel {
         guard let id = selectedNote, let range = activeEditor?.selectedOffsets else { return }
         flushEdits()
         perform(named: L("New Note from Selection")) { _ = try $0.noteFromSelection(id: id, start: range.start, end: range.end) }
+    }
+
+    // MARK: Version history (R40–R43)
+
+    /// Whether the panel of versions of the open note is on show.
+    var historyOpen = false
+
+    func versions(of id: String) -> [Version] {
+        flushEdits()
+        return (try? store?.versions(note: id)) ?? []
+    }
+
+    func versionDiff(_ id: String, _ version: String) -> VersionDiff? {
+        try? store?.versionDiff(note: id, version: version)
+    }
+
+    /// R42: an ordinary edit, one action of undo; the later versions stay.
+    func restoreVersion(_ id: String, _ version: String) {
+        perform(named: L("Restore Version")) { try $0.restoreVersion(note: id, version: version) }
     }
 
     // MARK: Search (R47)

@@ -24,6 +24,7 @@ import SwiftUI
 /// `wait1` (a pause that ends a step of the history of typing), `redo`,
 /// `files` (opens the view of files, `files:off` closes it), `attachments` (prints those of the open note, with whether the text has them),
 /// `find:text` (searches, `find:` ends it), `hits`, `picker` (prints what the picker of links offers), `linked`, `fromselection`, `keycmd:insertNewline:`,
+/// `versions` (prints them and the oldest with what differs), `restoreoldest`, `history` (opens the panel), `panelshot:/path/to.png` (draws the sheet on show),
 /// `attach:/path` (attaches the file to the open note with a link at the cursor),
 /// `corewrite:5,text` (an edit of the core under the open editor, as a sync brings one),
 /// `newnote` (the way ⌘N does), `newentry`, `undo`, `importsn:/path` (imports a backup of Standard Notes).
@@ -221,6 +222,23 @@ enum DebugScript {
         case "keycmd":
             // A command of the text, as a key would send it: moveDown:, insertNewline: …
             editor?.doCommand(by: NSSelectorFromString(argument))
+        case "versions":
+            guard let id = model.selectedNote else { return }
+            let versions = model.versions(of: id)
+            print("debug: versions \(versions.map { "\($0.device) +\($0.added) -\($0.removed)" })")
+            if let last = versions.last, let diff = model.versionDiff(id, last.id) {
+                print("debug: oldest \(diff.text.debugDescription) changed \(diff.changed.map { "\($0.start)..<\($0.end)" }) removed at \(diff.removedAt)")
+            }
+        case "restoreoldest":
+            if let id = model.selectedNote, let last = model.versions(of: id).last { model.restoreVersion(id, last.id) }
+        case "history": model.historyOpen = true
+        case "panelshot":
+            // The sheet on show, drawn into a file.
+            guard let sheet = NSApp.windows.first(where: { $0.isSheet }) ?? target?.attachedSheet,
+                  let view = sheet.contentView, let image = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return print("debug: no sheet") }
+            view.cacheDisplay(in: view.bounds, to: image)
+            try? image.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: argument))
+            print("debug: sheet drawn")
         case "files": model.filesOpen = argument != "off"
         case "attachments":
             print("debug: attachments \(model.attachments.map { "\($0.name) \(model.isInText($0) ? "in the text" : "not in the text")" })")
