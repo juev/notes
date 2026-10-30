@@ -1,6 +1,6 @@
 # Notes: one core, apps on top of it. See README.md.
 
-.PHONY: test lint deny fmt
+.PHONY: test lint deny fmt apple apple-run apple-test apple-lint
 
 # --locked: a lockfile that no longer matches Cargo.toml is an error here
 # instead of being rewritten on the way.
@@ -16,3 +16,18 @@ deny:
 
 fmt:
 	cd core && cargo fmt
+
+# The macOS app (apple/): the core, its Swift bindings, the Xcode project and the build.
+apple:
+	./scripts/build-apple-app.sh Debug
+
+apple-run: apple
+	open apple/build/Build/Products/Debug/Notes.app
+
+# The tests in apple/Tests run without starting the app.
+apple-test:
+	NOTES_XCODE_ACTION=test ./scripts/build-apple-app.sh Debug
+
+# SwiftLint with the settings in apple/.swiftlint.yml.
+apple-lint:
+	cd apple && swiftlint lint --strict --quiet

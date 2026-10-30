@@ -1,0 +1,19 @@
+# SwiftLint for the macOS app and its share extension (make apple-lint). The rules that are off
+# measure size or naming, or ask for a layout the code does not use; with them on, the run would
+# report lines that are written so on purpose and find nothing. As in Lists.
+included:
+  - App
+  - Shared
+  - Tests
+disabled_rules:
+  - cyclomatic_complexity
+  - file_length
+  - function_body_length
+  - function_parameter_count
+  - identifier_name
+  - large_tuple
+  - line_length
+  - multiple_closures_with_trailing_closure
+  - statement_position
+  - trailing_comma
+  - type_body_length

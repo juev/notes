@@ -1,5 +1,10 @@
 # Rust
 core/target/
+
+# The macOS app: generated bindings, project and build
+apple/Generated/
+apple/Notes.xcodeproj/
+apple/build/
 .DS_Store
 
 # The global ignore of the author hides AGENTS.md; this repository keeps it.
