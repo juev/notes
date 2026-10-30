@@ -26,6 +26,7 @@ import SwiftUI
 /// `find:text` (searches, `find:` ends it), `hits`, `picker` (prints what the picker of links offers), `linked`, `fromselection`, `keycmd:insertNewline:`,
 /// `versions` (prints them and the oldest with what differs), `restoreoldest`, `history` (opens the panel), `panelshot:/path/to.png` (draws the sheet on show),
 /// `set:font=Literata` (also `mono`, `lineheight`, `spacing`, `align=justify`, `hyphenate=on`, `size`, `column`), `settingsshot:/path/to.png` (with the tab of `settingsTab`),
+/// `importfull:/backup|/folder of files`, `exportall:/dir`, `exportjson:/dir`, `exporthtml:/dir`, `exportpdf:/file.pdf`,
 /// `attach:/path` (attaches the file to the open note with a link at the cursor),
 /// `corewrite:5,text` (an edit of the core under the open editor, as a sync brings one),
 /// `newnote` (the way ⌘N does), `newentry`, `undo`, `importsn:/path` (imports a backup of Standard Notes).
@@ -269,6 +270,24 @@ enum DebugScript {
                 print("debug: settings drawn")
             }
             window.close()
+        case "importfull":
+            // A backup the way File → Import… takes it: path|files folder.
+            let (path, files) = cut(argument, "|")
+            model.importBackup(URL(fileURLWithPath: path), filesDir: files.isEmpty ? nil : URL(fileURLWithPath: files), options: ImportOptions(underOneFolder: false, collectUnlinkedFiles: true))
+            try? await Task.sleep(for: .seconds(1))
+            print("debug: report \(model.importReport ?? "none")")
+        case "exportall":
+            print("debug: exported \(String(describing: try? model.store?.exportMarkdown(scope: .all, dir: argument)))")
+        case "exportjson":
+            print("debug: exported \(String(describing: try? model.store?.exportJson(dir: argument, withAttachments: true)))")
+        case "exporthtml":
+            if let id = model.selectedNote { print("debug: html \(String(describing: try? model.store?.exportHtml(id: id, dir: argument, embedAttachments: true)))") }
+        case "exportpdf":
+            guard let id = model.selectedNote, let store = model.store else { return }
+            var finished = false
+            model.savePdf(of: id, to: URL(fileURLWithPath: argument), paper: PDFExport.a4, store: store) { finished = true }
+            for _ in 0..<100 where !finished { try? await Task.sleep(for: .milliseconds(100)) }
+            print("debug: pdf \(finished), alert \(model.alert ?? "none")")
         case "files": model.filesOpen = argument != "off"
         case "attachments":
             print("debug: attachments \(model.attachments.map { "\($0.name) \(model.isInText($0) ? "in the text" : "not in the text")" })")

@@ -32,6 +32,30 @@ struct AppCommands: Commands {
             if model.folderOfScope?.daily == true {
                 Button(L("New Entry for Today")) { model.newEntryForToday() }
             }
+            Divider()
+            Button(L("Import…")) { model.chooseBackup() }
+            Menu(L("Export")) {
+                Button(L("This Note as Markdown…")) { model.selectedNote.map { model.exportMarkdown(.note(id: $0)) } }
+                    .disabled(model.selectedNote == nil)
+                Button(L("This Folder as Markdown…")) { model.folderOfScope.map { model.exportMarkdown(.folder(id: $0.id)) } }
+                    .disabled(model.folderOfScope == nil)
+                Button(L("All Notes as Markdown…")) { model.exportMarkdown(.all) }
+                Divider()
+                Button(L("This Note as HTML…")) { model.exportHtml(embed: true) }
+                    .disabled(model.selectedNote == nil)
+                Button(L("This Note as HTML with Files Beside It…")) { model.exportHtml(embed: false) }
+                    .disabled(model.selectedNote == nil)
+                Button(L("This Note as PDF (A4)…")) { model.exportPdf(paper: PDFExport.a4) }
+                    .disabled(model.selectedNote == nil)
+                Button(L("This Note as PDF (Letter)…")) { model.exportPdf(paper: PDFExport.letter) }
+                    .disabled(model.selectedNote == nil)
+                Divider()
+                Button(L("Everything as JSON…")) { model.exportJson(withAttachments: false) }
+                Button(L("Everything as JSON with Attachments…")) { model.exportJson(withAttachments: true) }
+            }
+        }
+        CommandGroup(replacing: .appInfo) {
+            Button(L("About Notes")) { model.showAbout() }
         }
         CommandGroup(after: .pasteboard) {
             // E23: as it is, without the conversion of rich text.

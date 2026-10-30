@@ -1,6 +1,12 @@
 import AppKit
 import Observation
 
+/// A URL for a sheet.
+struct IdentifiedURL: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
 /// The state of the app and its way to the core. Core calls are local SQLite queries and run on the
 /// main thread; only sync, which talks to the network, runs in the background. As in Lists.
 @MainActor
@@ -276,6 +282,125 @@ final class AppModel {
         } else {
             NSWorkspace.shared.open(url)
         }
+    }
+
+    // MARK: Import and export
+
+    /// R65: the backup chosen, while its sheet is on show.
+    var importing: IdentifiedURL?
+    /// I12: the report of the last import, while it is on show.
+    var importReport: String?
+    /// An import or an export is running.
+    var working = false
+
+    func chooseBackup() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = true
+        panel.message = L("Choose a decrypted backup of Standard Notes: a zip, its folder or its top file")
+        if panel.runModal() == .OK, let url = panel.url { importing = IdentifiedURL(url: url) }
+    }
+
+    /// I2: one action of undo. It runs off the main thread: the files of a backup may be large.
+    func importBackup(_ url: URL, filesDir: URL?, options: ImportOptions) {
+        guard let store else { return }
+        flushEdits()
+        working = true
+        let before = store.undoRevision()
+        Task.detached(priority: .userInitiated) {
+            let result = Result { try store.importStandardNotes(path: url.path, filesDir: filesDir?.path, options: options) }
+            await MainActor.run {
+                self.working = false
+                switch result {
+                case .success(let report):
+                    self.importReport = report.text
+                    if store.undoRevision() != before {
+                        self.undoManager?.registerUndo(withTarget: self) { model in model.perform { _ = try $0.undo() } }
+                        self.undoManager?.setActionName(L("Import"))
+                    }
+                case .failure(let error): self.alert = describe(error)
+                }
+                self.reload()
+                self.scheduleSync()
+            }
+        }
+    }
+
+    /// R60: the open note, the open folder or all notes, into a chosen folder.
+    func exportMarkdown(_ scope: ExportScope) {
+        guard let store, let dir = ImportSheet.pickFolder() else { return }
+        flushEdits()
+        run { try store.exportMarkdown(scope: scope, dir: dir.path) }
+    }
+
+    /// R62: everything as JSON, with or without the attachments.
+    func exportJson(withAttachments: Bool) {
+        guard let store, let dir = ImportSheet.pickFolder() else { return }
+        flushEdits()
+        run { try store.exportJson(dir: dir.path, withAttachments: withAttachments) }
+    }
+
+    private func run(_ export: @escaping @Sendable () throws -> ExportReport) {
+        working = true
+        Task.detached(priority: .userInitiated) {
+            let result = Result { try export() }
+            await MainActor.run {
+                self.working = false
+                switch result {
+                case .success(let report):
+                    self.alert = L("Exported %d notes and %d attachments.", Int(report.notes), Int(report.attachments))
+                        + (report.missing.isEmpty ? "" : "\n" + L("Not on this device: %@", report.missing.joined(separator: ", ")))
+                case .failure(let error): self.alert = describe(error)
+                }
+            }
+        }
+    }
+
+    /// R61: the open note as HTML, its attachments embedded or next to it.
+    func exportHtml(embed: Bool) {
+        guard let store, let id = selectedNote, let dir = ImportSheet.pickFolder() else { return }
+        flushEdits()
+        do {
+            alert = L("Saved as %@.", URL(fileURLWithPath: try store.exportHtml(id: id, dir: dir.path, embedAttachments: embed)).lastPathComponent)
+        } catch {
+            alert = describe(error)
+        }
+    }
+
+    /// R61: the open note as a PDF of this paper.
+    func exportPdf(paper: NSSize) {
+        guard let store, let id = selectedNote, let note = openNote else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = note.shownTitle + ".pdf"
+        guard panel.runModal() == .OK, let target = panel.url else { return }
+        savePdf(of: id, to: target, paper: paper, store: store)
+    }
+
+    func savePdf(of id: String, to target: URL, paper: NSSize, store: Store, done: @escaping () -> Void = {}) {
+        flushEdits()
+        do {
+            let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            let html = try store.exportHtml(id: id, dir: dir.path, embedAttachments: true)
+            PDFExport.run(html: URL(fileURLWithPath: html), to: target, paper: paper) { [weak self] error in
+                try? FileManager.default.removeItem(at: dir)
+                if let error { self?.alert = describe(error) }
+                done()
+            }
+        } catch {
+            alert = describe(error)
+            done()
+        }
+    }
+
+    /// E3, E40: what the licenses of the syntaxes and the fonts ask to show.
+    func showAbout() {
+        let fonts = ["iawriter", "inter", "jetbrainsmono", "literata"].compactMap { name in
+            Bundle.main.url(forResource: "OFL-\(name)", withExtension: "txt", subdirectory: "Fonts").flatMap { try? String(contentsOf: $0, encoding: .utf8) }
+        }
+        let text = ([L("Fonts")] + fonts + [L("Syntaxes of code"), codeHighlightAcknowledgements()]).joined(separator: "\n\n")
+        NSApp.orderFrontStandardAboutPanel(options: [
+            .credits: NSAttributedString(string: text, attributes: [.font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize), .foregroundColor: NSColor.labelColor]),
+        ])
     }
 
     // MARK: Settings

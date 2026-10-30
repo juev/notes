@@ -19,6 +19,13 @@ struct MainWindow: View {
             Editor()
         }
         .navigationTitle(title)
+        .sheet(item: $model.importing) { chosen in ImportSheet(backup: chosen.url) }
+        .sheet(item: Binding(get: { model.importReport.map(IdentifiedText.init) }, set: { model.importReport = $0?.text })) { report in
+            ImportReportSheet(text: report.text)
+        }
+        .overlay(alignment: .bottom) {
+            if model.working { ProgressView().controlSize(.small).padding(8) }
+        }
         .searchable(text: $model.search, placement: .toolbar, prompt: L("Search"))
         .alert(L("This note is in the Trash"), isPresented: Binding(get: { model.restoreOffer != nil }, set: { if !$0 { model.restoreOffer = nil } })) {
             Button(L("Restore")) {
@@ -48,4 +55,9 @@ struct MainWindow: View {
         case .filter(let id): model.filters.first { $0.id == id }?.name ?? "Notes"
         }
     }
+}
+
+private struct IdentifiedText: Identifiable {
+    let text: String
+    var id: String { text }
 }
