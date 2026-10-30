@@ -28,6 +28,29 @@ struct AppCommands: Commands {
                 Button(L("New Entry for Today")) { model.newEntryForToday() }
             }
         }
+        CommandGroup(after: .pasteboard) {
+            // E23: as it is, without the conversion of rich text.
+            Button(L("Paste as Plain Text")) { NSApp.sendAction(#selector(NSTextView.pasteAsPlainText(_:)), to: nil, from: nil) }
+                .keyboardShortcut("v", modifiers: [.command, .option, .shift])
+        }
+        CommandMenu(L("Format")) {
+            format(L("Bold"), .bold, "b")
+            format(L("Italic"), .italic, "i")
+            format(L("Strikethrough"), .strikethrough, "x", [.command, .shift])
+            format(L("Code"), .code, "e")
+            format(L("Highlight"), .highlight, "h", [.command, .shift])
+            format(L("Link"), .link, "k")
+            Divider()
+            format(L("Heading 1"), .heading(level: 1), "1")
+            format(L("Heading 2"), .heading(level: 2), "2")
+            format(L("Heading 3"), .heading(level: 3), "3")
+            format(L("Plain Paragraph"), .paragraph, "0")
+            Divider()
+            format(L("Bulleted List"), .bulletList, "8", [.command, .shift])
+            format(L("Numbered List"), .numberedList, "7", [.command, .shift])
+            format(L("Task List"), .taskList, "9", [.command, .shift])
+            format(L("Quote"), .quote, ".", [.command, .shift])
+        }
         CommandGroup(replacing: .undoRedo) {
             // R75: the actions of the core, or the typing of the field that has the keyboard (E25).
             Button(L("Undo")) { model.undoManager?.undo() }
@@ -35,6 +58,12 @@ struct AppCommands: Commands {
             Button(L("Redo")) { model.undoManager?.redo() }
                 .keyboardShortcut("z", modifiers: [.command, .shift])
         }
+    }
+
+    /// E20: a format with its shortcut.
+    private func format(_ title: String, _ format: MarkdownFormat, _ key: KeyEquivalent, _ modifiers: EventModifiers = .command) -> some View {
+        Button(title) { model.activeEditor?.format(format) }
+            .keyboardShortcut(key, modifiers: modifiers)
     }
 }
 

@@ -18,7 +18,10 @@ import SwiftUI
 /// `delfolder:Parent/Name` (prints the number the confirmation names, and deletes), `fold:Parent/Name`, `daily:Parent/Name`,
 /// `sort:title` or `sort:created` or `sort:edited` (with `+asc`), `hide:preview`, `hide:date`,
 /// `focus` (gives the text the keyboard), `caret:5`, `cursor` (prints the place of the cursor), `seen` (prints the text without what is hidden),
-/// `typein:text` (types into the editor), `text` (prints the text in the core), `flush` (sends what is typed to the core),
+/// `typein:text` (types into the editor, `␠` for a space at an end of the text), `text` (prints the text in the core), `flush` (sends what is typed to the core),
+/// `format:bold` (also `italic`, `strike`, `code`, `highlight`, `link`, `h1`, `h2`, `p`, `bullets`, `numbers`, `tasks`, `quote`), `select:2,6`,
+/// `enter`, `tab`, `backtab` (as those keys in the text), `pastehtml:<b>x</b>` and `pasteurl:https://…` (paste from a pasteboard of the script),
+/// `wait1` (a pause that ends a step of the history of typing), `redo`,
 /// `corewrite:5,text` (an edit of the core under the open editor, as a sync brings one),
 /// `newnote` (the way ⌘N does), `newentry`, `undo`, `importsn:/path` (imports a backup of Standard Notes).
 /// With `NOTES_DEBUG_DIR=/folder` the run has its data and settings in that folder. With
@@ -176,7 +179,7 @@ enum DebugScript {
         case "flush": model.flushEdits()
         case "typein":
             // Text into the editor the way typing does.
-            editor?.insertText(argument, replacementRange: editor?.selectedRange() ?? NSRange())
+            editor?.insertText(argument.replacingOccurrences(of: "␠", with: " "), replacementRange: editor?.selectedRange() ?? NSRange())
         case "corewrite":
             // An edit of the core under the open editor, as a sync brings one: position,text.
             let (position, text) = cut(argument, ",")
@@ -184,6 +187,27 @@ enum DebugScript {
                 try? model.store?.spliceUtf16(id: id, pos: UInt32(position) ?? 0, deleteLen: 0, insert: text)
                 model.reload()
             }
+        case "format":
+            let formats: [String: MarkdownFormat] = [
+                "bold": .bold, "italic": .italic, "strike": .strikethrough, "code": .code, "highlight": .highlight, "link": .link,
+                "h1": .heading(level: 1), "h2": .heading(level: 2), "p": .paragraph, "bullets": .bulletList, "numbers": .numberedList,
+                "tasks": .taskList, "quote": .quote,
+            ]
+            formats[argument].map { editor?.format($0) }
+        case "select":
+            let (from, to) = cut(argument, ",")
+            editor?.setSelectedRange(NSRange(location: Int(from) ?? 0, length: (Int(to) ?? 0) - (Int(from) ?? 0)))
+        case "enter": editor?.insertNewline(nil)
+        case "tab": editor?.insertTab(nil)
+        case "backtab": editor?.insertBacktab(nil)
+        case "pastehtml", "pasteurl":
+            // A pasteboard of its own: the one of the person at the Mac stays as it is.
+            let pasteboard = NSPasteboard(name: NSPasteboard.Name("org.evsyukov.notes.debug"))
+            pasteboard.clearContents()
+            pasteboard.setString(argument, forType: name == "pastehtml" ? .html : .string)
+            print("debug: pasted \(editor?.paste(from: pasteboard) ?? false)")
+        case "wait1": try? await Task.sleep(for: .seconds(TypingHistory.pause + 0.1))
+        case "redo": model.undoManager?.redo()
         case "cursor": print("debug: cursor \(editor?.selectedRange().location ?? -1)")
         case "newnote": model.newNote()
         case "newentry": model.newEntryForToday()

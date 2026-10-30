@@ -15,8 +15,21 @@ class MarkdownTextView: NSTextView, NSLayoutManagerDelegate {
     var onEdit: (TextEdit, String) -> Void = { _, _ in }
     /// Opens the address of a link clicked with ⌘ (E13): the web, mail or a note.
     var openLink: (URL) -> Void = { NSWorkspace.shared.open($0) }
-    /// The edit `shouldChangeText` let through and `didChangeText` reports.
+    /// The undo manager of the window as SwiftUI gives it to the model: typing and the actions of the
+    /// core are in one history.
+    var sharedUndoManager: () -> UndoManager? = { nil }
+    /// None for the text view itself: it registers its own typing even with `allowsUndo` off, and
+    /// those steps, undone in a text this view has changed, go out of its bounds. E25 is `history`.
+    override var undoManager: UndoManager? { nil }
+    /// E26: whether typing replaces quotes, dashes, dots and arrows.
+    var smartTypography = true
+    /// The edit `shouldChangeText` let through and `didChangeText` reports, with what it takes out.
     private var coming: TextEdit?
+    private var comingRemoved = ""
+    /// E25: what the user typed, for ⌘Z. The text view keeps no history of its own.
+    private var history = TypingHistory()
+    /// An undo or a redo is being applied: it is not new typing.
+    private var replaying = false
 
     private var concealed = IndexSet()
     private var bullets = IndexSet()
@@ -43,14 +56,21 @@ class MarkdownTextView: NSTextView, NSLayoutManagerDelegate {
 
     func setText(_ text: String) {
         coming = nil
+        history = TypingHistory()
         string = text
         restyle()
+    }
+
+    /// E25: the steps of this note leave the undo menu with it.
+    func forgetHistory() {
+        sharedUndoManager()?.removeAllActions(withTarget: self)
     }
 
     /// An edit that comes from outside the editor: another device (S40). It keeps the selection on
     /// the same characters and is nothing the user typed.
     func apply(outside edit: TextEdit) {
         guard let storage = textStorage else { return }
+        history.outside(edit)
         let selection = selectedRange()
         let start = edit.moved(selection.location)
         let end = edit.moved(selection.location + selection.length)
@@ -64,6 +84,7 @@ class MarkdownTextView: NSTextView, NSLayoutManagerDelegate {
         let allowed = super.shouldChangeText(in: range, replacementString: replacementString)
         if allowed, let replacementString {
             coming = TextEdit(position: range.location, deleted: range.length, inserted: replacementString)
+            comingRemoved = (string as NSString).substring(with: range)
         }
         return allowed
     }
@@ -74,8 +95,132 @@ class MarkdownTextView: NSTextView, NSLayoutManagerDelegate {
         super.didChangeText()
         let edit = coming ?? TextEdit(position: 0, deleted: 0, inserted: "")
         coming = nil
+        if !replaying, edit.deleted > 0 || !edit.inserted.isEmpty {
+            let typed = TypedEdit(position: edit.position, removed: comingRemoved, inserted: edit.inserted)
+            if history.record(typed, at: Date()) { registerUndo() }
+        }
         onEdit(edit, string)
         restyle()
+    }
+
+    // MARK: Undo of typing (E25)
+
+    private func registerUndo() {
+        sharedUndoManager()?.registerUndo(withTarget: self) { $0.undoTyping() }
+        sharedUndoManager()?.setActionName(L("Typing"))
+    }
+
+    private func undoTyping() {
+        guard let step = history.popUndo() else { return }
+        replay(step.reversed().map(\.inverse))
+        sharedUndoManager()?.registerUndo(withTarget: self) { $0.redoTyping() }
+    }
+
+    private func redoTyping() {
+        guard let step = history.popRedo() else { return }
+        replay(step.map(\.forward))
+        registerUndo()
+    }
+
+    private func replay(_ edits: [TextEdit]) {
+        replaying = true
+        defer { replaying = false }
+        for edit in edits {
+            replace(NSRange(location: edit.position, length: edit.deleted), with: edit.inserted)
+            setSelectedRange(NSRange(location: edit.position + edit.insertedUnits, length: 0))
+        }
+        scrollRangeToVisible(selectedRange())
+    }
+
+    // MARK: Edits of the core (E21–E23, E26)
+
+    /// Applies an edit of the core as one step of undo, with the selection it asks for.
+    private func apply(_ edit: MarkdownEdit) {
+        history.close()
+        replace(NSRange(location: Int(edit.start), length: Int(edit.end - edit.start)), with: edit.text)
+        let (first, last) = (Int(min(edit.anchor, edit.cursor)), Int(max(edit.anchor, edit.cursor)))
+        setSelectedRange(NSRange(location: first, length: last - first))
+        history.close()
+        scrollRangeToVisible(selectedRange())
+    }
+
+    /// E20, E21: a format on the selection or the word at the cursor.
+    func format(_ format: MarkdownFormat) {
+        guard isEditable, !hasMarkedText() else { return }
+        let selection = selectedRange()
+        let edit = markdownFormat(text: string, start: UInt32(selection.location), end: UInt32(NSMaxRange(selection)), format: format)
+        edit.map(apply)
+    }
+
+    /// E22: Return in a list item or a quote.
+    override func insertNewline(_ sender: Any?) {
+        let selection = selectedRange()
+        if selection.length == 0, !hasMarkedText(), let edit = markdownNewline(text: string, cursor: UInt32(selection.location)) {
+            apply(edit)
+        } else {
+            super.insertNewline(sender)
+        }
+    }
+
+    /// E22: Tab and ⇧Tab change the level of a list item; elsewhere Tab is a tab.
+    override func insertTab(_ sender: Any?) {
+        if !indent(outdent: false) { super.insertTab(sender) }
+    }
+
+    override func insertBacktab(_ sender: Any?) {
+        _ = indent(outdent: true)
+    }
+
+    private func indent(outdent: Bool) -> Bool {
+        let selection = selectedRange()
+        guard let edit = markdownIndent(text: string, start: UInt32(selection.location), end: UInt32(NSMaxRange(selection)), outdent: outdent) else { return false }
+        apply(edit)
+        return true
+    }
+
+    /// E23: rich text comes in as Markdown of the dialect, and an address over a selection as a link.
+    override func paste(_ sender: Any?) {
+        if !paste(from: .general) { super.paste(sender) }
+    }
+
+    /// Whether the core had something to do with what is on the pasteboard.
+    func paste(from pasteboard: NSPasteboard) -> Bool {
+        let selection = selectedRange()
+        guard let edit = markdownPaste(
+            text: string, start: UInt32(selection.location), end: UInt32(NSMaxRange(selection)),
+            plain: pasteboard.string(forType: .string), html: pasteboard.string(forType: .html)) else { return false }
+        apply(edit)
+        return true
+    }
+
+    /// E26: what typing replaces, as a step of its own, so that undo right after it brings back
+    /// what was typed.
+    override func insertText(_ text: Any, replacementRange: NSRange) {
+        super.insertText(text, replacementRange: replacementRange)
+        guard smartTypography, !hasMarkedText(), !replaying else { return }
+        let cursor = selectedRange()
+        if cursor.length == 0, let edit = markdownTyped(text: string, cursor: UInt32(cursor.location)) { apply(edit) }
+    }
+
+    /// E20: the formats in the context menu.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = super.menu(for: event) ?? NSMenu()
+        let formats = NSMenuItem(title: L("Format"), action: nil, keyEquivalent: "")
+        let sub = NSMenu()
+        for (title, format) in FormatItem.all {
+            let item = NSMenuItem(title: title, action: #selector(chooseFormat(_:)), keyEquivalent: "")
+            item.representedObject = FormatItem(format: format)
+            item.target = self
+            sub.addItem(item)
+        }
+        formats.submenu = sub
+        menu.insertItem(formats, at: 0)
+        menu.insertItem(.separator(), at: 1)
+        return menu
+    }
+
+    @objc private func chooseFormat(_ item: NSMenuItem) {
+        (item.representedObject as? FormatItem).map { format($0.format) }
     }
 
     override func setSelectedRanges(_ ranges: [NSValue], affinity: NSSelectionAffinity, stillSelecting: Bool) {
@@ -483,7 +628,9 @@ class MarkdownTextView: NSTextView, NSLayoutManagerDelegate {
     }
 
     private func toggle(_ range: NSRange, checked: Bool) {
+        history.close()
         replace(NSRange(location: range.location + 1, length: 1), with: checked ? " " : "x")
+        history.close()
     }
 
     /// An edit the way typing makes one, so that Undo takes it back.
@@ -508,4 +655,18 @@ class MarkdownTextView: NSTextView, NSLayoutManagerDelegate {
         setSelectedRange(NSRange(location: min(offset, (string as NSString).length), length: 0))
     }
     #endif
+}
+
+/// A format as an object of a menu item.
+final class FormatItem: NSObject {
+    let format: MarkdownFormat
+    init(format: MarkdownFormat) { self.format = format }
+
+    /// E20: the formats in the order of the menus.
+    static let all: [(String, MarkdownFormat)] = [
+        (L("Bold"), .bold), (L("Italic"), .italic), (L("Strikethrough"), .strikethrough), (L("Code"), .code),
+        (L("Highlight"), .highlight), (L("Link"), .link), (L("Heading 1"), .heading(level: 1)), (L("Heading 2"), .heading(level: 2)),
+        (L("Heading 3"), .heading(level: 3)), (L("Plain Paragraph"), .paragraph), (L("Bulleted List"), .bulletList),
+        (L("Numbered List"), .numberedList), (L("Task List"), .taskList), (L("Quote"), .quote),
+    ]
 }

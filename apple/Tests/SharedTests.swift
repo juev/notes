@@ -100,3 +100,53 @@ final class TextEditTests: XCTestCase {
         XCTAssertEqual(edit.moved(9), 12)
     }
 }
+
+/// E25: the undo of typing in steps, with edits from other devices moving its positions.
+final class TypingHistoryTests: XCTestCase {
+    private let start = Date(timeIntervalSince1970: 1000)
+
+    func testAPauseAndAFormatStartANewStep() {
+        var history = TypingHistory()
+        XCTAssertTrue(history.record(TypedEdit(position: 0, removed: "", inserted: "а"), at: start))
+        XCTAssertFalse(history.record(TypedEdit(position: 1, removed: "", inserted: "б"), at: start + 0.5))
+        XCTAssertTrue(history.record(TypedEdit(position: 2, removed: "", inserted: "в"), at: start + 2))
+        history.close()
+        XCTAssertTrue(history.record(TypedEdit(position: 3, removed: "", inserted: "г"), at: start + 2.1))
+        XCTAssertEqual(history.undoStack.map(\.count), [2, 1, 1])
+    }
+
+    func testAnEditBeforeTheTypedTextMovesIt() {
+        // The scenario of the specification: A types, B's edit arrives, undo takes back A's typing.
+        var history = TypingHistory()
+        _ = history.record(TypedEdit(position: 0, removed: "", inserted: "свой текст"), at: start)
+        history.outside(TextEdit(position: 0, deleted: 0, inserted: "ЧУЖОЕ"))
+        XCTAssertEqual(history.popUndo()?.first?.inverse, TextEdit(position: 5, deleted: 10, inserted: ""))
+    }
+
+    func testAnEditAfterTheTypedTextLeavesIt() {
+        var history = TypingHistory()
+        _ = history.record(TypedEdit(position: 0, removed: "", inserted: "аб"), at: start)
+        _ = history.record(TypedEdit(position: 2, removed: "", inserted: "вг"), at: start + 0.1)
+        history.outside(TextEdit(position: 6, deleted: 0, inserted: "ЧУЖОЕ"))
+        XCTAssertEqual(history.popUndo()?.map(\.position), [0, 2])
+    }
+
+    func testAnEditInsideTheTypedTextEndsWhatCanBeTakenBack() {
+        var history = TypingHistory()
+        _ = history.record(TypedEdit(position: 0, removed: "", inserted: "старое"), at: start)
+        _ = history.record(TypedEdit(position: 6, removed: "", inserted: "новое"), at: start + 5)
+        history.outside(TextEdit(position: 2, deleted: 1, inserted: "Х"))
+        XCTAssertEqual(history.undoStack.count, 1, "the newest step stands, the one it overlaps is gone")
+        XCTAssertEqual(history.undoStack.first?.first?.inserted, "новое")
+    }
+
+    func testRedoAppliesAgainAndNewTypingEndsIt() {
+        var history = TypingHistory()
+        _ = history.record(TypedEdit(position: 0, removed: "x", inserted: "y"), at: start)
+        XCTAssertNotNil(history.popUndo())
+        XCTAssertEqual(history.popRedo()?.first?.forward, TextEdit(position: 0, deleted: 1, inserted: "y"))
+        XCTAssertNotNil(history.popUndo())
+        _ = history.record(TypedEdit(position: 0, removed: "", inserted: "z"), at: start + 5)
+        XCTAssertNil(history.popRedo())
+    }
+}
