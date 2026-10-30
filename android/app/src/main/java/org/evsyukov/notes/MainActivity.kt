@@ -1,6 +1,7 @@
 package org.evsyukov.notes
 
 import android.app.Activity
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -51,6 +52,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent { AppTheme { MainScreen() } }
+        openFrom(intent)
 
         // S39: sync when the app comes forward and once a minute while it stays there.
         lifecycleScope.launch {
@@ -63,8 +65,30 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        openFrom(intent)
+    }
+
+    /** R86: the launcher shortcut and the tile make a new note; a shared note opens. */
+    private fun openFrom(intent: Intent?) {
+        if (intent?.action == ACTION_NEW_NOTE) {
+            intent.action = null
+            AppModel.newNote()
+        }
+        intent?.getStringExtra(EXTRA_NOTE)?.let {
+            intent.removeExtra(EXTRA_NOTE)
+            AppModel.open(it)
+        }
+    }
+
     override fun onStop() {
         super.onStop()
         AppModel.flushEditsNow()
+    }
+
+    companion object {
+        const val ACTION_NEW_NOTE = "org.evsyukov.notes.NEW_NOTE"
+        const val EXTRA_NOTE = "note"
     }
 }

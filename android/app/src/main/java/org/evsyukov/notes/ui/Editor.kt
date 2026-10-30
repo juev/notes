@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -52,6 +53,7 @@ import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material.icons.outlined.StarOutline
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -101,6 +103,8 @@ import org.evsyukov.notes.Repo
 import org.evsyukov.notes.editor.EditorColors
 import org.evsyukov.notes.editor.Look
 import org.evsyukov.notes.editor.NoteEditText
+import org.evsyukov.notes.shownTitle
+import uniffi.notes_core.ExportScope
 import uniffi.notes_core.MarkdownFormat
 import uniffi.notes_core.Note
 import uniffi.notes_core.markdownLayout
@@ -116,6 +120,10 @@ fun NoteScreen(id: String) {
     var findOpen by remember { mutableStateOf(false) }
     var moving by remember { mutableStateOf(false) }
     var panelOpen by remember { mutableStateOf(false) }
+    var historyOpen by remember { mutableStateOf(false) }
+    var exportOpen by remember { mutableStateOf(false) }
+    var picked by remember { mutableStateOf<List<Note>>(emptyList()) }
+    var linkedFrom by remember { mutableStateOf<List<Note>>(emptyList()) }
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         AppModel.attach(context, uris, id, view::insertLink)
     }
@@ -123,6 +131,7 @@ fun NoteScreen(id: String) {
 
     LaunchedEffect(id, revision) {
         withContext(Repo.core) { runCatching { Repo.store.getNote(id) }.getOrNull() }?.let { note = it }
+        AppModel.linkedFrom(id) { linkedFrom = it }
     }
     DisposableEffect(view) {
         view.onEdit = { edit, whole -> AppModel.textEdited(id, edit, whole) }
@@ -136,6 +145,11 @@ fun NoteScreen(id: String) {
             val clip = parts.first?.clip
             if (clip != null) AppModel.attach(context, (0 until clip.itemCount).mapNotNull { clip.getItemAt(it).uri }, id, view::insertLink)
             parts.second
+        }
+        // E24: `[[` opens the picker of notes, and what follows narrows it.
+        view.onCursor = {
+            val query = view.linkQuery
+            if (query == null) picked = emptyList() else AppModel.titlesMatching(query.second, id) { picked = it }
         }
         view.onNoteFromSelection = {
             view.selectedOffsets?.let { (start, end) -> AppModel.noteFromSelection(id, start, end) }
@@ -185,7 +199,7 @@ fun NoteScreen(id: String) {
 
     Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().imePadding()) {
         val writing = textFocused && WindowInsets.isImeVisible
-        TopBar(note, { findOpen = true }, { moving = true }, { panelOpen = true })
+        TopBar(note, { findOpen = true }, { moving = true }, { panelOpen = true }, { historyOpen = true }, { exportOpen = true })
         if (locked) note?.let { LockBar(it) }
         if (findOpen) FindBar(view) { findOpen = false }
         // While the text is typed in, it has the screen that is left over the keyboard.
@@ -195,8 +209,15 @@ fun NoteScreen(id: String) {
             HorizontalDivider()
         }
         AndroidView({ view }, Modifier.weight(1f).fillMaxWidth())
+        if (!writing && linkedFrom.isNotEmpty()) LinkedFrom(linkedFrom)
+        if (picked.isNotEmpty() && !locked) NotePicker(picked) { chosen ->
+            view.finishLink(chosen.shownTitle(context.getString(R.string.untitled)), chosen.id)
+            picked = emptyList()
+        }
         if (writing && !locked) FormatBar(view) { pick.launch(arrayOf("*/*")) }
     }
+    if (historyOpen) VersionHistory(id, locked) { historyOpen = false }
+    if (exportOpen) note?.let { ExportDialog(it) { exportOpen = false } }
     AppModel.viewing?.let { file -> AttachmentViewer(file) { AppModel.viewing = null } }
     if (panelOpen) note?.let { AttachmentPanel(it, view) { panelOpen = false } }
     if (moving) {
@@ -223,7 +244,7 @@ private fun editorColors(): EditorColors {
 }
 
 @Composable
-private fun TopBar(note: Note?, onFind: () -> Unit, onMove: () -> Unit, onAttachments: () -> Unit) {
+private fun TopBar(note: Note?, onFind: () -> Unit, onMove: () -> Unit, onAttachments: () -> Unit, onHistory: () -> Unit, onExport: () -> Unit) {
     var menu by remember { mutableStateOf(false) }
     Row(Modifier.fillMaxWidth().height(56.dp), verticalAlignment = Alignment.CenterVertically) {
         IconButton({ AppModel.closeNote() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.back)) }
@@ -249,11 +270,60 @@ private fun TopBar(note: Note?, onFind: () -> Unit, onMove: () -> Unit, onAttach
                 menu = false
                 onAttachments()
             })
+            item(R.string.version_history, onHistory)
+            item(R.string.export, onExport)
             item(if (note.archived) R.string.unarchive else R.string.archive) { AppModel.setFlag(NoteFlag.ARCHIVED, !note.archived, note.id) }
             item(if (note.locked) R.string.unlock else R.string.lock) { AppModel.setFlag(NoteFlag.LOCKED, !note.locked, note.id) }
             item(R.string.move_to, onMove)
             item(R.string.duplicate) { AppModel.duplicate(note.id) }
             item(R.string.delete) { AppModel.trash(note.id) }
+        }
+    }
+}
+
+/** R51: the notes that link to this one. */
+@Composable
+private fun LinkedFrom(notes: List<Note>) {
+    LazyRow(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+        item { Text(stringResource(R.string.linked_from), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        items(notes, key = { it.id }) { note ->
+            TextButton({ AppModel.open(note.id) }) { Text(note.shownTitle(stringResource(R.string.untitled)), maxLines = 1) }
+        }
+    }
+}
+
+/** R50: the notes that `[[` offers, over the keyboard. */
+@Composable
+private fun NotePicker(notes: List<Note>, onChoose: (Note) -> Unit) {
+    LazyRow(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        items(notes, key = { it.id }) { note ->
+            AssistChip({ onChoose(note) }, { Text(note.shownTitle(stringResource(R.string.untitled)), maxLines = 1) })
+        }
+    }
+}
+
+/** R60, R61: the open note to Markdown, HTML and PDF. */
+@Composable
+private fun ExportDialog(note: Note, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val export = rememberExport()
+    val title = note.shownTitle(stringResource(R.string.untitled))
+    MenuDialog(stringResource(R.string.export), onDismiss) {
+        MenuRow(stringResource(R.string.export_markdown)) {
+            onDismiss()
+            export(ExportJob.Markdown(ExportScope.Note(note.id)))
+        }
+        MenuRow(stringResource(R.string.export_html_embedded)) {
+            onDismiss()
+            export(ExportJob.Html(note.id, true))
+        }
+        MenuRow(stringResource(R.string.export_html_files)) {
+            onDismiss()
+            export(ExportJob.Html(note.id, false))
+        }
+        MenuRow(stringResource(R.string.export_pdf)) {
+            onDismiss()
+            AppModel.printPdf(context, note.id, title)
         }
     }
 }

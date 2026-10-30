@@ -84,6 +84,8 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.9.4")
     implementation("androidx.work:work-runtime-ktx:2.10.4")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+    // Talks to the UnifiedPush distributor installed on the device (ntfy, for one).
+    implementation("org.unifiedpush.android:connector:3.3.5")
     // Runtime of the UniFFI bindings to the Rust core.
     implementation("net.java.dev.jna:jna:5.17.0@aar")
     testImplementation("junit:junit:4.13.2")

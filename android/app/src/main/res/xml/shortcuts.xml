@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="new_note"
+        android:enabled="true"
+        android:icon="@drawable/ic_note"
+        android:shortcutShortLabel="@string/new_note">
+        <intent
+            android:action="org.evsyukov.notes.NEW_NOTE"
+            android:targetPackage="org.evsyukov.notes"
+            android:targetClass="org.evsyukov.notes.MainActivity" />
+    </shortcut>
+</shortcuts>
