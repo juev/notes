@@ -516,3 +516,107 @@ fn s28_s30_two_devices_converge_through_an_encrypted_webdav_storage() {
     }
     assert!(seen >= 3, "logs, a snapshot and the content");
 }
+
+/// Every file the server holds under the storage, with its bytes, a snapshot unpacked.
+fn server_files(dav: &Dav) -> Vec<(String, Vec<u8>)> {
+    let mut found = Vec::new();
+    let mut stack = vec![dav.storage()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let mut data = std::fs::read(&path).unwrap();
+            // A snapshot is compressed; a sealed file is not.
+            if data.starts_with(&[0x1f, 0x8b]) {
+                let mut out = Vec::new();
+                std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(&data[..]), &mut out).unwrap();
+                data = out;
+            }
+            found.push((path.to_string_lossy().into_owned(), data));
+        }
+    }
+    found
+}
+
+fn holds(data: &[u8], needle: &[u8]) -> bool {
+    data.windows(needle.len()).any(|w| w == needle)
+}
+
+/// S3, S20, S28: the text of a note and an attachment of 200 000 bytes go through WebDAV, in the
+/// clear and then sealed; the server never holds the title, the text or the hash once sealed.
+#[test]
+fn s3_s28_a_note_with_text_and_a_large_attachment_converges_through_webdav_clear_and_sealed() {
+    let dav = start();
+    let (a, b) = (device(), device());
+    connect(&a, &dav, "secret");
+    connect(&b, &dav, "secret");
+    let title = "заголовок-для-сервера-5521";
+    let secret = "текст заметки для сервера 7710";
+    let t = a
+        .create_note(NewNote {
+            title: title.into(),
+            text: secret.into(),
+            ..NewNote::default()
+        })
+        .unwrap();
+    let src = tempfile::tempdir().unwrap();
+    let file = src.path().join("plan.bin");
+    let bytes: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&file, &bytes).unwrap();
+    let attached = a
+        .add_attachment(t.id.clone(), file.to_string_lossy().into_owned(), None)
+        .unwrap();
+    a.sync_now().unwrap();
+    a.sync_attachments().unwrap();
+    b.sync_now().unwrap();
+    b.sync_attachments().unwrap();
+    assert_eq!(b.get_text(t.id.clone()).unwrap(), secret);
+    let got = b.attachments(t.id.clone()).unwrap();
+    assert_eq!(std::fs::read(got[0].local_path.as_ref().unwrap()).unwrap(), bytes);
+
+    // Edits at the two ends while apart merge through the server.
+    a.splice_utf16(t.id.clone(), 0, 0, "A: ".into()).unwrap();
+    let end = secret.encode_utf16().count() as u32;
+    b.splice_utf16(t.id.clone(), end, 0, " :B".into()).unwrap();
+    a.sync_now().unwrap();
+    b.sync_now().unwrap();
+    a.sync_now().unwrap();
+    let merged = format!("A: {secret} :B");
+    assert_eq!(a.get_text(t.id.clone()).unwrap(), merged);
+    assert_eq!(b.get_text(t.id.clone()).unwrap(), merged);
+
+    // In the clear the server holds the title in the registers.
+    assert!(server_files(&dav).iter().any(|(_, d)| holds(d, title.as_bytes())));
+
+    a.encrypt_storage("фраза-пароль".into()).unwrap();
+    b.set_sync_passphrase(Some("фраза-пароль".into()));
+    b.sync_now().unwrap();
+    b.splice_utf16(t.id.clone(), 0, 0, "после шифрования ".into()).unwrap();
+    b.sync_now().unwrap();
+    a.sync_now().unwrap();
+    assert_eq!(a.get_text(t.id.clone()).unwrap(), format!("после шифрования {merged}"));
+    let c = device();
+    connect(&c, &dav, "secret");
+    c.set_sync_passphrase(Some("фраза-пароль".into()));
+    c.sync_now().unwrap();
+    assert_eq!(c.get_text(t.id.clone()).unwrap(), format!("после шифрования {merged}"));
+
+    let files = server_files(&dav);
+    assert!(files.len() >= 3);
+    for (path, data) in &files {
+        for secret in [title, "текст заметки для сервера", "после шифрования", &attached.sha256]
+        {
+            assert!(!path.contains(secret), "{path}");
+            assert!(!holds(data, secret.as_bytes()), "{path} holds {secret}");
+        }
+        // Whatever holds the texts is sealed: `vault.json`, the empty marks and the server's own files apart.
+        let name = path.rsplit('/').next().unwrap();
+        if name == "vault.json" || name.ends_with(".snap") || name.starts_with('.') {
+            continue;
+        }
+        assert!(data.starts_with(b"NSE1"), "{path} is not sealed");
+    }
+}

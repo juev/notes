@@ -3,7 +3,8 @@
 //! ```text
 //! Notes_(2026-10-09-11_15_05).notesbackup    a zip:
 //!   manifest.json     {"format":1,"created":"2026-10-09T11:15:05","fields":…,"blobs":…}
-//!   notes.sqlite      table `fields`: every register with its stamp
+//!   notes.sqlite      table `fields`: every register with its stamp; table `bodies`: the saved
+//!                     Automerge document of every note (S38)
 //!   blobs/<sha256>    attachment content that is on the device
 //! ```
 
@@ -162,8 +163,14 @@ impl Store {
                 "CREATE TABLE snapshot.fields AS SELECT kind, id, field, value, stamp FROM fields",
                 [],
             );
+            // S38: the texts travel in the backup as the saved documents they are.
+            let bodies = inner.conn.execute(
+                "CREATE TABLE snapshot.bodies AS SELECT note_id, doc, stamp FROM bodies",
+                [],
+            );
             let _ = inner.conn.execute("DETACH DATABASE snapshot", []);
             copied?;
+            bodies?;
             let fields = inner.conn.query_row("SELECT count(*) FROM fields", [], |r| r.get(0))?;
             // Read from the registers, not from the derived table: before a migration (R92)
             // the derived tables are as an earlier version left them.

@@ -5,6 +5,7 @@
 uniffi::setup_scaffolding!();
 
 mod backup;
+mod body;
 mod db;
 mod error;
 mod hlc;

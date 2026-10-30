@@ -530,3 +530,98 @@ fn s28_a_storage_that_is_not_encrypted_any_more_is_not_written_in_the_clear() {
     .unwrap();
     sync(&a, &storage);
 }
+
+/// Every file of the storage, a snapshot unpacked; a sealed file stays as it is.
+fn inflated(storage: &TempDir) -> Vec<(String, Vec<u8>)> {
+    stored(storage)
+        .into_iter()
+        .map(|(path, data)| {
+            if data.starts_with(&[0x1f, 0x8b]) {
+                let mut out = Vec::new();
+                std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(&data[..]), &mut out).unwrap();
+                (path, out)
+            } else {
+                (path, data)
+            }
+        })
+        .collect()
+}
+
+/// The text of every body line of the log in the clear, as Automerge reads it.
+fn texts_in_clear(storage: &TempDir) -> Vec<String> {
+    use automerge::ReadDoc;
+    use base64::Engine as _;
+    let mut found = Vec::new();
+    for (path, data) in inflated(storage) {
+        if !(path.starts_with("notes/log/") || path.starts_with("notes/snap/")) || !path.ends_with(".jsonl") {
+            continue;
+        }
+        let Ok(text) = String::from_utf8(data) else {
+            continue;
+        };
+        for line in text.lines().skip(1) {
+            let line: serde_json::Value = serde_json::from_str(line).unwrap();
+            if let Some(crdt) = line["crdt"].as_str() {
+                let bytes = base64::engine::general_purpose::STANDARD.decode(crdt).unwrap();
+                let doc = automerge::AutoCommit::load(&bytes).unwrap();
+                let body = doc.get(automerge::ROOT, "body").unwrap().unwrap().1;
+                found.push(doc.text(&body).unwrap());
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn s28_s31_the_text_of_a_note_and_an_attachment_of_200_000_bytes_are_sealed_with_the_rest() {
+    let storage = tempfile::tempdir().unwrap();
+    let (a, b) = (device(), device());
+    connect(&a, &storage);
+    connect(&b, &storage);
+    let title = "заголовок-секрет-0817";
+    let secret = "тело заметки: никому не показывать 4421";
+    let t = a
+        .create_note(NewNote {
+            title: title.into(),
+            text: secret.into(),
+            ..NewNote::default()
+        })
+        .unwrap();
+    let file = attach(&a, &t, "plan.bin", &bulk(200_000, 3));
+    sync(&a, &storage);
+    sync_files(&a, &storage);
+    // The control: before encryption the text is in the storage, inside the changes of the document,
+    // where a search for its bytes does not find it; every file being sealed afterwards is what
+    // keeps it from being read.
+    assert_eq!(texts_in_clear(&storage), [secret]);
+    assert!(
+        inflated(&storage).iter().any(|(_, d)| holds(d, title.as_bytes())),
+        "the title is in the clear"
+    );
+
+    encrypt(&a, &storage, PASS);
+    b.set_sync_passphrase(Some(PASS.into()));
+    sync(&b, &storage);
+    sync_files(&b, &storage);
+    assert_eq!(b.get_text(t.id.clone()).unwrap(), secret);
+    assert_eq!(content(&b, &t, "plan.bin"), Some(bulk(200_000, 3)));
+
+    // Edits after the encryption travel sealed as well, and a device that comes later reads them all.
+    let more = " дописано на B 9035";
+    let at = secret.encode_utf16().count() as u32;
+    b.splice_utf16(t.id.clone(), at, 0, more.into()).unwrap();
+    sync(&b, &storage);
+    sync(&a, &storage);
+    assert_eq!(a.get_text(t.id.clone()).unwrap(), format!("{secret}{more}"));
+    let c = device();
+    c.set_sync_passphrase(Some(PASS.into()));
+    sync(&c, &storage);
+    assert_eq!(c.get_text(t.id.clone()).unwrap(), format!("{secret}{more}"));
+
+    assert_sealed(
+        &storage,
+        &[title, secret, "дописано на B", "никому не показывать", &file.sha256],
+    );
+    // Nothing in the storage reads as a log any more: the files that hold the texts are sealed.
+    assert!(texts_in_clear(&storage).is_empty());
+}
