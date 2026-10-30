@@ -39,6 +39,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -47,6 +48,8 @@ import kotlinx.coroutines.launch
 import org.evsyukov.notes.R
 import org.evsyukov.notes.Repo
 import org.evsyukov.notes.ViewDisplay
+import org.evsyukov.notes.editor.AttachmentKind
+import org.evsyukov.notes.editor.attachmentKind
 import uniffi.notes_core.FolderSort
 import uniffi.notes_core.Scope
 import uniffi.notes_core.SortBy
@@ -67,6 +70,7 @@ fun MainScreen() {
         }
         else -> Panel { settingsOpen = true }
     }
+    if (AppModel.openNote == null) AppModel.viewing?.let { file -> AttachmentViewer(file) { AppModel.viewing = null } }
     AppModel.alert?.let { message ->
         AlertDialog(
             onDismissRequest = { AppModel.alert = null },
@@ -119,7 +123,8 @@ private fun Panel(onSettings: () -> Unit) {
             },
         ) { padding ->
             if (AppModel.filesOpen) {
-                FileList(padding, { _, _ -> }, { _, note -> AppModel.open(note.id) })
+                val context = LocalContext.current
+                FileList(padding, { file, _ -> AppFilesOpen.open(context, file) }, { file, note -> AppModel.showInNote(note.id, file.id) })
             } else {
                 NoteList(padding)
             }
@@ -172,6 +177,16 @@ private fun DisplayMenu() {
             DropdownMenuItem({ Text(stringResource(R.string.show_date)) }, { set(display.copy(showDate = !display.showDate)) }, trailingIcon = {
                 Checkbox(display.showDate, null)
             })
+        }
+    }
+}
+
+/** R37: a tap in the view "Files" opens the file. */
+private object AppFilesOpen {
+    fun open(context: android.content.Context, file: uniffi.notes_core.Attachment) {
+        when (attachmentKind(file)) {
+            AttachmentKind.IMAGE, AttachmentKind.PDF, AttachmentKind.VIDEO -> AppModel.viewing = file
+            else -> AttachmentFiles.open(context, file)
         }
     }
 }

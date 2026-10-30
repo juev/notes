@@ -1,6 +1,9 @@
 package org.evsyukov.notes.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -18,9 +21,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.FormatIndentDecrease
@@ -30,6 +35,7 @@ import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.ChecklistRtl
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Code
@@ -48,12 +54,14 @@ import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material.icons.outlined.StarOutline
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.InputChip
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -82,9 +90,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.view.ViewCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import org.evsyukov.notes.AttachmentLink
 import org.evsyukov.notes.DevicePrefs
 import org.evsyukov.notes.R
 import org.evsyukov.notes.Repo
@@ -105,6 +115,10 @@ fun NoteScreen(id: String) {
     var textFocused by remember { mutableStateOf(false) }
     var findOpen by remember { mutableStateOf(false) }
     var moving by remember { mutableStateOf(false) }
+    var panelOpen by remember { mutableStateOf(false) }
+    val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        AppModel.attach(context, uris, id, view::insertLink)
+    }
     val revision = AppModel.textRevision
 
     LaunchedEffect(id, revision) {
@@ -114,10 +128,22 @@ fun NoteScreen(id: String) {
         view.onEdit = { edit, whole -> AppModel.textEdited(id, edit, whole) }
         view.onFocus = { textFocused = it }
         view.onOpen = AppModel::openLink
+        view.onAttachment = { file -> AppModel.openAttachment(context, file, view::repaintAttachment) }
+        view.playing = { AudioPlayer.playing }
+        view.onUris = { uris -> AppModel.attach(context, uris, id, view::insertLink) }
+        ViewCompat.setOnReceiveContentListener(view, arrayOf("image/*", "video/*", "audio/*", "application/*")) { _, payload ->
+            val parts = payload.partition { it.uri != null }
+            val clip = parts.first?.clip
+            if (clip != null) AppModel.attach(context, (0 until clip.itemCount).mapNotNull { clip.getItemAt(it).uri }, id, view::insertLink)
+            parts.second
+        }
         view.onNoteFromSelection = {
             view.selectedOffsets?.let { (start, end) -> AppModel.noteFromSelection(id, start, end) }
         }
-        onDispose { AppModel.flushEdits() }
+        onDispose {
+            AudioPlayer.stop()
+            AppModel.flushEdits()
+        }
     }
     // The text is laid out before it shows, so that a note does not open with its markup.
     LaunchedEffect(view) {
@@ -127,6 +153,10 @@ fun NoteScreen(id: String) {
         }
         view.setNote(text, layout)
         AppModel.editorShows(text)
+        AppModel.revealPiece?.let {
+            AppModel.revealPiece = null
+            view.reveal(it)
+        }
         if (AppModel.cursorAtEnd) {
             AppModel.cursorAtEnd = false
             view.setSelection(text.length)
@@ -149,11 +179,13 @@ fun NoteScreen(id: String) {
         settings.hyphenate, settings.smartTypography, settings.spellcheck, DevicePrefs.columnWidth(context).characters, colors,
     )
     LaunchedEffect(look) { view.applyLook(look) }
+    LaunchedEffect(settings.spellLanguage) { view.spellLanguage = settings.spellLanguage }
+    LaunchedEffect(AppModel.attachments) { view.setAttachments(AppModel.attachments) }
     LaunchedEffect(locked) { view.setEditable(!locked) }
 
     Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().imePadding()) {
         val writing = textFocused && WindowInsets.isImeVisible
-        TopBar(note, view, { findOpen = true }, { moving = true })
+        TopBar(note, { findOpen = true }, { moving = true }, { panelOpen = true })
         if (locked) note?.let { LockBar(it) }
         if (findOpen) FindBar(view) { findOpen = false }
         // While the text is typed in, it has the screen that is left over the keyboard.
@@ -163,8 +195,10 @@ fun NoteScreen(id: String) {
             HorizontalDivider()
         }
         AndroidView({ view }, Modifier.weight(1f).fillMaxWidth())
-        if (writing && !locked) FormatBar(view)
+        if (writing && !locked) FormatBar(view) { pick.launch(arrayOf("*/*")) }
     }
+    AppModel.viewing?.let { file -> AttachmentViewer(file) { AppModel.viewing = null } }
+    if (panelOpen) note?.let { AttachmentPanel(it, view) { panelOpen = false } }
     if (moving) {
         MoveDialog({ folder ->
             moving = false
@@ -189,7 +223,7 @@ private fun editorColors(): EditorColors {
 }
 
 @Composable
-private fun TopBar(note: Note?, view: NoteEditText, onFind: () -> Unit, onMove: () -> Unit) {
+private fun TopBar(note: Note?, onFind: () -> Unit, onMove: () -> Unit, onAttachments: () -> Unit) {
     var menu by remember { mutableStateOf(false) }
     Row(Modifier.fillMaxWidth().height(56.dp), verticalAlignment = Alignment.CenterVertically) {
         IconButton({ AppModel.closeNote() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.back)) }
@@ -211,6 +245,10 @@ private fun TopBar(note: Note?, view: NoteEditText, onFind: () -> Unit, onMove: 
                 })
             }
             item(R.string.find_in_note, onFind)
+            DropdownMenuItem({ Text(stringResource(R.string.attachments_count, AppModel.attachments.size)) }, {
+                menu = false
+                onAttachments()
+            })
             item(if (note.archived) R.string.unarchive else R.string.archive) { AppModel.setFlag(NoteFlag.ARCHIVED, !note.archived, note.id) }
             item(if (note.locked) R.string.unlock else R.string.lock) { AppModel.setFlag(NoteFlag.LOCKED, !note.locked, note.id) }
             item(R.string.move_to, onMove)
@@ -330,7 +368,7 @@ private fun TagRow(note: Note) {
 
 /** E20: the formats over the keyboard, with E25: undo and redo of typing. */
 @Composable
-private fun FormatBar(view: NoteEditText) {
+private fun FormatBar(view: NoteEditText, onAttach: () -> Unit) {
     @Composable
     fun button(icon: ImageVector, title: Int, enabled: Boolean = true, action: () -> Unit) {
         IconButton(action, enabled = enabled) { Icon(icon, stringResource(title)) }
@@ -359,6 +397,42 @@ private fun FormatBar(view: NoteEditText) {
         item { button(Icons.Filled.FormatQuote, R.string.quote) { view.format(MarkdownFormat.Quote) } }
         item { button(Icons.AutoMirrored.Filled.FormatIndentDecrease, R.string.outdent) { view.indent(true) } }
         item { button(Icons.AutoMirrored.Filled.FormatIndentIncrease, R.string.indent) { view.indent(false) } }
+        item { button(Icons.Filled.AttachFile, R.string.attach_file, action = onAttach) }
+    }
+}
+
+/**
+ * R33: all the attachments of the note; one whose link left the text says so, and can go back into the
+ * text or be deleted.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AttachmentPanel(note: Note, view: NoteEditText, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
+            Text(stringResource(R.string.attachments_count, AppModel.attachments.size), style = MaterialTheme.typography.titleMedium)
+            AppModel.attachments.forEach { file ->
+                val inText = "attachment:${file.id}" in view.text.toString()
+                Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f).clickable { AppModel.openAttachment(context, file.id, view::repaintAttachment) }) {
+                        Text(file.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(
+                            android.text.format.Formatter.formatShortFileSize(context, file.size.toLong()) + if (inText) "" else " · " + stringResource(R.string.not_in_text),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (!inText && !note.locked) {
+                        TextButton({
+                            onDismiss()
+                            view.insertLink(AttachmentLink.text(file))
+                        }) { Text(stringResource(R.string.insert_at_cursor)) }
+                        TextButton({ AppModel.removeAttachment(file.id) }) { Text(stringResource(R.string.delete)) }
+                    }
+                }
+            }
+        }
     }
 }
 

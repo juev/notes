@@ -1,5 +1,6 @@
 package org.evsyukov.notes.ui
 
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.runtime.getValue
@@ -11,16 +12,20 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import org.evsyukov.notes.AttachmentLink
 import org.evsyukov.notes.DevicePrefs
 import org.evsyukov.notes.NotesApp
 import org.evsyukov.notes.R
 import org.evsyukov.notes.Repo
 import org.evsyukov.notes.ViewDisplay
+import org.evsyukov.notes.editor.AttachmentKind
 import org.evsyukov.notes.editor.EditCoalescer
 import org.evsyukov.notes.editor.TextEdit
+import org.evsyukov.notes.editor.attachmentKind
 import org.evsyukov.notes.logError
 import org.evsyukov.notes.logged
 import uniffi.notes_core.AppException
@@ -114,6 +119,9 @@ object AppModel {
 
     /** R17: the note of today opens with the cursor at the end of its text. */
     var cursorAtEnd = false
+
+    /** R37: the text to find when the note opens: "Show in note". */
+    var revealPiece: String? = null
 
     /** R3: a note made here and not edited yet; it is deleted without going to the Trash when left so. */
     private var freshNote: String? = null
@@ -555,6 +563,60 @@ object AppModel {
                 .sortedByDescending { it.editedMs }
                 .flatMap { note -> runCatching { store.attachments(note.id) }.getOrDefault(emptyList()).map { it to note } }
             withContext(Dispatchers.Main) { then(files) }
+        }
+    }
+
+    // Attachments
+
+    /** The attachment the viewer shows, while it is on show (R31). */
+    var viewing by mutableStateOf<Attachment?>(null)
+
+    /** R30: the files go into the note; [link] puts each link at the cursor. */
+    fun attach(context: Context, uris: List<Uri>, id: String, link: (String) -> Unit) {
+        touched(id)
+        flushEdits()
+        Repo.scope.launch(Repo.core) {
+            for (uri in uris) {
+                val file = AttachmentFiles.copyToCache(context, uri) ?: continue
+                val added = message { Repo.store.addAttachment(id, file.absolutePath, file.name) }
+                file.parentFile?.deleteRecursively()
+                if (added != null) withContext(Dispatchers.Main) { link(AttachmentLink.text(added)) }
+            }
+            Repo.changed()
+        }
+    }
+
+    /** R37: "Show in note" opens the note at the place of the link. */
+    fun showInNote(note: String, file: String) {
+        filesOpen = false
+        revealPiece = "attachment:$file"
+        open(note)
+    }
+
+    /** R33: deleted by hand from the panel. */
+    fun removeAttachment(id: String) = perform<Unit> { it.removeAttachment(id) }
+
+    /** R31, R32: a tap shows the file; R35: one that has not arrived is fetched ahead of the queue. */
+    fun openAttachment(context: Context, id: String, repaint: (String) -> Unit) {
+        val file = attachments.firstOrNull { it.id == id } ?: return
+        when (attachmentKind(file)) {
+            AttachmentKind.PENDING -> fetch(id)
+            AttachmentKind.IMAGE, AttachmentKind.PDF, AttachmentKind.VIDEO -> viewing = file
+            AttachmentKind.AUDIO -> {
+                val stopped = AudioPlayer.playing
+                AudioPlayer.toggle(file) { repaint(id) }
+                stopped?.let(repaint)
+                repaint(id)
+            }
+            AttachmentKind.CHIP -> AttachmentFiles.open(context, file)
+            AttachmentKind.BROKEN -> {}
+        }
+    }
+
+    private fun fetch(id: String) {
+        Repo.scope.launch {
+            message { Repo.store.fetchAttachment(id) }
+            Repo.revision.update { it + 1 }
         }
     }
 

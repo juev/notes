@@ -113,7 +113,7 @@ class PainterTest {
     @Test
     fun `e14 an attachment link becomes the attachment off its line`() {
         val text = "![фото.jpg](attachment:a1)\n\nтекст"
-        assertTrue(painted(text, 30).marks.any { it.style == Style.Attachment("a1", true) })
+        assertTrue(painted(text, 30).marks.any { it.style == Style.Attachment("a1", true, 0) })
         assertFalse(painted(text, 3).marks.any { it.style is Style.Attachment })
     }
 }

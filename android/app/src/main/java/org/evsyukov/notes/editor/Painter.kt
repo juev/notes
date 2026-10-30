@@ -18,7 +18,7 @@ sealed interface Style {
     data class Check(val checked: Boolean) : Style
     data object Rule : Style
     data class Grid(val row: GridRow) : Style
-    data class Attachment(val id: String, val inline: Boolean) : Style
+    data class Attachment(val id: String, val inline: Boolean, val version: Int) : Style
     data object Collapse : Style
     data object Gap : Style
     data class Heading(val level: Int) : Style
@@ -64,6 +64,7 @@ class PaintContext(
     val gap: Float,
     val measure: (String) -> Float,
     val linkBroken: (String) -> Boolean,
+    val attachmentVersion: (String) -> Int = { 0 },
 )
 
 /**
@@ -188,7 +189,7 @@ object Painter {
                         mark(Style.Dim, start, end)
                     } else {
                         tappable += Tappable(start, end, Tap.Attachment(kind.id))
-                        mark(Style.Attachment(kind.id, kind.inline), start, end)
+                        mark(Style.Attachment(kind.id, kind.inline, context.attachmentVersion(kind.id)), start, end)
                     }
                 }
                 is MarkdownKind.ListMarker -> {

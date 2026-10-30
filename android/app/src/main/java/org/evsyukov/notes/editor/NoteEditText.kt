@@ -39,6 +39,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.evsyukov.notes.R
+import uniffi.notes_core.Attachment
 import uniffi.notes_core.CodeClass
 import uniffi.notes_core.MarkdownEdit
 import uniffi.notes_core.MarkdownFormat
@@ -95,8 +96,8 @@ class NoteEditText(context: Context) : EditText(context, null, 0, R.style.NoteEd
     /** The text has the keyboard. */
     var onFocus: (Boolean) -> Unit = {}
 
-    /** E14: the span of an attachment in the text. */
-    var attachmentSpan: (id: String, inline: Boolean, column: Int, spacing: Float) -> Any = { _, _, _, _ -> HiddenSpan() }
+    /** R31: which attachment plays in its line. */
+    var playing: () -> String? = { null }
 
     /** R53: the selection goes into a new note. */
     var onNoteFromSelection: () -> Unit = {}
@@ -108,6 +109,12 @@ class NoteEditText(context: Context) : EditText(context, null, 0, R.style.NoteEd
         private set
 
     private var history = TypingHistory()
+    private val spelling = Spelling(context)
+
+    /** E50: the language of the settings. */
+    var spellLanguage = "auto"
+    private val pictures = AttachmentPictures(context) { id -> repaintAttachment(id) }
+    private val attachmentVersions = HashMap<String, Int>()
     private var look: Look? = null
     private var textFonts = Fonts.text(context.assets, "system")
     private var codeFonts = Fonts.code(context.assets, "system")
@@ -132,7 +139,6 @@ class NoteEditText(context: Context) : EditText(context, null, 0, R.style.NoteEd
     private var lastLineBlank = false
     private var painted = mutableListOf<Pair<Style, Any>>()
     private var tappable: List<Tappable> = emptyList()
-    private var noSpellcheck: List<IntRange> = emptyList()
     private var windowFrom = 0
     private var windowTo = 0
 
@@ -201,11 +207,40 @@ class NoteEditText(context: Context) : EditText(context, null, 0, R.style.NoteEd
         outside = false
         // The spans went with the text they lay on.
         painted = mutableListOf()
+        spelling.attach(text)
         history = TypingHistory()
         updateHistory()
         info = layout
         infoOf = generation
         paint()
+        checkSpelling()
+    }
+
+    /** The attachments of the note changed, or their content arrived. */
+    fun setAttachments(files: List<Attachment>) {
+        val changed = files.filter { new -> pictures.files.none { it.id == new.id && it.localPath == new.localPath } }
+        pictures.files = files
+        changed.forEach { attachmentVersions.merge(it.id, 1, Int::plus) }
+        if (changed.isNotEmpty()) paint()
+    }
+
+    fun repaintAttachment(id: String) {
+        attachmentVersions.merge(id, 1, Int::plus)
+        paint()
+    }
+
+    /** E50: what the view does not check by itself: the paragraphs around the screen that nobody asked about. */
+    private fun checkSpelling() {
+        if (look?.spellcheck != true) return
+        val shown = layout
+        val first = shown?.let { it.getLineStart(it.getLineForVertical(scrollY)) } ?: 0
+        val last = shown?.let { it.getLineEnd(it.getLineForVertical(scrollY + height)) } ?: 0
+        spelling.check((first - WINDOW_REACH).coerceAtLeast(0), last + WINDOW_REACH, spellLanguage)
+    }
+
+    override fun onDetachedFromWindow() {
+        super.onDetachedFromWindow()
+        spelling.close()
     }
 
     /** An edit that comes from outside the editor: another device (S40). It keeps the selection on the same characters and is nothing the user typed. */
@@ -219,6 +254,7 @@ class NoteEditText(context: Context) : EditText(context, null, 0, R.style.NoteEd
         outside = false
         setSelection(start.coerceAtMost(length()), end.coerceAtMost(length()))
         parse()
+        checkSpelling()
     }
 
     /** What the core holds, when it differs from this text and nothing typed is on its way. */
@@ -403,7 +439,10 @@ class NoteEditText(context: Context) : EditText(context, null, 0, R.style.NoteEd
         // Hyphenation works with the line breaking that looks at a whole paragraph.
         breakStrategy = if (hyphenates) Layout.BREAK_STRATEGY_HIGH_QUALITY else Layout.BREAK_STRATEGY_SIMPLE
         hyphenationFrequency = if (hyphenates) Layout.HYPHENATION_FREQUENCY_NORMAL else Layout.HYPHENATION_FREQUENCY_NONE
-        if (old?.spellcheck != new.spellcheck) inputType = if (new.spellcheck) TEXT_INPUT else TEXT_INPUT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+        if (old?.spellcheck != new.spellcheck) {
+            inputType = if (new.spellcheck) TEXT_INPUT else TEXT_INPUT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            if (new.spellcheck) checkSpelling() else spelling.clear()
+        }
         place()
         painted.forEach { text.removeSpan(it.second) }
         painted.clear()
@@ -481,7 +520,7 @@ class NoteEditText(context: Context) : EditText(context, null, 0, R.style.NoteEd
         val hyphenates = look?.let { Typography.hyphenates(it.align, it.hyphenate) } ?: false
         return PaintContext(
             isFocused, start, end, (width - paddingLeft - paddingRight).toFloat(), hyphenates,
-            paint.textSize * 1.4f, { measurer.measureText(it) }, linkBroken,
+            paint.textSize * 1.4f, { measurer.measureText(it) }, linkBroken, { attachmentVersions[it] ?: 0 },
         )
     }
 
@@ -492,7 +531,7 @@ class NoteEditText(context: Context) : EditText(context, null, 0, R.style.NoteEd
         val result = Painter.paint(text.toString(), parsed, paintContext())
         touched = result.touched
         tappable = result.tappable
-        noSpellcheck = parsed.noSpellcheck.map { it.start.toInt() until it.end.toInt() }
+        spelling.exclude(parsed.noSpellcheck.map { it.start.toInt() until it.end.toInt() })
         val value = text
         MovedSpanFilter.install(value)
         val windowed = result.marks.size > WINDOW_MARKS
@@ -541,7 +580,10 @@ class NoteEditText(context: Context) : EditText(context, null, 0, R.style.NoteEd
         val first = shown.getLineStart(shown.getLineForVertical(vert))
         val last = shown.getLineEnd(shown.getLineForVertical(vert + height))
         val near = WINDOW_REACH / 2
-        if ((windowFrom > 0 && first - windowFrom < near) || windowTo - last < near) paint()
+        if ((windowFrom > 0 && first - windowFrom < near) || windowTo - last < near) {
+            paint()
+            checkSpelling()
+        }
     }
 
     /** What decides what wins when two spans meet: a replacement goes over whatever is under it. */
@@ -559,7 +601,7 @@ class NoteEditText(context: Context) : EditText(context, null, 0, R.style.NoteEd
             is Style.Check -> CheckboxSpan(style.checked, colors.accent, colors.dim)
             Style.Rule -> RuleSpan(width - paddingLeft - paddingRight, colors.dim)
             is Style.Grid -> GridSpan(style.row, textFonts, colors.dim)
-            is Style.Attachment -> attachmentSpan(style.id, style.inline, width - paddingLeft - paddingRight, lineSpacingMultiplier)
+            is Style.Attachment -> pictures.span(style.id, width - paddingLeft - paddingRight, lineSpacingMultiplier, colors, playing() == style.id)
             Style.Collapse -> CollapsedSpan()
             Style.Gap -> ParagraphGapSpan(((look?.paragraphSpacing ?: 0.5) * paint.textSize).toInt())
             is Style.Heading -> HeadingSpan(HEADING_SCALES[(style.level - 1).coerceIn(0, 5)], textFonts, codeFonts)
