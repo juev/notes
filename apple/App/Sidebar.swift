@@ -66,6 +66,20 @@ struct Sidebar: View {
             }
         }
         .listStyle(.sidebar)
+        // R81: the state of sync; a tap starts one.
+        .safeAreaInset(edge: .bottom) {
+            if let line = model.syncLine {
+                Button { model.syncNow() } label: {
+                    Label(line, systemImage: model.syncStatus.lastError == nil ? "arrow.triangle.2.circlepath" : "exclamationmark.triangle")
+                        .lineLimit(2)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.plain)
+                .padding(10)
+            }
+        }
         .sheet(item: $editing) { draft in FilterEditor(draft: draft) }
         .sheet(item: $naming) { naming in FolderNameSheet(naming: naming) }
         .sheet(item: $renamingTag) { renaming in TagRenameSheet(renaming: renaming) }
