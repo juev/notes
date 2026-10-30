@@ -33,6 +33,17 @@ struct AppCommands: Commands {
             Button(L("Paste as Plain Text")) { NSApp.sendAction(#selector(NSTextView.pasteAsPlainText(_:)), to: nil, from: nil) }
                 .keyboardShortcut("v", modifiers: [.command, .option, .shift])
         }
+        CommandGroup(after: .textEditing) {
+            // R48: find with replace in the open note.
+            Button(L("Find…")) { find(.showFindInterface) }
+                .keyboardShortcut("f")
+            Button(L("Find and Replace…")) { find(.showReplaceInterface) }
+                .keyboardShortcut("f", modifiers: [.command, .option])
+            Button(L("Find Next")) { find(.nextMatch) }
+                .keyboardShortcut("g")
+            Button(L("Find Previous")) { find(.previousMatch) }
+                .keyboardShortcut("g", modifiers: [.command, .shift])
+        }
         CommandMenu(L("Format")) {
             format(L("Bold"), .bold, "b")
             format(L("Italic"), .italic, "i")
@@ -58,6 +69,12 @@ struct AppCommands: Commands {
             Button(L("Redo")) { model.undoManager?.redo() }
                 .keyboardShortcut("z", modifiers: [.command, .shift])
         }
+    }
+
+    private func find(_ action: NSTextFinder.Action) {
+        let sender = NSMenuItem()
+        sender.tag = action.rawValue
+        model.activeEditor?.performTextFinderAction(sender)
     }
 
     /// E20: a format with its shortcut.

@@ -27,6 +27,10 @@ class MarkdownTextView: NSTextView, NSLayoutManagerDelegate {
     var attachment: (String) -> Attachment? = { _ in nil }
     /// A click on an attachment in the text (R31, R32, R35).
     var openAttachment: (String) -> Void = { _ in }
+    /// R52: what a link to a note leads to.
+    var linkState: (String) -> NoteLinkState = { _ in .live }
+    /// R50: the notes for the part of a title typed after `[[`.
+    var titlesMatching: (String) -> [Note] = { _ in [] }
     /// Files dropped on the text or pasted into it (R30).
     var addFiles: ([URL]) -> Void = { _ in }
     /// The edit `shouldChangeText` let through and `didChangeText` reports, with what it takes out.
@@ -214,9 +218,78 @@ class MarkdownTextView: NSTextView, NSLayoutManagerDelegate {
     /// what was typed.
     override func insertText(_ text: Any, replacementRange: NSRange) {
         super.insertText(text, replacementRange: replacementRange)
-        guard smartTypography, !hasMarkedText(), !replaying else { return }
+        guard !hasMarkedText(), !replaying else { return }
         let cursor = selectedRange()
-        if cursor.length == 0, let edit = markdownTyped(text: string, cursor: UInt32(cursor.location)) { apply(edit) }
+        if smartTypography, cursor.length == 0, let edit = markdownTyped(text: string, cursor: UInt32(cursor.location)) { apply(edit) }
+        updateLinkPicker()
+    }
+
+    // MARK: Links to notes (R50)
+
+    private var picker: LinkPicker?
+
+    /// The place of `[[` before the cursor on its line, with what was typed after it.
+    private var linkQuery: (start: Int, text: String)? {
+        let cursor = selectedRange()
+        guard cursor.length == 0 else { return nil }
+        let text = string as NSString
+        let line = text.lineRange(for: NSRange(location: cursor.location, length: 0))
+        let before = text.substring(with: NSRange(location: line.location, length: cursor.location - line.location)) as NSString
+        let open = before.range(of: "[[", options: .backwards)
+        guard open.location != NSNotFound else { return nil }
+        let typed = before.substring(from: NSMaxRange(open))
+        return typed.contains("]") ? nil : (line.location + open.location, typed)
+    }
+
+    /// E24: `[[` opens the picker of notes, and what follows narrows it.
+    private func updateLinkPicker() {
+        guard let query = linkQuery else { return closeLinkPicker() }
+        let notes = titlesMatching(query.text)
+        if notes.isEmpty { return closeLinkPicker() }
+        if picker == nil { picker = LinkPicker { [weak self] note in self?.finishLink(note) } }
+        let glyphs = layoutManager?.glyphRange(forCharacterRange: NSRange(location: max(query.start, 0), length: 1), actualCharacterRange: nil) ?? NSRange()
+        let rect = (textContainer.flatMap { layoutManager?.boundingRect(forGlyphRange: glyphs, in: $0) } ?? .zero)
+            .offsetBy(dx: textContainerOrigin.x, dy: textContainerOrigin.y)
+        picker?.show(notes, near: rect, of: self)
+    }
+
+    private func closeLinkPicker() {
+        picker?.close()
+        picker = nil
+    }
+
+    /// The choice takes the place of `[[…`; the text of the link is the title of the moment (E31).
+    private func finishLink(_ note: Note) {
+        guard let query = linkQuery else { return closeLinkPicker() }
+        closeLinkPicker()
+        let title = note.shownTitle.replacingOccurrences(of: "[", with: "\\[").replacingOccurrences(of: "]", with: "\\]")
+        let link = "[\(title)](note:\(note.id))"
+        let range = NSRange(location: query.start, length: selectedRange().location - query.start)
+        history.close()
+        replace(range, with: link)
+        setSelectedRange(NSRange(location: query.start + (link as NSString).length, length: 0))
+        history.close()
+    }
+
+    /// While the picker is open the arrows, Return and Esc are its own.
+    override func doCommand(by selector: Selector) {
+        if let picker {
+            switch selector {
+            case #selector(moveUp(_:)): picker.move(-1); return
+            case #selector(moveDown(_:)): picker.move(1); return
+            case #selector(insertNewline(_:)), #selector(insertTab(_:)): picker.choose(); return
+            case #selector(cancelOperation(_:)): closeLinkPicker(); return
+            default: break
+            }
+        }
+        super.doCommand(by: selector)
+        if selector == #selector(deleteBackward(_:)), picker != nil { updateLinkPicker() }
+    }
+
+    /// R53: the selection as UTF-16 offsets, for a new note made from it.
+    var selectedOffsets: (start: UInt32, end: UInt32)? {
+        let selection = selectedRange()
+        return selection.length > 0 ? (UInt32(selection.location), UInt32(NSMaxRange(selection))) : nil
     }
 
     /// E20: the formats in the context menu.
@@ -232,9 +305,19 @@ class MarkdownTextView: NSTextView, NSLayoutManagerDelegate {
         }
         formats.submenu = sub
         menu.insertItem(formats, at: 0)
-        menu.insertItem(.separator(), at: 1)
+        if selectedRange().length > 0 {
+            let item = NSMenuItem(title: L("New Note from Selection"), action: #selector(newNoteFromSelection), keyEquivalent: "")
+            item.target = self
+            menu.insertItem(item, at: 1)
+        }
+        menu.insertItem(.separator(), at: selectedRange().length > 0 ? 2 : 1)
         return menu
     }
+
+    /// R53: asks the app to make the note; it is the core that moves the text.
+    var makeNoteFromSelection: () -> Void = {}
+
+    @objc private func newNoteFromSelection() { makeNoteFromSelection() }
 
     @objc private func chooseFormat(_ item: NSMenuItem) {
         (item.representedObject as? FormatItem).map { format($0.format) }
@@ -392,7 +475,12 @@ class MarkdownTextView: NSTextView, NSLayoutManagerDelegate {
                 storage.addAttributes([.foregroundColor: NSColor.linkColor, .underlineStyle: NSUnderlineStyle.single.rawValue], range: range)
             case .noteLink(let id):
                 links.append((range, "note:\(id)"))
-                storage.addAttributes([.foregroundColor: NSColor.linkColor, .underlineStyle: NSUnderlineStyle.single.rawValue], range: range)
+                // R52: a link to a note in the Trash or deleted for good shows as broken.
+                let broken = linkState(id) != .live
+                storage.addAttributes([
+                    .foregroundColor: broken ? NSColor.systemRed : NSColor.linkColor,
+                    .underlineStyle: (broken ? NSUnderlineStyle.patternDot.union(.single) : .single).rawValue,
+                ], range: range)
             case .attachmentLink(let id, _):
                 // E14: the line of the link is source while the cursor is on it.
                 if shown {
@@ -759,6 +847,9 @@ class MarkdownTextView: NSTextView, NSLayoutManagerDelegate {
         }, as: UTF16.self)
     }
 
+    /// The notes the picker of links offers.
+    var debugPicker: [String]? { picker?.debugTitles }
+
     /// The cursor goes to this offset, as a click there would put it.
     func debugCaret(_ offset: Int) {
         setSelectedRange(NSRange(location: min(offset, (string as NSString).length), length: 0))
@@ -778,4 +869,61 @@ final class FormatItem: NSObject {
         (L("Heading 3"), .heading(level: 3)), (L("Plain Paragraph"), .paragraph), (L("Bulleted List"), .bulletList),
         (L("Numbered List"), .numberedList), (L("Task List"), .taskList), (L("Quote"), .quote),
     ]
+}
+
+/// R50: the list of notes that `[[` opens at the cursor.
+final class LinkPicker: NSObject {
+    private let popover = NSPopover()
+    private let table = NSTableView()
+    private var notes: [Note] = []
+    private let chosen: (Note) -> Void
+
+    init(chosen: @escaping (Note) -> Void) {
+        self.chosen = chosen
+        super.init()
+        table.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("title")))
+        table.headerView = nil
+        table.dataSource = self
+        table.delegate = self
+        table.action = #selector(clicked)
+        table.target = self
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 280, height: 180))
+        scroll.documentView = table
+        scroll.hasVerticalScroller = true
+        let controller = NSViewController()
+        controller.view = scroll
+        popover.contentViewController = controller
+        popover.behavior = .semitransient
+    }
+
+    func show(_ notes: [Note], near rect: NSRect, of view: NSView) {
+        self.notes = notes
+        table.reloadData()
+        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        if !popover.isShown { popover.show(relativeTo: rect, of: view, preferredEdge: .maxY) }
+    }
+
+    func move(_ step: Int) {
+        let row = max(0, min(notes.count - 1, table.selectedRow + step))
+        table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        table.scrollRowToVisible(row)
+    }
+
+    func choose() {
+        if notes.indices.contains(table.selectedRow) { chosen(notes[table.selectedRow]) }
+    }
+
+    func close() { popover.close() }
+
+    @objc private func clicked() { choose() }
+
+    var debugTitles: [String] { notes.map(\.shownTitle) }
+}
+
+extension LinkPicker: NSTableViewDataSource, NSTableViewDelegate {
+    func numberOfRows(in tableView: NSTableView) -> Int { notes.count }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        NSTextField(labelWithString: notes[row].shownTitle)
+    }
 }

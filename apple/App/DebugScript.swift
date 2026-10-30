@@ -23,6 +23,7 @@ import SwiftUI
 /// `enter`, `tab`, `backtab` (as those keys in the text), `pastehtml:<b>x</b>` and `pasteurl:https://…` (paste from a pasteboard of the script),
 /// `wait1` (a pause that ends a step of the history of typing), `redo`,
 /// `files` (opens the view of files, `files:off` closes it), `attachments` (prints those of the open note, with whether the text has them),
+/// `find:text` (searches, `find:` ends it), `hits`, `picker` (prints what the picker of links offers), `linked`, `fromselection`, `keycmd:insertNewline:`,
 /// `attach:/path` (attaches the file to the open note with a link at the cursor),
 /// `corewrite:5,text` (an edit of the core under the open editor, as a sync brings one),
 /// `newnote` (the way ⌘N does), `newentry`, `undo`, `importsn:/path` (imports a backup of Standard Notes).
@@ -212,6 +213,14 @@ enum DebugScript {
             print("debug: pasted \(editor?.paste(from: pasteboard) ?? false)")
         case "wait1": try? await Task.sleep(for: .seconds(TypingHistory.pause + 0.1))
         case "redo": model.undoManager?.redo()
+        case "find": model.search = argument
+        case "hits": print("debug: hits \(model.hits.map { "\($0.note.shownTitle): \($0.snippet)" })")
+        case "picker": print("debug: picker \(editor?.debugPicker ?? [])")
+        case "linked": print("debug: linked from \(model.selectedNote.map { model.linkedFrom($0).map(\.shownTitle) } ?? [])")
+        case "fromselection": model.noteFromSelection()
+        case "keycmd":
+            // A command of the text, as a key would send it: moveDown:, insertNewline: …
+            editor?.doCommand(by: NSSelectorFromString(argument))
         case "files": model.filesOpen = argument != "off"
         case "attachments":
             print("debug: attachments \(model.attachments.map { "\($0.name) \(model.isInText($0) ? "in the text" : "not in the text")" })")

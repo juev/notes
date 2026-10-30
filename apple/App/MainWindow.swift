@@ -12,13 +12,23 @@ struct MainWindow: View {
                 .navigationSplitViewColumnWidth(min: 180, ideal: 230)
         } content: {
             Group {
-                if model.filesOpen { FileList() } else { NoteList() }
+                if model.isSearching { SearchList() } else if model.filesOpen { FileList() } else { NoteList() }
             }
             .navigationSplitViewColumnWidth(min: 240, ideal: 300)
         } detail: {
             Editor()
         }
         .navigationTitle(title)
+        .searchable(text: $model.search, placement: .toolbar, prompt: L("Search"))
+        .alert(L("This note is in the Trash"), isPresented: Binding(get: { model.restoreOffer != nil }, set: { if !$0 { model.restoreOffer = nil } })) {
+            Button(L("Restore")) {
+                if let id = model.restoreOffer {
+                    model.restore([id])
+                    model.open(id)
+                }
+            }
+            Button(L("Cancel"), role: .cancel) {}
+        }
         .onAppear { model.undoManager = undoManager }
         .onChange(of: undoManager) { _, manager in model.undoManager = manager }
         .alert(model.alert ?? "", isPresented: Binding(get: { model.alert != nil }, set: { if !$0 { model.alert = nil } })) {}
