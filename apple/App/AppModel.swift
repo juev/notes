@@ -472,7 +472,7 @@ final class AppModel {
         touched(id)
         for url in urls {
             guard let file = perform(named: L("Attach File"), { try $0.addAttachment(noteId: id, path: url.path, name: nil) }) else { continue }
-            activeEditor?.insert(link: AttachmentFiles.link(file))
+            activeEditor?.insert(link: AttachmentLink.text(file))
         }
         reloadAttachments()
     }

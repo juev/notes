@@ -198,3 +198,21 @@ final class TypographyTests: XCTestCase {
         XCTAssertNil(ColumnWidth.full.characters)
     }
 }
+
+/// E30: the link an attachment gets in the text.
+final class AttachmentLinkTests: XCTestCase {
+    private func file(_ name: String, _ mime: String) -> Attachment {
+        Attachment(id: "a1", noteId: "n", name: name, mime: mime, size: 1, sha256: "", localPath: nil)
+    }
+
+    func testWhatShowsInsideIsAnImageLink() {
+        XCTAssertEqual(AttachmentLink.text(file("фото.jpg", "image/jpeg")), "![фото.jpg](attachment:a1)")
+        XCTAssertEqual(AttachmentLink.text(file("клип.mov", "video/quicktime")), "![клип.mov](attachment:a1)")
+        XCTAssertEqual(AttachmentLink.text(file("отчёт.pdf", "application/pdf")), "![отчёт.pdf](attachment:a1)")
+        XCTAssertEqual(AttachmentLink.text(file("данные.csv", "text/csv")), "[данные.csv](attachment:a1)")
+    }
+
+    func testBracketsInANameStayInTheLink() {
+        XCTAssertEqual(AttachmentLink.text(file("a[1].txt", "text/plain")), "[a\\[1\\].txt](attachment:a1)")
+    }
+}

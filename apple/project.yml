@@ -41,11 +41,27 @@ targets:
         INFOPLIST_FILE: App/Info.plist
         CODE_SIGN_ENTITLEMENTS: App/Notes.entitlements
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    dependencies:
+      - target: NotesShare
+        embed: true
     # The tests of Shared/ run in a bundle of their own, with no host app: a test run does not
     # start Notes (make apple-test).
     scheme:
       testTargets:
         - NotesTests
+  NotesShare:
+    type: app-extension
+    platform: macOS
+    sources:
+      - ShareExtension
+      - Shared
+      - path: Generated/notes_core.swift
+        group: Generated
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.evsyukov.notes.share
+        INFOPLIST_FILE: ShareExtension/Info.plist
+        CODE_SIGN_ENTITLEMENTS: ShareExtension/NotesShare.entitlements
   NotesTests:
     type: bundle.unit-test
     platform: macOS
