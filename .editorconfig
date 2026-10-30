@@ -1,0 +1,20 @@
+root = true
+
+# ktlint reads its settings from here (make android-lint). The style is IntelliJ's,
+# as the Kotlin was written. Rules that rewrap code the project keeps on one line,
+# or keep apart, are off: turning them on would reformat every file without
+# finding anything.
+[*.{kt,kts}]
+ktlint_code_style = intellij_idea
+max_line_length = off
+ktlint_function_naming_ignore_when_annotated_with = Composable
+ktlint_standard_argument-list-wrapping = disabled
+ktlint_standard_blank-line-between-when-conditions = disabled
+ktlint_standard_function-signature = disabled
+ktlint_standard_multiline-if-else = disabled
+ktlint_standard_parameter-list-wrapping = disabled
+ktlint_standard_spacing-between-declarations-with-comments = disabled
+ktlint_standard_statement-wrapping = disabled
+ktlint_standard_trailing-comma-on-call-site = disabled
+ktlint_standard_trailing-comma-on-declaration-site = disabled
+ktlint_standard_wrapping = disabled
