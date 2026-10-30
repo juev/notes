@@ -1,0 +1,53 @@
+name: Notes
+options:
+  bundleIdPrefix: org.evsyukov
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+  developmentLanguage: en
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    ARCHS: arm64
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    # The Rust core: C module map and static library produced by scripts/build-apple.sh
+    SWIFT_INCLUDE_PATHS: $(SRCROOT)/Generated
+    LIBRARY_SEARCH_PATHS: $(SRCROOT)/Generated/lib
+    OTHER_LDFLAGS: -lnotes_core
+    DEVELOPMENT_TEAM: ${NOTES_TEAM_ID}
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: ${NOTES_SIGN_IDENTITY}
+    ENABLE_HARDENED_RUNTIME: NO
+    NOTES_APP_GROUP: $(DEVELOPMENT_TEAM).org.evsyukov.notes
+targets:
+  Notes:
+    type: application
+    platform: macOS
+    sources:
+      - App
+      - Shared
+      - path: Generated/notes_core.swift
+        group: Generated
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.evsyukov.notes
+        INFOPLIST_FILE: App/Info.plist
+        CODE_SIGN_ENTITLEMENTS: App/Notes.entitlements
+    # The tests of Shared/ run in a bundle of their own, with no host app: a test run does not
+    # start Notes (make apple-test).
+    scheme:
+      testTargets:
+        - NotesTests
+  NotesTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Tests
+      - Shared
+      - path: Generated/notes_core.swift
+        group: Generated
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.evsyukov.notes.tests
+        GENERATE_INFOPLIST_FILE: YES
