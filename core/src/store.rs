@@ -160,6 +160,27 @@ impl Writer<'_> {
         db::apply(self.tx, &change, true, &mut self.touched)?;
         Ok(change.stamp)
     }
+    /// I5 in docs/specs/import.md: a register of a new entity stamped at `ms`, the moment it was last
+    /// written in another app, never later than now.
+    pub(crate) fn set_at(&mut self, kind: &str, id: &str, field: &str, value: Value, ms: u64) -> Result<()> {
+        let stamp = self.clock.stamp_at(ms.min(self.now_ms));
+        if let Some(step) = &mut self.noted {
+            step.note(self.tx, kind, id, field, &stamp)?;
+        }
+        let change = Change {
+            kind: kind.into(),
+            id: id.into(),
+            field: field.into(),
+            value,
+            stamp,
+        };
+        db::apply(self.tx, &change, true, &mut self.touched)?;
+        Ok(())
+    }
+    /// A stamp at `ms` for what is not a register, never later than now (I5).
+    pub(crate) fn stamp_at(&self, ms: u64) -> String {
+        self.clock.stamp_at(ms.min(self.now_ms))
+    }
     /// Writes that keep the data whole rather than carry out the action stay out of its step.
     fn unnoted<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         let noted = self.noted.take();
@@ -503,7 +524,7 @@ fn new_id() -> String {
     Uuid::now_v7().to_string()
 }
 
-fn last_pos(conn: &Connection, sql: &str, args: &[&str]) -> Result<Option<String>> {
+pub(crate) fn last_pos(conn: &Connection, sql: &str, args: &[&str]) -> Result<Option<String>> {
     Ok(conn.query_row(sql, params_from_iter(args.iter()), |r| r.get(0))?)
 }
 
@@ -683,7 +704,7 @@ fn too_large_note(used: u64, size: u64, limit: u64) -> AppError {
 }
 
 /// R36: copies `source` into `tmp` in pieces, hashing each one; `tmp` is removed when anything fails.
-fn copy_hashing(source: &Path, tmp: &Path, limit: u64) -> Result<(String, u64)> {
+pub(crate) fn copy_hashing(source: &Path, tmp: &Path, limit: u64) -> Result<(String, u64)> {
     let mut input = std::fs::File::open(source)?;
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -1567,7 +1588,7 @@ impl Store {
     }
 
     /// R36: a blob this call wrote is removed when no attachment kept it, as after a failed add.
-    fn drop_blob_if_unused(&self, sha256: &str) {
+    pub(crate) fn drop_blob_if_unused(&self, sha256: &str) {
         let used: bool = self
             .lock()
             .conn
@@ -1659,7 +1680,7 @@ fn opt(value: Option<String>) -> Value {
 }
 
 /// R15: a name is not empty and not longer than 200 characters.
-fn folder_name(name: &str) -> Result<String> {
+pub(crate) fn folder_name(name: &str) -> Result<String> {
     let name = name.trim();
     if name.is_empty() {
         return Err(AppError::invalid("folder name is empty"));
@@ -1675,7 +1696,7 @@ fn folder_name(name: &str) -> Result<String> {
 const MAX_FOLDER_NAME: usize = 200;
 
 /// The last `pos` among the folders shown under `parent`, or at the root.
-fn last_folder_pos(conn: &Connection, parent: Option<&str>) -> Result<Option<String>> {
+pub(crate) fn last_folder_pos(conn: &Connection, parent: Option<&str>) -> Result<Option<String>> {
     Ok(conn.query_row(
         "SELECT max(pos) FROM folders WHERE deleted = 0 AND eff_parent IS ?1",
         [parent],
@@ -1752,7 +1773,7 @@ fn heal_tree(w: &mut Writer) -> Result<()> {
 }
 
 /// R21: the spelling of a tag as it was first written on a note that is not deleted for good.
-fn spelling(conn: &Connection, key: &str) -> Result<Option<String>> {
+pub(crate) fn spelling(conn: &Connection, key: &str) -> Result<Option<String>> {
     Ok(conn
         .query_row(
             "SELECT t.tag FROM note_tags t JOIN notes n ON n.id = t.note_id

@@ -11,6 +11,7 @@ mod editing;
 mod error;
 mod highlight;
 mod hlc;
+mod import;
 mod log;
 mod markdown;
 mod model;
@@ -25,6 +26,7 @@ pub use backup::{Backup, BackupSettings};
 pub use editing::{markdown_format, markdown_indent, markdown_paste, markdown_typed, MarkdownFormat};
 pub use error::{AppError, Result};
 pub use highlight::{code_highlight_acknowledgements, CodeClass};
+pub use import::{IgnoredItems, ImportOptions, ImportReport};
 pub use log::LogLevel;
 pub use markdown::{
     markdown_layout, markdown_newline, MarkdownAlign, MarkdownBlock, MarkdownCell, MarkdownEdit, MarkdownKind,

@@ -156,6 +156,24 @@ pub(crate) fn create(w: &mut Writer, note: &str, text: &str) -> Result<()> {
     Ok(())
 }
 
+/// I5 in docs/specs/import.md: the document of a note imported from another app. The first change
+/// is made the same on every device that imports the same item: its actor comes from `seed`, its
+/// time is `time_ms` and its operations are the same, so the change has one hash and two devices
+/// that imported the item each hold one document with one text object. Later edits are this
+/// device's own.
+pub(crate) fn create_imported(w: &mut Writer, note: &str, text: &str, seed: [u8; 16], time_ms: u64) -> Result<()> {
+    let mut doc = blank(&ActorId::from(&seed[..]));
+    let obj = doc.put_object(ROOT, FIELD, ObjType::Text).map_err(am)?;
+    if !text.is_empty() {
+        doc.splice_text(&obj, 0, 0, text).map_err(am)?;
+    }
+    commit(&mut doc, time_ms, 0);
+    let stamp = w.stamp_at(time_ms);
+    write_saved(w.tx, note, &doc.save(), text, &stamp, true)?;
+    w.touch(KIND_NOTE, note);
+    Ok(())
+}
+
 /// One edit of the text of a note as one change. `change` applies it to the text object and says
 /// whether it changed anything; an edit that changes nothing writes nothing.
 fn edit(w: &mut Writer, note: &str, change: impl FnOnce(&mut AutoCommit, &ObjId) -> Result<bool>) -> Result<()> {

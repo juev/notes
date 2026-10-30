@@ -41,6 +41,12 @@ impl Clock {
         format(self.ms, self.counter, &self.device)
     }
 
+    /// A stamp at `ms` that does not move the clock: for a register that takes the time it was
+    /// last written elsewhere (I5 in docs/specs/import.md), which only a new entity may.
+    pub fn stamp_at(&self, ms: u64) -> String {
+        format(ms, 0, &self.device)
+    }
+
     /// Moves the clock past a stamp received from another device.
     pub fn observe(&mut self, stamp: &str) {
         let Some((ms, counter)) = parse(stamp) else {
