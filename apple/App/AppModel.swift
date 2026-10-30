@@ -499,7 +499,11 @@ final class AppModel {
     func openAttachment(_ id: String) {
         guard let file = attachment(id) else { return }
         guard file.localPath != nil else { return fetch(file) }
-        if let url = AttachmentFiles.named(file) { NSWorkspace.shared.open(url) }
+        if file.mime.hasPrefix("image/") || file.mime == "application/pdf" {
+            AttachmentViewer.show(file)
+        } else if let url = AttachmentFiles.named(file) {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     private func fetch(_ file: Attachment) {
@@ -773,6 +777,14 @@ final class AppModel {
     }
 
     // MARK: Sync
+
+    /// R81: what the sidebar says about sync.
+    var syncLine: String? {
+        if syncing { return L("Syncing…") }
+        if let error = syncStatus.lastError { return L("The last attempt failed: %@", error) }
+        if syncStatus.attachmentsWaiting > 0 { return L("Attachments waiting to sync: %@", "\(syncStatus.attachmentsWaiting)") }
+        return syncStatus.configured ? L("Synced") : nil
+    }
 
     /// A change syncs shortly after it is made; changes made in a row go together.
     func scheduleSync() {

@@ -296,3 +296,6 @@
 "This build of Notes cannot save from Share: it is signed without a development team." = "Эта сборка Notes не может сохранять из меню «Поделиться»: она подписана без команды разработчика.";
 "The extension was closed" = "Расширение закрыто";
 "Add" = "Добавить";
+"Open in Default App" = "Открыть в программе по умолчанию";
+"Syncing…" = "Синхронизация…";
+"Synced" = "Синхронизировано";

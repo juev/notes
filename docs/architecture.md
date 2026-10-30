@@ -1,6 +1,6 @@
 # Notes: design decisions
 
-Status: decisions made on 2026-10-29 in the discussion with the author of the project; stage 1 of the core is implemented (copied from Lists, notes and folders, note text on Automerge), and stage 2 adds the Markdown dialect and the edits of the editor, code highlighting, import from Standard Notes, search, links between notes, version history and export; the apps and the web interface are not built yet. Sources: the request of the author of the project, the design of [juev/lists](https://github.com/juev/lists) (its `docs/architecture.md` and `docs/specs/sync.md`), the source of Standard Notes (`standardnotes/app`, branch `main` as of 2026-10-28), a decrypted Standard Notes backup of the author of the project from 2026-10-29, the documentation and source of Automerge, Loro and yrs, the RustSec advisory database, the documentation of jtx Board (links at the end).
+Status: decisions made on 2026-10-29 in the discussion with the author of the project; stage 1 of the core is implemented (copied from Lists, notes and folders, note text on Automerge), and stage 2 adds the Markdown dialect and the edits of the editor, code highlighting, import from Standard Notes, search, links between notes, version history and export; stage 3 adds the macOS app; Android and the web interface are not built yet. Sources: the request of the author of the project, the design of [juev/lists](https://github.com/juev/lists) (its `docs/architecture.md` and `docs/specs/sync.md`), the source of Standard Notes (`standardnotes/app`, branch `main` as of 2026-10-28), a decrypted Standard Notes backup of the author of the project from 2026-10-29, the documentation and source of Automerge, Loro and yrs, the RustSec advisory database, the documentation of jtx Board (links at the end).
 
 ## Name
 
@@ -117,6 +117,14 @@ The author of the project uses Standard Notes now. Its data model (`packages/mod
 Left for later: protected notes (opening needs a password or biometrics), the title format for new notes, quick photos into a note, the web clipper. Not taken: separate note types with their own editors (code, spreadsheet, authenticator), publishing to Listed, extensions and themes as plugins, conflict copies (`conflict_of`), which the merge of the text by Automerge makes unnecessary.
 
 The author's backup shows how Standard Notes is used in practice, and the first version follows it: all 328 notes are in the Super editor; code blocks (232 of them, with a language set in most) and tables (11) are used, so code highlighting and GFM tables are in the first version; the eight tags are flat, almost every note has one tag, and the interface of Standard Notes shows them as folders. So the tags of Standard Notes become folders on import (decision of the author of the project on 2026-10-29).
+
+## The macOS app
+
+`apple/` is built from parts of the app of Lists: the project, keychain, sync, backups and the text view that paints the layout of the core. The window is new, since Lists has no column for one open document. Three things differ from Lists on purpose.
+
+- The text goes to the core as splices joined by word (`EditCoalescer`), not as a whole string when editing ends: two devices must merge their typing through the CRDT, and the whole string would turn an edit from another device into a deletion. A splice opens the Automerge document, tens of milliseconds on a large note, so one keystroke is not one call.
+- Typing has an undo history of its own (`TypingHistory`). The undo of `NSTextView` keeps positions that an edit from another device makes wrong, and E25 asks that such an edit stays when the user's typing is undone.
+- An attachment in the text stays TextKit 1: the first character of its link is a control glyph laid out as a box of the size of the attachment, the rest of the link has no glyphs, the paragraph gets a minimum line height, and the view of the attachment lies over the box. TextKit 2 was not taken, because all of the hiding of markup works on glyphs.
 
 ## Spelling and grammar
 
