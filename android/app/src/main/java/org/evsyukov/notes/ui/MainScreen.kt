@@ -1,7 +1,9 @@
 package org.evsyukov.notes.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.rememberScrollState
@@ -14,6 +16,7 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.DeleteSweep
 import androidx.compose.material.icons.outlined.EditCalendar
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DrawerValue
@@ -23,6 +26,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.RadioButton
@@ -38,6 +42,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
@@ -60,6 +65,7 @@ import uniffi.notes_core.SortBy
 fun MainScreen() {
     LaunchedEffect(Unit) { Repo.revision.collectLatest { AppModel.reload() } }
     var settingsOpen by remember { mutableStateOf(false) }
+    var searching by remember { mutableStateOf(false) }
     val startup = AppModel.startupError
     when {
         startup != null -> Text(startup)
@@ -68,7 +74,13 @@ fun MainScreen() {
             BackHandler { AppModel.closeNote() }
             NoteScreen(id)
         }
-        else -> Panel { settingsOpen = true }
+        settingsOpen -> SettingsScreen { settingsOpen = false }
+        searching -> SearchScreen { searching = false }
+        else -> Panel({ settingsOpen = true }, { searching = true })
+    }
+    AppModel.importReport?.let { ImportReportDialog(it) { AppModel.importReport = null } }
+    if (AppModel.working) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) { LinearProgressIndicator(Modifier.fillMaxWidth()) }
     }
     if (AppModel.openNote == null) AppModel.viewing?.let { file -> AttachmentViewer(file) { AppModel.viewing = null } }
     AppModel.alert?.let { message ->
@@ -85,7 +97,7 @@ fun MainScreen() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun Panel(onSettings: () -> Unit) {
+private fun Panel(onSettings: () -> Unit, onSearch: () -> Unit) {
     val drawer = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     var emptying by remember { mutableStateOf(false) }
@@ -102,6 +114,7 @@ private fun Panel(onSettings: () -> Unit) {
                     title = { Text(title(), maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     navigationIcon = { IconButton({ scope.launch { drawer.open() } }) { Icon(Icons.Filled.Menu, stringResource(R.string.open_sidebar)) } },
                     actions = {
+                        IconButton(onSearch) { Icon(Icons.Outlined.Search, stringResource(R.string.search)) }
                         if (AppModel.canUndo) IconButton({ AppModel.undo() }) { Icon(Icons.AutoMirrored.Outlined.Undo, stringResource(R.string.undo)) }
                         if (AppModel.canRedo) IconButton({ AppModel.redo() }) { Icon(Icons.AutoMirrored.Outlined.Redo, stringResource(R.string.redo)) }
                         if (!AppModel.filesOpen) {

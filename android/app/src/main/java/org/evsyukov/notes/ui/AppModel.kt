@@ -32,18 +32,24 @@ import uniffi.notes_core.AppException
 import uniffi.notes_core.AppSettings
 import uniffi.notes_core.Attachment
 import uniffi.notes_core.Counts
+import uniffi.notes_core.ExportReport
 import uniffi.notes_core.FilterQuery
 import uniffi.notes_core.Folder
+import uniffi.notes_core.ImportOptions
 import uniffi.notes_core.NewNote
 import uniffi.notes_core.Note
 import uniffi.notes_core.NoteLinkState
 import uniffi.notes_core.SavedFilter
 import uniffi.notes_core.Scope
+import uniffi.notes_core.SearchHit
 import uniffi.notes_core.Store
 import uniffi.notes_core.SyncConfig
 import uniffi.notes_core.SyncStatus
 import uniffi.notes_core.TagCount
 import uniffi.notes_core.TextAlign
+import uniffi.notes_core.Version
+import uniffi.notes_core.VersionDiff
+import java.io.File
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -617,6 +623,107 @@ object AppModel {
         Repo.scope.launch {
             message { Repo.store.fetchAttachment(id) }
             Repo.revision.update { it + 1 }
+        }
+    }
+
+    // Search and links
+
+    fun search(query: String, archived: Boolean, trash: Boolean, then: (List<SearchHit>) -> Unit) = read(emptyList(), then) { it.search(query, archived, trash) }
+
+    /** R50: the notes for the part of a title typed after `[[`. */
+    fun titlesMatching(query: String, except: String, then: (List<Note>) -> Unit) = read(emptyList(), then) { store ->
+        store.notesMatchingTitle(query, 8u).filter { it.id != except }
+    }
+
+    fun linkedFrom(id: String, then: (List<Note>) -> Unit) = read(emptyList(), then) { it.linkedFrom(id) }
+
+    /** Reads from the core off the main thread; [fallback] when it fails. */
+    private fun <T> read(fallback: T, then: (T) -> Unit, get: (Store) -> T) {
+        Repo.scope.launch(Repo.core) {
+            val value = runCatching { get(Repo.store) }.getOrDefault(fallback)
+            withContext(Dispatchers.Main) { then(value) }
+        }
+    }
+
+    // Version history (R40–R43)
+
+    fun versions(id: String, then: (List<Version>) -> Unit) {
+        flushEdits()
+        read(emptyList(), then) { it.versions(id) }
+    }
+
+    fun versionDiff(id: String, version: String, then: (VersionDiff?) -> Unit) = read(null, then) { it.versionDiff(id, version) }
+
+    /** R42: an ordinary edit, one action of undo; the later versions stay. */
+    fun restoreVersion(id: String, version: String) = perform<Unit> { it.restoreVersion(id, version) }
+
+    // Import and export
+
+    /** An import or an export is running. */
+    var working by mutableStateOf(false)
+        private set
+
+    /** I12: the report of the last import, while it is on show. */
+    var importReport by mutableStateOf<String?>(null)
+
+    /** R60–R62: the core writes into the cache, and the result goes to the folder the user picked. */
+    fun export(context: Context, job: ExportJob, tree: Uri) {
+        flushEdits()
+        working = true
+        Repo.scope.launch(Repo.core) {
+            val dir = File(context.cacheDir, "export/${System.nanoTime()}").apply { mkdirs() }
+            val store = Repo.store
+            val message = runCatching {
+                val done = when (job) {
+                    is ExportJob.Markdown -> summary(context, store.exportMarkdown(job.scope, dir.absolutePath))
+                    is ExportJob.Json -> summary(context, store.exportJson(dir.absolutePath, job.attachments))
+                    is ExportJob.Html -> context.getString(R.string.saved_as, File(store.exportHtml(job.note, dir.absolutePath, job.embed)).name)
+                }
+                FolderCopy.toTree(context, dir, tree)
+                done
+            }.getOrElse(::describe)
+            dir.deleteRecursively()
+            withContext(Dispatchers.Main) {
+                working = false
+                alert = message
+            }
+        }
+    }
+
+    private fun summary(context: Context, report: ExportReport): String {
+        val done = context.getString(R.string.exported, report.notes.toInt(), report.attachments.toInt())
+        return if (report.missing.isEmpty()) done else done + "\n" + context.getString(R.string.not_on_device, report.missing.joinToString(", "))
+    }
+
+    /** R61: the note as a PDF, printed by the system from the HTML of the core. */
+    fun printPdf(context: Context, id: String, title: String) {
+        flushEdits()
+        Repo.scope.launch(Repo.core) {
+            val dir = File(context.cacheDir, "export/${System.nanoTime()}").apply { mkdirs() }
+            val html = message { File(Repo.store.exportHtml(id, dir.absolutePath, true)) } ?: return@launch
+            withContext(Dispatchers.Main) { printNote(context, html, title) }
+        }
+    }
+
+    /** I2: one action of undo. */
+    fun importBackup(context: Context, backup: Uri, files: Uri?, options: ImportOptions) {
+        flushEdits()
+        working = true
+        Repo.scope.launch {
+            val dir = File(context.cacheDir, "import/${System.nanoTime()}").apply { mkdirs() }
+            val result = runCatching {
+                val copy = AttachmentFiles.copyToCache(context, backup) ?: error("the backup was not read")
+                val folder = files?.let { tree -> File(dir, "files").also { FolderCopy.fromTree(context, tree, it) } }
+                val report = Repo.store.importStandardNotes(copy.absolutePath, folder?.absolutePath, options)
+                copy.parentFile?.deleteRecursively()
+                report.text
+            }
+            dir.deleteRecursively()
+            withContext(Dispatchers.Main) {
+                working = false
+                result.onSuccess { importReport = it }.onFailure { alert = describe(it) }
+            }
+            Repo.changed()
         }
     }
 

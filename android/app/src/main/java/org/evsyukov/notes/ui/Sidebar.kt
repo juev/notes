@@ -52,6 +52,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import org.evsyukov.notes.R
 import org.evsyukov.notes.Repo
+import uniffi.notes_core.ExportScope
 import uniffi.notes_core.Folder
 import uniffi.notes_core.SavedFilter
 import uniffi.notes_core.Scope
@@ -73,6 +74,7 @@ private sealed class SidebarDialog {
 fun Sidebar(onChosen: () -> Unit, onSettings: () -> Unit) {
     var dialog by remember { mutableStateOf<SidebarDialog?>(null) }
     var filter by remember { mutableStateOf<FilterDraft?>(null) }
+    val export = rememberExport()
     fun choose(scope: Scope) {
         AppModel.select(scope)
         onChosen()
@@ -128,6 +130,10 @@ fun Sidebar(onChosen: () -> Unit, onSettings: () -> Unit) {
             MenuRow(stringResource(R.string.new_subfolder)) { dialog = SidebarDialog.NewFolder(shown.folder.id) }
             MenuRow(stringResource(R.string.rename)) { dialog = SidebarDialog.RenameFolder(shown.folder) }
             MenuRow(stringResource(R.string.move_to)) { dialog = SidebarDialog.MoveFolder(shown.folder) }
+            MenuRow(stringResource(R.string.export)) {
+                dialog = null
+                export(ExportJob.Markdown(ExportScope.Folder(shown.folder.id)))
+            }
             MenuRow(stringResource(if (shown.folder.daily) R.string.daily_off else R.string.daily_on)) {
                 dialog = null
                 AppModel.setDaily(shown.folder.id, !shown.folder.daily)
