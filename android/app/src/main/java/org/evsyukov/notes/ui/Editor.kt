@@ -122,6 +122,8 @@ fun NoteScreen(id: String) {
     var panelOpen by remember { mutableStateOf(false) }
     var historyOpen by remember { mutableStateOf(false) }
     var exportOpen by remember { mutableStateOf(false) }
+    // Here and not in the dialog: the dialog is gone by the time the folder is chosen.
+    val export = rememberExport()
     var picked by remember { mutableStateOf<List<Note>>(emptyList()) }
     var linkedFrom by remember { mutableStateOf<List<Note>>(emptyList()) }
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
@@ -217,7 +219,7 @@ fun NoteScreen(id: String) {
         if (writing && !locked) FormatBar(view) { pick.launch(arrayOf("*/*")) }
     }
     if (historyOpen) VersionHistory(id, locked) { historyOpen = false }
-    if (exportOpen) note?.let { ExportDialog(it) { exportOpen = false } }
+    if (exportOpen) note?.let { ExportDialog(it, export) { exportOpen = false } }
     AppModel.viewing?.let { file -> AttachmentViewer(file) { AppModel.viewing = null } }
     if (panelOpen) note?.let { AttachmentPanel(it, view) { panelOpen = false } }
     if (moving) {
@@ -304,9 +306,8 @@ private fun NotePicker(notes: List<Note>, onChoose: (Note) -> Unit) {
 
 /** R60, R61: the open note to Markdown, HTML and PDF. */
 @Composable
-private fun ExportDialog(note: Note, onDismiss: () -> Unit) {
+private fun ExportDialog(note: Note, export: (ExportJob) -> Unit, onDismiss: () -> Unit) {
     val context = LocalContext.current
-    val export = rememberExport()
     val title = note.shownTitle(stringResource(R.string.untitled))
     MenuDialog(stringResource(R.string.export), onDismiss) {
         MenuRow(stringResource(R.string.export_markdown)) {
