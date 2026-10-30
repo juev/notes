@@ -26,7 +26,8 @@ struct TextEdit: Equatable {
     /// The text after this edit.
     func applied(to text: String) -> String {
         var units = Array(text.utf16)
-        units.replaceSubrange(position..<(position + deleted), with: Array(inserted.utf16))
+        let start = min(position, units.count)
+        units.replaceSubrange(start..<min(start + deleted, units.count), with: Array(inserted.utf16))
         return String(decoding: units, as: UTF16.self)
     }
 
