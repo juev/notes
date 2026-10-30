@@ -1,6 +1,6 @@
 # Notes: data and sync
 
-Status: stage 1 of the core is being built. The mechanism is copied from Lists ([architecture.md](../architecture.md)), where the parts marked "as in Lists" are implemented and covered by tests; in Notes each of them is checked again by its own tests. The text CRDT (S3, S4, S20–S22, S70) is new: Automerge 0.12.0 was chosen on 2026-10-29 after a comparison with Loro and yrs by throwaway prototypes (UTF-16 positions, the time of changes, convergence, changes with missing dependencies, growth, dependencies; [architecture.md](../architecture.md)), and it is not in the core yet. Sources: the request of the author of the project of 2026-10-29; `docs/specs/sync.md` of Lists.
+Status: stage 1 of the core is implemented in `core/`. The mechanism is copied from Lists ([architecture.md](../architecture.md)) and checked again by the tests of Notes; the note body is an Automerge 0.12.0 document (S3, S4, S20–S22, S70), chosen on 2026-10-29 after a comparison with Loro and yrs by throwaway prototypes ([architecture.md](../architecture.md)). Every requirement except S40 and S44 has a test in `core/tests/` named after it. Not in the core: S40, which is the behaviour of the editor (the core reports that a body changed); S44 and the timers, foreground and folder-watch triggers of S39, which belong to the apps (the core gives `sync_now` and the push wait). Sources: the request of the author of the project of 2026-10-29; `docs/specs/sync.md` of Lists.
 
 ## Purpose and scope
 
