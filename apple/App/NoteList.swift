@@ -194,3 +194,47 @@ struct FileList: View {
         }
     }
 }
+
+/// R47: the notes found, the best first, with what was found marked.
+struct SearchList: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        @Bindable var model = model
+        VStack(spacing: 0) {
+            HStack {
+                Toggle(L("Include archived"), isOn: $model.searchArchived)
+                Toggle(L("Include Trash"), isOn: $model.searchTrash)
+                Spacer()
+            }
+            .font(.callout)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            List(model.hits, id: \.note.id, selection: $model.selectedNote) { hit in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(marked(hit.note.shownTitle, hit.note.title.isEmpty ? [] : hit.titleMatches)).fontWeight(.medium).lineLimit(1)
+                    if !hit.snippet.isEmpty {
+                        Text(marked(hit.snippet, hit.snippetMatches)).font(.callout).foregroundStyle(.secondary).lineLimit(2)
+                    }
+                }
+                .tag(hit.note.id)
+            }
+            .overlay {
+                if model.hits.isEmpty { Text(L("Nothing found")).foregroundStyle(.secondary) }
+            }
+        }
+    }
+
+    private func marked(_ text: String, _ ranges: [MarkdownRange]) -> AttributedString {
+        var out = AttributedString(text)
+        let utf16 = text.utf16
+        for range in ranges {
+            guard let from = utf16.index(utf16.startIndex, offsetBy: Int(range.start), limitedBy: utf16.endIndex),
+                  let to = utf16.index(utf16.startIndex, offsetBy: Int(range.end), limitedBy: utf16.endIndex),
+                  let start = AttributedString.Index(from, within: out), let end = AttributedString.Index(to, within: out) else { continue }
+            out[start..<end].backgroundColor = .yellow.opacity(0.4)
+            out[start..<end].foregroundColor = .primary
+        }
+        return out
+    }
+}

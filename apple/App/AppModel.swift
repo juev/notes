@@ -30,6 +30,8 @@ final class AppModel {
     var settings = AppSettings(
         trashDays: 30, fontBody: "system", fontMono: "system", lineHeight: 1.5, paragraphSpacing: 0.5, align: .left,
         hyphenate: false, smartTypography: true, spellcheck: true, spellLanguage: "auto", newNoteFolder: "root")
+    /// R52: the note in the Trash a link leads to, while the offer to restore it is on show.
+    var restoreOffer: String?
     /// The attachments of the open note.
     var attachments: [Attachment] = []
     /// R37: the view "Files" is open in place of the list of notes.
@@ -155,6 +157,7 @@ final class AppModel {
         default: break
         }
         reloadNotes()
+        if isSearching { reloadSearch() }
         let files = selectedNote.flatMap { try? store.attachments(noteId: $0) } ?? []
         if files != attachments { attachments = files; activeEditor?.reloadAttachments() }
         textRevision += 1
@@ -246,11 +249,48 @@ final class AppModel {
     /// E13: a link clicked with ⌘: a note opens here, an address in the system.
     func openLink(_ url: URL) {
         if url.scheme == "note" {
-            let id = url.absoluteString.dropFirst("note:".count)
-            open(String(id))
+            let id = String(url.absoluteString.dropFirst("note:".count))
+            switch linkState(id) {
+            case .live: open(id)
+            // R52: a tap on a link to a note in the Trash offers to restore it.
+            case .inTrash: restoreOffer = id
+            case .gone: break
+            }
         } else {
             NSWorkspace.shared.open(url)
         }
+    }
+
+    // MARK: Links between notes
+
+    func linkState(_ id: String) -> NoteLinkState {
+        (try? store?.linkTargets(ids: [id]))?.first?.state ?? .gone
+    }
+
+    func titlesMatching(_ query: String) -> [Note] {
+        ((try? store?.notesMatchingTitle(query: query, limit: 8)) ?? []).filter { $0.id != selectedNote }
+    }
+
+    func linkedFrom(_ id: String) -> [Note] { (try? store?.linkedFrom(id: id)) ?? [] }
+
+    /// R53: the selection moves into a new note, and a link stays in its place.
+    func noteFromSelection() {
+        guard let id = selectedNote, let range = activeEditor?.selectedOffsets else { return }
+        flushEdits()
+        perform(named: L("New Note from Selection")) { _ = try $0.noteFromSelection(id: id, start: range.start, end: range.end) }
+    }
+
+    // MARK: Search (R47)
+
+    var search = "" { didSet { if search != oldValue { reloadSearch() } } }
+    var searchArchived = false { didSet { reloadSearch() } }
+    var searchTrash = false { didSet { reloadSearch() } }
+    var hits: [SearchHit] = []
+
+    var isSearching: Bool { !search.trimmingCharacters(in: .whitespaces).isEmpty }
+
+    func reloadSearch() {
+        hits = isSearching ? ((try? store?.search(query: search, includeArchived: searchArchived, includeTrash: searchTrash)) ?? []) : []
     }
 
     // MARK: Attachments

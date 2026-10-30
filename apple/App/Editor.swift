@@ -30,6 +30,7 @@ struct Editor: View {
                 Divider()
                 MarkdownEditor(noteId: note.id, editable: !note.locked && !note.deleted, revision: model.textRevision, focus: model.textFocusRequests)
                 if !model.attachments.isEmpty { AttachmentPanel(locked: note.locked) }
+                LinkedFrom(id: note.id)
             }
             .id(note.id)
             .onAppear {
@@ -164,6 +165,11 @@ struct MarkdownEditor: NSViewRepresentable {
         model.activeEditor = view
         view.attachment = { id in MainActor.assumeIsolated { model.attachment(id) } }
         view.openAttachment = { id in MainActor.assumeIsolated { model.openAttachment(id) } }
+        view.linkState = { id in MainActor.assumeIsolated { model.linkState(id) } }
+        view.titlesMatching = { query in MainActor.assumeIsolated { model.titlesMatching(query) } }
+        view.makeNoteFromSelection = { MainActor.assumeIsolated { model.noteFromSelection() } }
+        view.usesFindBar = true
+        view.isIncrementalSearchingEnabled = true
         view.addFiles = { urls in MainActor.assumeIsolated { model.attach(urls, to: noteId) } }
         view.sharedUndoManager = { [weak model] in MainActor.assumeIsolated { model?.undoManager } }
         view.baseFont = .systemFont(ofSize: NSFont.systemFontSize + 2)
@@ -227,5 +233,27 @@ struct AttachmentPanel: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 6)
+    }
+}
+
+/// R51: the notes that link to this one.
+struct LinkedFrom: View {
+    @Environment(AppModel.self) private var model
+    let id: String
+
+    var body: some View {
+        let notes = model.linkedFrom(id)
+        if !notes.isEmpty {
+            HStack(spacing: 8) {
+                Text(L("Linked from")).foregroundStyle(.secondary)
+                ForEach(notes, id: \.id) { note in
+                    Button(note.shownTitle) { model.open(note.id) }.buttonStyle(.link)
+                }
+                Spacer()
+            }
+            .font(.callout)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 6)
+        }
     }
 }
