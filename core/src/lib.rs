@@ -10,6 +10,7 @@ mod db;
 mod editing;
 mod error;
 mod highlight;
+mod history;
 mod hlc;
 mod import;
 mod log;
@@ -27,6 +28,7 @@ pub use backup::{Backup, BackupSettings};
 pub use editing::{markdown_format, markdown_indent, markdown_paste, markdown_typed, MarkdownFormat};
 pub use error::{AppError, Result};
 pub use highlight::{code_highlight_acknowledgements, CodeClass};
+pub use history::{Version, VersionDiff};
 pub use import::{IgnoredItems, ImportOptions, ImportReport};
 pub use log::LogLevel;
 pub use markdown::{

@@ -38,13 +38,13 @@ fn b64() -> base64::engine::GeneralPurpose {
     base64::engine::general_purpose::STANDARD
 }
 
-fn am(e: AutomergeError) -> AppError {
+pub(crate) fn am(e: AutomergeError) -> AppError {
     AppError::Storage {
         msg: format!("text of a note: {e}"),
     }
 }
 
-fn not_arrived() -> AppError {
+pub(crate) fn not_arrived() -> AppError {
     AppError::invalid("the text of the note has not reached this device yet")
 }
 
@@ -72,7 +72,7 @@ fn blank(actor: &ActorId) -> AutoCommit {
 }
 
 /// A saved document, loaded with the encoding and the actor of this device (S4, S70).
-fn open(bytes: &[u8], actor: &ActorId) -> Result<AutoCommit> {
+pub(crate) fn open(bytes: &[u8], actor: &ActorId) -> Result<AutoCommit> {
     let mut doc = AutoCommit::load_with_options(bytes, LoadOptions::new().text_encoding(ENCODING)).map_err(am)?;
     doc.set_actor(actor.clone());
     Ok(doc)
@@ -81,7 +81,7 @@ fn open(bytes: &[u8], actor: &ActorId) -> Result<AutoCommit> {
 /// S3: the text object of the document. Two objects under `body` exist only when two devices
 /// created one for the same note; every device then takes the smallest object id, whatever order
 /// the changes came in, so that all of them show the same text.
-fn text_object(doc: &AutoCommit) -> Option<ObjId> {
+pub(crate) fn text_object(doc: &AutoCommit) -> Option<ObjId> {
     doc.get_all(ROOT, FIELD)
         .ok()?
         .into_iter()
@@ -121,7 +121,7 @@ fn heads_from_bytes(bytes: &[u8]) -> Vec<ChangeHash> {
     heads.iter().map(|hash| ChangeHash(*hash)).collect()
 }
 
-fn stored(conn: &Connection, note: &str) -> Result<Option<Vec<u8>>> {
+pub(crate) fn stored(conn: &Connection, note: &str) -> Result<Option<Vec<u8>>> {
     Ok(conn
         .query_row("SELECT doc FROM bodies WHERE note_id = ?1", [note], |r| r.get(0))
         .optional()?)
