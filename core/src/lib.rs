@@ -8,6 +8,7 @@ mod backup;
 mod body;
 mod db;
 mod error;
+mod highlight;
 mod hlc;
 mod log;
 mod markdown;
@@ -21,10 +22,11 @@ mod undo;
 
 pub use backup::{Backup, BackupSettings};
 pub use error::{AppError, Result};
+pub use highlight::{code_highlight_acknowledgements, CodeClass};
 pub use log::LogLevel;
 pub use markdown::{
     markdown_layout, markdown_newline, MarkdownAlign, MarkdownBlock, MarkdownCell, MarkdownEdit, MarkdownKind,
-    MarkdownLayout, MarkdownSpan, MarkdownTable, MarkdownTableRow,
+    MarkdownLayout, MarkdownRange, MarkdownSpan, MarkdownTable, MarkdownTableRow,
 };
 pub use model::*;
 pub use push::finish_pushes;

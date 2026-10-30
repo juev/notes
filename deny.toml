@@ -13,6 +13,12 @@ ignore = [
     # through askama 0.16.1, the latest of both; drop this once uniffi moves to
     # an askama without it.
     { id = "RUSTSEC-2026-0374", reason = "build-time only, no maintained upgrade yet" },
+    # bincode 1.3.3 is unmaintained; its authors call it complete. syntect 5.3.0,
+    # the latest, needs it for any parsing, and two-face 0.5.2 with it. The core
+    # decodes with it only the syntaxes built into the binary, never data from the
+    # storage or the user (E3 in docs/specs/editor.md). Decision of the author of
+    # the project of 2026-10-30.
+    { id = "RUSTSEC-2025-0141", reason = "decodes only the syntax dump built into the binary" },
 ]
 
 [licenses]
