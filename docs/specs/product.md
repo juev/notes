@@ -85,6 +85,18 @@ The interface is in English with a Russian localization and follows the system l
 - R62. Everything can be exported to JSON in a documented format with all fields, the text of every note and, optionally, the attachments, as a way to leave the app.
 - R63. Export does not change the notes and works offline.
 
+#### Export format
+
+The export of R62 is a folder with `notes.json` and, when the attachments are asked for, a folder `attachments/` with the content of each attachment in a file named by its SHA-256. `notes.json` is one object:
+
+- `format`: `"notes-export"`; `version`: `1`; `exported`: the moment of the export.
+- `settings`: the shared settings of S12 in [sync.md](sync.md): `trash_days`, `font_body`, `font_mono`, `line_height`, `paragraph_spacing`, `align` (`left` or `justify`), `hyphenate`, `smart_typography`, `spellcheck`, `spell_language`, `new_note_folder`.
+- `folders`: every folder with `id`, `name`, `icon`, `parent_id` (as written, or `null` at the root), `daily`, `sort` (`<edited|created|title>:<asc|desc>`), `show_preview`, `show_date` and `trashed`. A folder in the Trash has `null` for the fields the app does not show for it.
+- `notes`: every note, the Trash included, with `id`, `title`, `folder_id` (as written), `tags`, `pinned`, `starred`, `archived`, `locked`, `created`, `edited`, `trashed` (the moment it went to the Trash, or `null`), `text` (the Markdown source) and `attachments`. Each attachment has `id`, `name`, `mime`, `size`, `sha256` and `file`, the path of its content in the export, or `null` when the content was not asked for or has not reached the device.
+- `filters`: every saved filter with `id`, `name`, `icon` and `query`, in the form the core stores it: `join` (`all` or `any`) and `conditions`, each an object with `type` (`in_folder`, `has_tag`, `no_tags`, `none_of_tags`, `pinned`, `starred`, `archived`, `has_attachments`, `title_is`, `title_contains`, `text_contains`, `created`, `edited`) and its arguments.
+
+Moments are ISO 8601 in UTC, to the second.
+
 ### Import
 
 - R65. A Standard Notes backup can be imported: File → Import… on macOS, the settings on Android, the sidebar in the web interface. The rules are in [import.md](import.md).

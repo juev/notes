@@ -27,7 +27,7 @@ chacha20poly1305 = "0.11"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 flate2 = "1"
 hmac = "0.12"
-pulldown-cmark = { version = "0.13", default-features = false }
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 roxmltree = "0.20"
 rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
 scraper = "0.29"

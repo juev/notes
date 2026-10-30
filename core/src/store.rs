@@ -484,7 +484,7 @@ fn folder_from_row(r: &Row) -> rusqlite::Result<Folder> {
 }
 
 /// A folder that is not in the Trash, with the notes of its subfolders counted in (R12).
-fn live_folders(conn: &Connection) -> Result<Vec<Folder>> {
+pub(crate) fn live_folders(conn: &Connection) -> Result<Vec<Folder>> {
     let mut stmt = conn.prepare_cached(&format!(
         "SELECT {FOLDER_COLUMNS} FROM folders f WHERE f.deleted = 0 ORDER BY f.pos, f.id"
     ))?;
