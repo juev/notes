@@ -7,7 +7,17 @@ import SwiftUI
 /// permission. Debug builds only. `NOTES_DEBUG_SCRIPT` holds steps separated by `;`:
 /// `sleep:0.5`, `type:text`, `key:return` or `key:b+cmd`, `click:x,y` (points from the top left of
 /// the window), `winshot:/path/to.png` (draws the main window into a file, on screen or not),
-/// `apphidden` (prints how many windows are on screen), `quit`.
+/// `sidebarshot:/path/to.png` (draws the table of the sidebar into a file and prints its rows),
+/// `apphidden` (prints how many windows are on screen), `quit`,
+/// `ghost` (puts the windows on screen transparent and deaf to the mouse: a window that is not on
+/// screen draws no rows, and this one does not get in the way of whoever works at the Mac),
+/// `mkfolder:Parent/Name`, `mknote:Title=text@Parent/Name` (the text and the folder may be left out; `\\n` is a line break),
+/// `go:all`, `go:starred`, `go:archived`, `go:trash`, `go:untagged`, `go:nofolder`, `go:folder:Parent/Name`, `go:tag:name`, `go:filter:Name`,
+/// `pick:Title` (opens that note), `list` (prints the rows of the list), `sidebar` (prints the views with their numbers and the folders),
+/// `trash:Title`, `restore:Title`, `star:Title`, `pin:Title`, `archive:Title`, `lock:Title`, `tag:Title=name`,
+/// `delfolder:Parent/Name` (prints the number the confirmation names, and deletes), `fold:Parent/Name`, `daily:Parent/Name`,
+/// `sort:title` or `sort:created` or `sort:edited` (with `+asc`), `hide:preview`, `hide:date`,
+/// `newnote` (the way ⌘N does), `newentry`, `undo`, `importsn:/path` (imports a backup of Standard Notes).
 /// With `NOTES_DEBUG_DIR=/folder` the run has its data and settings in that folder. With
 /// `NOTES_DEBUG_QUIET` the app stays in the background; key presses then go straight to the main
 /// window. As in Lists.
@@ -34,6 +44,15 @@ enum DebugScript {
                 let name = step.split(separator: ":", maxSplits: 1).first.map(String.init) ?? step
                 let argument = step.contains(":") ? String(step.dropFirst(name.count + 1)) : ""
                 await run(name, argument)
+                // The undo manager closes its group when an event from the queue is done, and a step is
+                // no such event: without one the steps of a script would be undone all at once, which
+                // a person at the keyboard does not get. An empty event through the queue ends the step.
+                if let done = NSEvent.otherEvent(
+                    with: .applicationDefined, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: target?.windowNumber ?? 0, context: nil, subtype: 0, data1: 0, data2: 0) {
+                    NSApp.postEvent(done, atStart: false)
+                }
+                try? await Task.sleep(for: .milliseconds(30))
             }
         }
     }
@@ -68,12 +87,121 @@ enum DebugScript {
             view.cacheDisplay(in: view.bounds, to: image)
             try? image.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: argument))
             print("debug: window drawn, \(image.pixelsWide)x\(image.pixelsHigh) pixels")
+        case "sidebarshot":
+            // The table of the sidebar drawn on its own: the picture of the window leaves out what
+            // lies on the glass of the sidebar.
+            guard let content = target?.contentView, let table = tables(in: content).first,
+                  let image = table.bitmapImageRepForCachingDisplay(in: table.bounds) else { return print("debug: no sidebar") }
+            table.cacheDisplay(in: table.bounds, to: image)
+            try? image.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: argument))
+            print("debug: sidebar drawn, \(table.numberOfRows) rows")
         case "apphidden":
             let shown = NSApp.windows.filter { $0.canBecomeMain && $0.isVisible }.count
             print("debug: app windows on screen \(shown)")
         case "quit": NSApp.terminate(nil)
+        case "ghost":
+            NSApp.unhideWithoutActivation()
+            // The window of the scene is made only now.
+            for _ in 0..<40 where !NSApp.windows.contains(where: \.canBecomeMain) { try? await Task.sleep(for: .milliseconds(50)) }
+            for window in NSApp.windows where window.canBecomeMain {
+                window.alphaValue = 0
+                window.ignoresMouseEvents = true
+                window.orderFrontRegardless()
+            }
+        case "mkfolder":
+            let parts = argument.split(separator: "/").map(String.init)
+            model.createFolder(named: parts.last ?? argument, in: folderId(parts.dropLast().joined(separator: "/")))
+        case "mknote":
+            let (head, place) = cut(argument, "@")
+            let (title, text) = cut(head, "=")
+            model.perform { try $0.createNote(new: NewNote(title: title, folderId: folderId(place), tags: [], text: text.replacingOccurrences(of: "\\n", with: "\n"))) }
+        case "go":
+            let (kind, value) = cut(argument, ":")
+            switch kind {
+            case "all": model.scope = .all
+            case "starred": model.scope = .starred
+            case "archived": model.scope = .archived
+            case "trash": model.scope = .trash
+            case "untagged": model.scope = .untagged
+            case "nofolder": model.scope = .noFolder
+            case "folder": folderId(value).map { model.scope = .folder(id: $0) }
+            case "tag": model.scope = .tag(name: value)
+            case "filter": model.filters.first { $0.name == value }.map { model.scope = .filter(id: $0.id) }
+            default: print("debug: no view \(argument)")
+            }
+        case "pick": note(argument).map { model.open($0.id) }
+        case "list":
+            print("debug: list \(model.notes.map { "\($0.shownTitle)\($0.pinned ? " pinned" : "")\($0.starred ? " starred" : "")" })")
+        case "sidebar":
+            let c = model.counts
+            print("debug: views all \(c.all) nofolder \(c.noFolder) starred \(c.starred) archived \(c.archived) trash \(c.trash) untagged \(c.untagged)")
+            print("debug: folders \(model.folders.map { "\(model.path(of: $0.id).map(\.name).joined(separator: "/")) \($0.noteCount)" })")
+            print("debug: tags \(model.tags.map { "\($0.name) \($0.count)" }) filters \(model.filters.map { "\($0.name) \($0.count)" })")
+        case "trash": note(argument).map { model.trash([$0.id]) }
+        case "restore": note(argument).map { model.restore([$0.id]) }
+        case "star": note(argument).map { model.setFlag(.starred, true, ids: [$0.id]) }
+        case "pin": note(argument).map { model.setFlag(.pinned, true, ids: [$0.id]) }
+        case "archive": note(argument).map { model.setFlag(.archived, true, ids: [$0.id]) }
+        case "lock": note(argument).map { model.setFlag(.locked, true, ids: [$0.id]) }
+        case "tag":
+            let (title, tag) = cut(argument, "=")
+            note(title).map { found in model.perform { try $0.addTag(id: found.id, tag: tag) } }
+        case "delfolder":
+            guard let id = folderId(argument) else { return print("debug: no folder \(argument)") }
+            print("debug: the confirmation names \(model.deletionCount(id)) notes")
+            model.deleteFolder(id)
+        case "fold": folderId(argument).map { id in
+            if model.foldedFolders.contains(id) { model.foldedFolders.remove(id) } else { model.foldedFolders.insert(id) }
+        }
+        case "daily": folderId(argument).map { model.setDaily($0, true) }
+        case "sort":
+            var display = model.display
+            let (by, order) = cut(argument, "+")
+            display.sortBy = by
+            display.descending = order != "asc"
+            model.setDisplay(display)
+        case "hide":
+            var display = model.display
+            if argument == "preview" { display.showPreview = false } else { display.showDate = false }
+            model.setDisplay(display)
+        case "newnote": model.newNote()
+        case "newentry": model.newEntryForToday()
+        case "undo":
+            print("debug: undo manager \(model.undoManager == nil ? "none" : "there"), can undo \(model.undoManager?.canUndo ?? false)")
+            model.undoManager?.undo()
+        case "coreundo": print("debug: core undo \(String(describing: try? model.store?.undo()))"); model.reload()
+        case "importsn":
+            model.perform { store in
+                let report = try store.importStandardNotes(path: argument, filesDir: nil, options: ImportOptions(underOneFolder: false, collectUnlinkedFiles: false))
+                print("debug: import \(report.text)")
+            }
         default: print("debug: unknown step \(name)")
         }
+    }
+
+    private static var model: AppModel { AppModel.shared }
+
+    /// The tables under a view, the leftmost first.
+    private static func tables(in view: NSView) -> [NSTableView] {
+        let own = (view as? NSTableView).map { [$0] } ?? []
+        let found = own + view.subviews.flatMap(tables)
+        return found.sorted { $0.convert($0.bounds, to: nil).minX < $1.convert($1.bounds, to: nil).minX }
+    }
+
+    /// The text before and after the first `separator`.
+    private static func cut(_ text: String, _ separator: Character) -> (String, String) {
+        guard let at = text.firstIndex(of: separator) else { return (text, "") }
+        return (String(text[..<at]), String(text[text.index(after: at)...]))
+    }
+
+    private static func folderId(_ path: String) -> String? {
+        model.folders.first { model.path(of: $0.id).map(\.name).joined(separator: "/") == path }?.id
+    }
+
+    /// The note of that title, wherever it is.
+    private static func note(_ title: String) -> Note? {
+        let scopes: [Scope] = [.all, .archived, .trash]
+        return scopes.lazy.compactMap { try? model.store?.notes(scope: $0) }.joined().first { $0.title == title }
     }
 
     /// The window the script types into: the key window, or the main window of an app in the background.
