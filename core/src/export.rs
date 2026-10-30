@@ -134,6 +134,14 @@ fn rewrite_links(
             _ => {}
         }
     }
+    // A link inside another, an attachment shown as the text of a link to a note, goes with the
+    // outer one: replacing both would cut ranges that the first replacement moved.
+    let outer: Vec<Range<usize>> = changes.iter().map(|c| c.0.clone()).collect();
+    changes.retain(|(range, _)| {
+        !outer
+            .iter()
+            .any(|o| o != range && o.start <= range.start && range.end <= o.end)
+    });
     changes.sort_by_key(|c| std::cmp::Reverse(c.0.start));
     let mut out = text.to_string();
     for (range, new) in changes {

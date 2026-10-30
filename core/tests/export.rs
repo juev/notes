@@ -256,3 +256,22 @@ fn r63_export_changes_nothing() {
     assert_eq!(everything(&d), before);
     assert_eq!(d.undo_revision(), revision);
 }
+
+#[test]
+fn r60_an_attachment_shown_as_the_text_of_a_link_to_a_note() {
+    let d = device();
+    let target = note_with(&d, "Цель", "", None);
+    let note = note_with(&d, "Ссылка", "", None);
+    let image = attach(&d, &note, "p.png", b"PNG");
+    d.set_text(
+        note.id.clone(),
+        format!("[![картинка](attachment:{})](note:{})", image.id, target.id),
+    )
+    .unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let dir = out.path().to_string_lossy().into_owned();
+    d.export_markdown(ExportScope::All, dir.clone()).unwrap();
+    assert!(read(out.path().join("Ссылка.md")).ends_with("\n\n[[Цель]]\n"));
+    let html = read(d.export_html(note.id, dir, true).unwrap().into());
+    assert!(html.contains("<body>"), "{html}");
+}
