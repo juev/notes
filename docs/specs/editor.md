@@ -1,6 +1,6 @@
 # Notes: editor, Markdown and typography
 
-Status: specification, nothing is implemented. The parsing and painting scheme is taken from Lists, where it is implemented for task notes (`core/src/markdown.rs`, `MarkdownTextView.swift`, `MarkdownField.kt` there). Sources: the request of the author of the project and the discussion of 2026-10-29; the use of the Super editor in the author's Standard Notes backup ([architecture.md](../architecture.md)).
+Status: the part in the core is implemented in `core/` (stage 2) and checked by tests named after the requirements: the parsing of the dialect (E1–E5, E10–E16, E30, E31, E51) in `core/tests/markdown.rs`, highlighting (E3) in `core/tests/highlight.rs`, and the edits E21–E23 and E26 in `core/tests/editing.rs`; Return in a list (E22) was there from Lists. Painting, undo of typing (E25), typography (E40–E48) and spelling (E50, E52) belong to the apps, which are not built; the CSS of export to HTML follows E40–E48. The parsing and painting scheme is taken from Lists, where it is implemented for task notes (`core/src/markdown.rs`, `MarkdownTextView.swift`, `MarkdownField.kt` there). Sources: the request of the author of the project and the discussion of 2026-10-29; the use of the Super editor in the author's Standard Notes backup ([architecture.md](../architecture.md)).
 
 Size of highlighting (E3): the core built for Android (`cargo ndk -t arm64-v8a build --release --lib`) grew from 6 144 000 to 8 547 648 bytes when highlighting was added, on 2026-10-30. The web server is measured when it is built.
 

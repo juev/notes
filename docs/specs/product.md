@@ -1,6 +1,6 @@
 # Notes: features and interface
 
-Status: specification, nothing is implemented. Sources: the request of the author of the project and the discussion of 2026-10-29; the data model of Standard Notes and the author's backup ([architecture.md](../architecture.md)); `docs/specs/product.md` of Lists for the parts taken from it.
+Status: the part in the core is implemented in `core/` and checked by tests named after the requirements in `core/tests/`: notes, folders, tags, flags, the Trash, attachments, filters and undo (stage 1); the preview (R5), search (R47), links between notes (R50–R53), version history (R40–R43), export (R60–R63) and import (R65) in stage 2. The search reads every note without an index: on 5 000 notes of about 2 300 characters it took 82–128 ms on a Mac (release build, `r47_measure_the_search_on_5000_notes`); it was not measured on a phone. PDF (R61) is printed by the apps from the HTML of the core. The apps, the web interface and everything they show are not built. Sources: the request of the author of the project and the discussion of 2026-10-29; the data model of Standard Notes and the author's backup ([architecture.md](../architecture.md)); `docs/specs/product.md` of Lists for the parts taken from it.
 
 ## Purpose and scope
 
