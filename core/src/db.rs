@@ -27,7 +27,7 @@ pub const SETTINGS_ID: &str = "app";
 /// Bumped whenever a derived table changes shape or what it holds is built by
 /// another rule: the tables are then dropped and rebuilt from `fields`, which
 /// never changes shape.
-const DERIVED_VERSION: &str = "1";
+const DERIVED_VERSION: &str = "2";
 /// The version of the tables that are not rebuilt from the registers: `fields` and the bookkeeping.
 /// A change that rewrites one of them raises it, and a database with a smaller number is backed up
 /// before it is migrated (R92 of Lists). Adding a column or a table needs no new number.
@@ -87,7 +87,9 @@ const DERIVED_SCHEMA: &str = "
             deleted_at INTEGER NOT NULL DEFAULT 0,
             purged INTEGER NOT NULL DEFAULT 0,
             -- derived by rebuild_folders
-            eff_folder TEXT
+            eff_folder TEXT,
+            -- the text without markup, for the preview (R5) and the search (R47)
+            plain TEXT NOT NULL DEFAULT ''
         ) WITHOUT ROWID;
         CREATE INDEX IF NOT EXISTS notes_folder ON notes (eff_folder);
 
@@ -130,6 +132,14 @@ const DERIVED_SCHEMA: &str = "
             deleted INTEGER NOT NULL DEFAULT 0
         ) WITHOUT ROWID;
         CREATE INDEX IF NOT EXISTS attachments_note ON attachments (note_id);
+
+        -- R51: the notes the text of a note links to
+        CREATE TABLE IF NOT EXISTS note_links (
+            note_id TEXT NOT NULL,
+            target TEXT NOT NULL,
+            PRIMARY KEY (note_id, target)
+        ) WITHOUT ROWID;
+        CREATE INDEX IF NOT EXISTS note_links_target ON note_links (target);
 
         CREATE TABLE IF NOT EXISTS filters (
             id TEXT PRIMARY KEY,
@@ -208,7 +218,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     if meta_get(conn, "derived_version")?.as_deref() != Some(DERIVED_VERSION) {
         conn.execute_batch(
             "DROP TABLE IF EXISTS notes; DROP TABLE IF EXISTS folders; DROP TABLE IF EXISTS note_tags;
-             DROP TABLE IF EXISTS attachments; DROP TABLE IF EXISTS filters;",
+             DROP TABLE IF EXISTS attachments; DROP TABLE IF EXISTS filters; DROP TABLE IF EXISTS note_links;",
         )?;
     }
     conn.execute_batch(DERIVED_SCHEMA)?;
@@ -396,9 +406,13 @@ fn materialize_note(conn: &Connection, id: &str) -> Result<()> {
     }
     let stamps = || r.0.values().map(|(_, stamp)| hlc::stamp_ms(stamp));
     // The last edit of the text counts as an edit of the note (S13).
-    let body: Option<String> = conn
-        .query_row("SELECT stamp FROM bodies WHERE note_id = ?1", [id], |row| row.get(0))
+    let body: Option<(String, String)> = conn
+        .query_row("SELECT stamp, text FROM bodies WHERE note_id = ?1", [id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
         .optional()?;
+    let (plain, links) = crate::markdown::plain_and_links(body.as_ref().map_or("", |b| b.1.as_str()));
+    let body = body.map(|b| b.0);
     let edited = stamps()
         .chain(body.map(|stamp| hlc::stamp_ms(&stamp)))
         .max()
@@ -411,13 +425,14 @@ fn materialize_note(conn: &Connection, id: &str) -> Result<()> {
     // The folder a note is shown in is corrected by rebuild_folders afterwards.
     conn.execute(
         "INSERT INTO notes
-         (id, title, folder_id, created, edited, pinned, starred, archived, locked, deleted, deleted_at, purged)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+         (id, title, folder_id, created, edited, pinned, starred, archived, locked, deleted, deleted_at, purged,
+          plain)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
          ON CONFLICT (id) DO UPDATE SET
             title = excluded.title, folder_id = excluded.folder_id, created = excluded.created,
             edited = excluded.edited, pinned = excluded.pinned, starred = excluded.starred,
             archived = excluded.archived, locked = excluded.locked, deleted = excluded.deleted,
-            deleted_at = excluded.deleted_at, purged = excluded.purged",
+            deleted_at = excluded.deleted_at, purged = excluded.purged, plain = excluded.plain",
         params![
             id,
             r.text("title").unwrap_or_default(),
@@ -431,8 +446,16 @@ fn materialize_note(conn: &Connection, id: &str) -> Result<()> {
             deleted_at.is_some(),
             deleted_at.unwrap_or(0),
             r.flag("purged"),
+            plain,
         ],
     )?;
+    conn.execute("DELETE FROM note_links WHERE note_id = ?1", [id])?;
+    for target in &links {
+        conn.execute(
+            "INSERT OR IGNORE INTO note_links (note_id, target) VALUES (?1, ?2)",
+            params![id, target],
+        )?;
+    }
     conn.execute("DELETE FROM note_tags WHERE note_id = ?1", [id])?;
     // Two registers that differ in case are one tag; the one written first gives the spelling (R21).
     let mut tags: Vec<(&String, &str)> =

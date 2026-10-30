@@ -181,6 +181,16 @@ impl Writer<'_> {
     pub(crate) fn stamp_at(&self, ms: u64) -> String {
         self.clock.stamp_at(ms.min(self.now_ms))
     }
+    /// Whether the write is an action that undo can take back: then the texts it edits are noted.
+    pub(crate) fn notes_texts(&self) -> bool {
+        self.noted.is_some()
+    }
+    /// R75: a text of a note this action changed.
+    pub(crate) fn note_text(&mut self, note: &str, before: String, after: String) {
+        if let Some(step) = &mut self.noted {
+            step.note_text(note, before, after);
+        }
+    }
     /// Writes that keep the data whole rather than carry out the action stay out of its step.
     fn unnoted<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         let noted = self.noted.take();
@@ -395,7 +405,8 @@ const NOTE_COLUMNS: &str = "
     n.id, n.title, n.eff_folder, n.pinned, n.starred, n.archived, n.locked, n.deleted, n.created, n.edited,
     n.deleted_at,
     (SELECT count(*) FROM attachments a WHERE a.note_id = n.id AND a.deleted = 0),
-    (SELECT group_concat(tag, char(31)) FROM (SELECT tag FROM note_tags WHERE note_id = n.id ORDER BY key))";
+    (SELECT group_concat(tag, char(31)) FROM (SELECT tag FROM note_tags WHERE note_id = n.id ORDER BY key)),
+    substr(n.plain, 1, 600)";
 
 fn note_from_row(r: &Row) -> rusqlite::Result<Note> {
     let deleted: bool = r.get(7)?;
@@ -416,6 +427,7 @@ fn note_from_row(r: &Row) -> rusqlite::Result<Note> {
         tags: tags
             .map(|t| t.split('\u{1f}').map(str::to_string).collect())
             .unwrap_or_default(),
+        preview: crate::markdown::preview(&r.get::<_, String>(13)?),
     })
 }
 

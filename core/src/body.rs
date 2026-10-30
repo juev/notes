@@ -182,13 +182,18 @@ fn edit(w: &mut Writer, note: &str, change: impl FnOnce(&mut AutoCommit, &ObjId)
     let obj = text_object(&doc).ok_or_else(not_arrived)?;
     // Read before the edit: reading the changes closes the open one.
     let floor = latest_time(&mut doc);
+    let before = if w.notes_texts() { Some(text_of(&doc)?) } else { None };
     if !change(&mut doc, &obj)? {
         return Ok(());
     }
     commit(&mut doc, w.now_ms(), floor);
     let stamp = w.stamp();
-    write_saved(w.tx, note, &doc.save(), &text_of(&doc)?, &stamp, true)?;
+    let after = text_of(&doc)?;
+    write_saved(w.tx, note, &doc.save(), &after, &stamp, true)?;
     w.touch(KIND_NOTE, note);
+    if let Some(before) = before {
+        w.note_text(note, before, after);
+    }
     Ok(())
 }
 

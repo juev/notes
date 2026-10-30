@@ -92,6 +92,8 @@ pub struct Note {
     pub deleted_ms: Option<u64>,
     /// Attachments that are not deleted.
     pub attachments: u32,
+    /// R5: the first lines of the text without markup, on one line.
+    pub preview: String,
 }
 
 #[derive(Debug, Clone, Default, uniffi::Record)]

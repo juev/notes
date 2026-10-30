@@ -1107,3 +1107,78 @@ fn arrange(text: &str, mut found: Vec<Found>, leaves: Vec<Range<usize>>) -> (Vec
         .collect();
     (spans, disjoint)
 }
+
+/// The text of a note without its markup, as the preview (R5) and the search (R47) read it, and the
+/// notes its links lead to (R51). Blocks are lines; the address of a link is not text.
+pub(crate) fn plain_and_links(text: &str) -> (String, Vec<String>) {
+    let parsed = layout(text, false);
+    // `==` is not markup to the parser: the markers of a highlight are taken out here.
+    let highlights: Vec<&Range<usize>> = parsed
+        .spans
+        .iter()
+        .filter(|s| s.kind == MarkdownKind::Highlight)
+        .map(|s| &s.reveal)
+        .collect();
+    let marks: Vec<Range<usize>> = parsed
+        .spans
+        .iter()
+        .filter(|s| s.kind == MarkdownKind::Markup && highlights.contains(&&s.reveal))
+        .map(|s| s.range.clone())
+        .collect();
+    let mut out = String::new();
+    let mut links = Vec::new();
+    let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+    for (event, range) in Parser::new_ext(text, options).into_offset_iter() {
+        match event {
+            Event::Text(t) | Event::Code(t) | Event::Html(t) | Event::InlineHtml(t) => {
+                if text.get(range.clone()) == Some(t.as_ref()) {
+                    let mut at = range.start;
+                    for mark in marks.iter().filter(|m| range.start <= m.start && m.end <= range.end) {
+                        out.push_str(&text[at..mark.start]);
+                        at = mark.end;
+                    }
+                    out.push_str(&text[at..range.end]);
+                } else {
+                    out.push_str(&t);
+                }
+            }
+            Event::SoftBreak => out.push(' '),
+            Event::HardBreak | Event::Rule => out.push('\n'),
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                if let Some(Target::Note(id)) = target(&dest_url) {
+                    if !links.contains(&id) {
+                        links.push(id);
+                    }
+                }
+            }
+            Event::End(pulldown_cmark::TagEnd::TableCell) => out.push(' '),
+            Event::End(
+                pulldown_cmark::TagEnd::Paragraph
+                | pulldown_cmark::TagEnd::Heading(_)
+                | pulldown_cmark::TagEnd::Item
+                | pulldown_cmark::TagEnd::CodeBlock
+                | pulldown_cmark::TagEnd::TableHead
+                | pulldown_cmark::TagEnd::TableRow
+                | pulldown_cmark::TagEnd::HtmlBlock,
+            ) => out.push('\n'),
+            _ => {}
+        }
+    }
+    let plain = out
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    (plain, links)
+}
+
+/// R5: the first lines of the text without markup, on one line.
+pub(crate) fn preview(plain: &str) -> String {
+    const LENGTH: usize = 200;
+    let joined = plain.lines().collect::<Vec<_>>().join(" ");
+    match joined.char_indices().nth(LENGTH) {
+        Some((cut, _)) => format!("{}…", joined[..cut].trim_end()),
+        None => joined,
+    }
+}
