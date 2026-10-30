@@ -4,6 +4,7 @@
 included:
   - App
   - Shared
+  - ShareExtension
   - Tests
 disabled_rules:
   - cyclomatic_complexity

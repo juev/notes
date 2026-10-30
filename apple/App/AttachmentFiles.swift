@@ -29,17 +29,6 @@ enum AttachmentFiles {
     static func clear() {
         try? FileManager.default.removeItem(at: root)
     }
-
-    /// E30: what shows inside the note and so is written as an image link.
-    static func isInline(_ mime: String) -> Bool {
-        mime.hasPrefix("image/") || mime.hasPrefix("video/") || mime.hasPrefix("audio/") || mime == "application/pdf"
-    }
-
-    /// E30: the link to an attachment in the text.
-    static func link(_ file: Attachment) -> String {
-        let name = file.name.replacingOccurrences(of: "[", with: "\\[").replacingOccurrences(of: "]", with: "\\]")
-        return "\(isInline(file.mime) ? "!" : "")[\(name)](attachment:\(file.id))"
-    }
 }
 
 /// Files on their way into a note: picked in the open panel, dropped or pasted, as in Lists.

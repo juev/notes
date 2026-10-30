@@ -259,7 +259,7 @@ struct AttachmentPanel: View {
                     if !model.isInText(file) {
                         Text(L("Not in the text")).foregroundStyle(.secondary)
                         if !locked {
-                            Button(L("Insert at Cursor")) { model.activeEditor?.insert(link: AttachmentFiles.link(file)) }
+                            Button(L("Insert at Cursor")) { model.activeEditor?.insert(link: AttachmentLink.text(file)) }
                             Button(L("Delete")) { model.removeAttachment(file.id) }
                         }
                     }
