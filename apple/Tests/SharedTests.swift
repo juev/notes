@@ -216,3 +216,23 @@ final class AttachmentLinkTests: XCTestCase {
         XCTAssertEqual(AttachmentLink.text(file("a[1].txt", "text/plain")), "[a\\[1\\].txt](attachment:a1)")
     }
 }
+
+/// S3: an edit typed while a sync changed the text.
+final class RebasedEditTests: XCTestCase {
+    func testAnEditMovesWithTheTextBeforeIt() {
+        let typed = TextEdit(position: 11, deleted: 0, inserted: "X")
+        let other = TextEdit(position: 0, deleted: 0, inserted: "REMOTE-")
+        XCTAssertEqual(typed.rebased(over: other), TextEdit(position: 18, deleted: 0, inserted: "X"))
+    }
+
+    func testAnEditBeforeTheOtherStaysWhereItIs() {
+        let typed = TextEdit(position: 1, deleted: 1, inserted: "X")
+        XCTAssertEqual(typed.rebased(over: TextEdit(position: 5, deleted: 0, inserted: "Y")), typed)
+    }
+
+    func testADeletionShrinksWhenTheOtherTookPartOfIt() {
+        let typed = TextEdit(position: 2, deleted: 4, inserted: "")
+        let other = TextEdit(position: 3, deleted: 2, inserted: "")
+        XCTAssertEqual(typed.rebased(over: other), TextEdit(position: 2, deleted: 2, inserted: ""))
+    }
+}

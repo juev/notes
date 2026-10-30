@@ -161,6 +161,8 @@ type Action = Vec<Step>;
 #[derive(Default)]
 pub(crate) struct History {
     stacks: HashMap<String, Vec<Action>>,
+    /// What undo took back, as the steps that put it again (R75); a new action ends them.
+    redos: HashMap<String, Vec<Action>>,
     /// Actions on several notes being put together (`Store::begin_group`).
     open: HashMap<String, Action>,
     /// How many actions each history has taken in (`Store::undo_revision`).
@@ -177,6 +179,7 @@ impl History {
 
     /// Puts an action on top of the history, or into the one on top when both edit the same text.
     fn add(&mut self, actor: String, mut action: Action) {
+        self.redos.remove(&actor);
         let stack = self.stacks.entry(actor.clone()).or_default();
         if let ([step], Some([last])) = (action.as_mut_slice(), stack.last_mut().map(Vec::as_mut_slice)) {
             if step.text.is_some() && last.text == step.text {
@@ -246,6 +249,23 @@ impl Store {
         Ok(out)
     }
 
+    /// Reverts the steps that are still current, as one write that is itself a step: reverting that
+    /// one in turn is the way back.
+    fn take_back(&self, action: Action) -> Result<(u32, Step)> {
+        let ((count, moved), step) = self.lock().write_noted(|w| {
+            let (mut count, mut moved) = (0, Vec::new());
+            for step in action.iter().rev() {
+                if step.current(w.tx)? {
+                    moved.extend(step.revert(w)?);
+                    count += 1;
+                }
+            }
+            Ok((count, moved))
+        })?;
+        self.history().restamp(&moved);
+        Ok((count, step))
+    }
+
     fn history(&self) -> std::sync::MutexGuard<'_, History> {
         self.history.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -260,18 +280,29 @@ impl Store {
         let Some(action) = self.history().stacks.get_mut(&actor).and_then(Vec::pop) else {
             return Ok(0);
         };
-        let (count, moved) = self.write(|w| {
-            let (mut count, mut moved) = (0, Vec::new());
-            for step in action.iter().rev() {
-                if step.current(w.tx)? {
-                    moved.extend(step.revert(w)?);
-                    count += 1;
-                }
-            }
-            Ok((count, moved))
-        })?;
-        self.history().restamp(&moved);
+        let (count, back) = self.take_back(action)?;
+        if !back.is_empty() {
+            self.history().redos.entry(actor).or_default().push(vec![back]);
+        }
         Ok(count)
+    }
+
+    /// R75: puts again the last action undo took back. Returns how many notes changed.
+    pub fn redo(&self) -> Result<u32> {
+        let actor = actor();
+        let Some(action) = self.history().redos.get_mut(&actor).and_then(Vec::pop) else {
+            return Ok(0);
+        };
+        let (count, back) = self.take_back(action)?;
+        if !back.is_empty() {
+            self.history().stacks.entry(actor).or_default().push(vec![back]);
+        }
+        Ok(count)
+    }
+
+    /// Whether there is an action to put again (R75).
+    pub fn can_redo(&self) -> bool {
+        self.history().redos.get(&actor()).is_some_and(|s| !s.is_empty())
     }
 
     /// Whether there is an action to take back (R75).

@@ -216,6 +216,23 @@ enum DebugScript {
             print("debug: pasted \(editor?.paste(from: pasteboard) ?? false)")
         case "wait1": try? await Task.sleep(for: .seconds(TypingHistory.pause + 0.1))
         case "redo": model.undoManager?.redo()
+        case "replaceall":
+            // What Replace All of the find bar does: several ranges at once. Argument: from=to.
+            let (from, to) = cut(argument, "=")
+            guard let view = editor else { return }
+            let text = view.string as NSString
+            var ranges: [NSValue] = []
+            var at = NSRange(location: 0, length: text.length)
+            while true {
+                let found = text.range(of: from, options: [], range: at)
+                if found.location == NSNotFound { break }
+                ranges.append(NSValue(range: found))
+                at = NSRange(location: NSMaxRange(found), length: text.length - NSMaxRange(found))
+            }
+            if view.shouldChangeText(inRanges: ranges, replacementStrings: ranges.map { _ in to }) {
+                for range in ranges.reversed() { view.textStorage?.replaceCharacters(in: range.rangeValue, with: to) }
+                view.didChangeText()
+            }
         case "find": model.search = argument
         case "hits": print("debug: hits \(model.hits.map { "\($0.note.shownTitle): \($0.snippet)" })")
         case "picker": print("debug: picker \(editor?.debugPicker ?? [])")

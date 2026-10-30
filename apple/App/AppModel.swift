@@ -64,6 +64,8 @@ final class AppModel {
     @ObservationIgnored private var edits = EditCoalescer()
     @ObservationIgnored private var editedNote: String?
     @ObservationIgnored private var editedText = ""
+    /// The text of the core the pending edits were typed over.
+    @ObservationIgnored private var editBase = ""
     @ObservationIgnored private var editFlush: DispatchWorkItem?
     /// R3: a note made here and not edited yet; it is deleted without going to the Trash when left so.
     @ObservationIgnored private var freshNote: String?
@@ -225,7 +227,8 @@ final class AppModel {
         if editedNote != id { flushEdits() }
         editedNote = id
         editedText = whole
-        if let earlier = edits.add(edit) { apply(earlier, to: id) }
+        if edits.pending == nil { editBase = text(of: id) }
+        if let earlier = edits.add(edit) { deliver(earlier, to: id) }
         editFlush?.cancel()
         let work = DispatchWorkItem { [weak self] in MainActor.assumeIsolated { self?.flushEdits() } }
         editFlush = work
@@ -237,22 +240,31 @@ final class AppModel {
     func flushEdits() {
         editFlush?.cancel()
         guard let id = editedNote, let edit = edits.take() else { return }
-        apply(edit, to: id)
-        // S3: the core must hold what the editor shows; whatever got past the edits is put right.
-        if let store, (try? store.getText(id: id)) != editedText {
+        let merged = deliver(edit, to: id)
+        // The core must hold what the editor shows; whatever got past the edits is put right. Not
+        // when a sync changed the text meanwhile: then the core holds both, and the editor follows.
+        if !merged, let store, (try? store.getText(id: id)) != editedText {
             do { try store.setText(id: id, text: editedText) } catch { alert = describe(error) }
         }
         reloadNotes()
+        textRevision += 1
         scheduleSync()
     }
 
-    private func apply(_ edit: TextEdit, to id: String) {
-        guard let store else { return }
+    /// One edit into the core. A sync may have changed the text since the edit was typed: it then
+    /// goes to where its place is now, so that both stay (S3). Says whether that happened.
+    @discardableResult
+    private func deliver(_ edit: TextEdit, to id: String) -> Bool {
+        guard let store else { return false }
+        let other = TextEdit.between(editBase, text(of: id))
+        let placed = other.map(edit.rebased) ?? edit
         do {
-            try store.spliceUtf16(id: id, pos: UInt32(edit.position), deleteLen: UInt32(edit.deleted), insert: edit.inserted)
+            try store.spliceUtf16(id: id, pos: UInt32(placed.position), deleteLen: UInt32(placed.deleted), insert: placed.inserted)
         } catch {
             alert = describe(error)
         }
+        editBase = text(of: id)
+        return other != nil
     }
 
     func setTitle(_ id: String, _ title: String) {
@@ -315,7 +327,7 @@ final class AppModel {
                 case .success(let report):
                     self.importReport = report.text
                     if store.undoRevision() != before {
-                        self.undoManager?.registerUndo(withTarget: self) { model in model.perform { _ = try $0.undo() } }
+                        self.registerTakeBack()
                         self.undoManager?.setActionName(L("Import"))
                     }
                 case .failure(let error): self.alert = describe(error)
@@ -615,10 +627,11 @@ final class AppModel {
         let title = daily ? Date().formatted(Date.FormatStyle().day().month(.wide).year()) : ""
         guard let note = perform(named: L("New Note"), { try $0.createNote(new: NewNote(title: title, folderId: folderId, tags: [], text: "")) }) else { return }
         if let folderId { Storage.defaults.set(folderId, forKey: "lastFolder") }
-        freshNote = daily ? nil : note.id
         titleFocusAsked = !daily
         if !notes.contains(where: { $0.id == note.id }) { scope = folderId.map { .folder(id: $0) } ?? .all }
+        // After the note before it is left: that one may have to go (R3).
         open(note.id)
+        freshNote = daily ? nil : note.id
     }
 
     /// R17: the note of the folder made today, if there is one.
@@ -750,19 +763,39 @@ final class AppModel {
         perform(named: L("Delete Filter")) { try $0.deleteFilter(id: id) }
     }
 
+    /// R75: the step of the undo manager for the last action of the core.
+    private func registerTakeBack() {
+        undoManager?.registerUndo(withTarget: self) { $0.takeBack() }
+    }
+
+    private func takeBack() {
+        flushEdits()
+        do { _ = try store?.undo() } catch { alert = describe(error) }
+        undoManager?.registerUndo(withTarget: self) { $0.putAgain() }
+        reload()
+        scheduleSync()
+    }
+
+    private func putAgain() {
+        flushEdits()
+        do { _ = try store?.redo() } catch { alert = describe(error) }
+        registerTakeBack()
+        reload()
+        scheduleSync()
+    }
+
     /// Runs a change as one action of undo (R75): the core keeps the history, and the undo manager of
     /// the window gets a step that asks the core to take it back. A change that fails is shown.
     @discardableResult
     func perform<T>(named name: String? = nil, _ change: (Store) throws -> T) -> T? {
         guard let store else { return nil }
+        flushEdits()
         let before = store.undoRevision()
         store.beginGroup()
         defer {
             store.endGroup()
             if store.undoRevision() != before {
-                undoManager?.registerUndo(withTarget: self) { model in
-                    model.perform { _ = try $0.undo() }
-                }
+                registerTakeBack()
                 if let name { undoManager?.setActionName(name) }
             }
             reload()
