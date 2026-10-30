@@ -30,7 +30,7 @@ pub const SETTINGS_ID: &str = "app";
 const DERIVED_VERSION: &str = "1";
 /// The version of the tables that are not rebuilt from the registers: `fields` and the bookkeeping.
 /// A change that rewrites one of them raises it, and a database with a smaller number is backed up
-/// before it is migrated (R92). Adding a column or a table needs no new number.
+/// before it is migrated (R92 of Lists). Adding a column or a table needs no new number.
 pub const SCHEMA_VERSION: u32 = 2;
 
 pub(crate) const MAX_KEY_LEN: usize = 200;
@@ -232,7 +232,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// The version of the schema the database was left at (R92), or nothing for a database that has no tables yet.
+/// The version of the schema the database was left at (R92 of Lists), or nothing for a database that has no tables yet.
 /// A database from before the number was kept is at 1.
 pub fn schema_version(conn: &Connection) -> Result<Option<u32>> {
     let tables: u32 = conn.query_row(

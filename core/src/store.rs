@@ -33,7 +33,7 @@ fn over(limit: u64, amount: u64) -> bool {
     limit != 0 && amount > limit
 }
 
-/// R142: a folder only its owner can look into, on Unix. Other systems have their own rules.
+/// R142 of Lists: a folder only its owner can look into, on Unix. Other systems have their own rules.
 pub(crate) fn private_dir(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -44,7 +44,7 @@ pub(crate) fn private_dir(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// R142: a file only its owner can read, on Unix.
+/// R142 of Lists: a file only its owner can read, on Unix.
 pub(crate) fn private_file(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -55,7 +55,7 @@ pub(crate) fn private_file(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// R142: creates the folder and everything above it, closed from other users from the start.
+/// R142 of Lists: creates the folder and everything above it, closed from other users from the start.
 pub(crate) fn make_private_dir(path: &Path) -> std::io::Result<()> {
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);
@@ -93,25 +93,25 @@ pub struct Store {
     pub(crate) inner: Mutex<Inner>,
     /// Serialises sync runs without blocking local edits during network calls.
     pub(crate) sync_lock: Mutex<()>,
-    /// One pass over attachment content at a time; runs of the fields do not wait for it (S34).
+    /// One pass over attachment content at a time; runs of the fields do not wait for it (S24).
     pub(crate) blob_lock: Mutex<()>,
-    /// One look at the backup schedule at a time, so that two callers do not both find it due (R88).
+    /// One look at the backup schedule at a time, so that two callers do not both find it due (R70).
     pub(crate) backup_lock: Mutex<()>,
     pub(crate) dir: PathBuf,
-    /// The store itself, for work that outlives the call that started it (S19).
+    /// The store itself, for work that outlives the call that started it (S41).
     pub(crate) me: std::sync::Weak<Store>,
-    /// The level of the log (R102) as its code, read on every line that may be written.
+    /// The level of the log (R95) as its code, read on every line that may be written.
     pub(crate) log_level: std::sync::atomic::AtomicU8,
     /// One writer of the log file at a time.
     pub(crate) log_lock: Mutex<()>,
-    /// S45: own log files that make a snapshot whatever they weigh.
+    /// S15: own log files that make a snapshot whatever they weigh.
     pub(crate) compact_after: Mutex<u32>,
     pub(crate) sync_password: Mutex<Option<String>>,
-    /// S58: the passphrase of an encrypted storage. Like the password, never on disk.
+    /// S31: the passphrase of an encrypted storage. Like the password, never on disk.
     pub(crate) sync_passphrase: Mutex<Option<String>>,
-    /// S54: the storage whose `vault.json` was read last, and what it said.
+    /// S28: the storage whose `vault.json` was read last, and what it said.
     pub(crate) sealed: Mutex<Option<(String, crate::sync::Sealing)>>,
-    /// S54: the data key opened last, so that the key derivation does not run on every look.
+    /// S28: the data key opened last, so that the key derivation does not run on every look.
     pub(crate) vault_key: Mutex<Option<crate::sync::VaultKey>>,
     /// The storage this process has already checked the format of and listed the snapshots of.
     pub(crate) storage_seen: Mutex<Option<String>>,
@@ -119,11 +119,11 @@ pub struct Store {
     pub(crate) folder_seen: Mutex<Option<Vec<String>>>,
     /// How long a failed wait for a nudge holds back the next one.
     pub(crate) push_retry: Mutex<std::time::Duration>,
-    /// Access token for this device's own ntfy server (S27). Like the password, never on disk.
+    /// Access token for this device's own ntfy server (S45). Like the password, never on disk.
     pub(crate) push_token: Mutex<Option<String>>,
-    /// S30: the own server answered 401 or 403 to the last subscription, to the last nudge.
+    /// S45: the own server answered 401 or 403 to the last subscription, to the last nudge.
     pub(crate) push_refused: Mutex<(bool, bool)>,
-    /// What undo takes back (R131).
+    /// What undo takes back (R75).
     pub(crate) history: Mutex<crate::undo::History>,
     /// R36: how much content this device takes, kept by the device and not synced.
     pub(crate) limits: Mutex<AttachmentLimits>,
@@ -200,7 +200,7 @@ thread_local! {
 impl Store {
     /// Runs `f` with today, the time of day and the moments it writes taken on a clock that many
     /// minutes east of UTC rather than on this device's. The web server answers each browser in the
-    /// zone of the browser (R135). The stamps keep their clock: it has no time zone.
+    /// zone of the browser (R135 of Lists). The stamps keep their clock: it has no time zone.
     pub fn in_zone<T>(&self, minutes_east: i32, f: impl FnOnce() -> T) -> T {
         let offset = minutes_east.checked_mul(60).and_then(chrono::FixedOffset::east_opt);
         let before = ZONE.with(|zone| zone.replace(offset));
@@ -264,7 +264,7 @@ impl Inner {
         self.write_with(None, f).map(|(out, _)| out)
     }
 
-    /// A write that notes what it changes, for undo (R131).
+    /// A write that notes what it changes, for undo (R75).
     pub(crate) fn write_noted<T>(&mut self, f: impl FnOnce(&mut Writer) -> Result<T>) -> Result<(T, Step)> {
         self.write_with(Some(Step::default()), f)
             .map(|(out, step)| (out, step.unwrap_or_default()))
@@ -507,7 +507,7 @@ fn last_pos(conn: &Connection, sql: &str, args: &[&str]) -> Result<Option<String
     Ok(conn.query_row(sql, params_from_iter(args.iter()), |r| r.get(0))?)
 }
 
-/// The type of a file by its first bytes, as (MIME type, extension), for a name that does not tell it (R85).
+/// The type of a file by its first bytes, as (MIME type, extension), for a name that does not tell it (R85 of Lists).
 /// Only types that are told apart for certain: an archive may be a document, so it stays unknown.
 pub(crate) fn sniff_type(head: &[u8]) -> Option<(&'static str, &'static str)> {
     let brand = |b: &[u8]| head.len() >= 12 && &head[4..8] == b"ftyp" && &head[8..12] == b;
@@ -741,14 +741,14 @@ impl Store {
     #[uniffi::constructor]
     pub fn open(dir: String) -> Result<Arc<Store>> {
         let dir = PathBuf::from(dir);
-        // R142: the data folder and the content in it are for this user alone.
+        // R142 of Lists: the data folder and the content in it are for this user alone.
         make_private_dir(&dir)?;
         make_private_dir(&dir.join("blobs"))?;
         let database = dir.join("notes.sqlite");
         let conn = Connection::open(&database)?;
         private_file(&database)?;
         crate::backup::close_backups(&dir.join("backups"))?;
-        // R92: a database of an earlier schema is backed up as it is, before anything in it is changed.
+        // R92 of Lists: a database of an earlier schema is backed up as it is, before anything in it is changed.
         let outdated = db::schema_version(&conn)?.is_some_and(|stored| stored < db::SCHEMA_VERSION);
         if !outdated {
             db::migrate(&conn)?;
@@ -1445,7 +1445,7 @@ impl Store {
             let path = self.blob_path(&sha256);
             let present = db::is_sha256(&sha256) && path.exists();
             let (mut name, mut mime): (String, String) = (r.get(2)?, r.get(3)?);
-            // R85: a name that tells no type is helped by the content, when the content is here.
+            // R85 of Lists: a name that tells no type is helped by the content, when the content is here.
             // Nothing is written back: the registers keep what the file came with.
             if present && guess_mime(&name) == UNKNOWN_MIME {
                 let mut head = [0u8; 16];
@@ -1542,7 +1542,7 @@ impl Store {
                 .find(|a| a.id == id)
                 .ok_or_else(|| AppError::not_found("attachment"))
         })();
-        // R102: the path and the name stay out of the log; the reason goes in.
+        // R95: the path and the name stay out of the log; the reason goes in.
         if let Err(e) = &added {
             self.note(LogLevel::Error, "attachments", || format!("not added: {e}"));
         }

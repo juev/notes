@@ -1,4 +1,4 @@
-//! S54, S55: a file storage encrypted with a passphrase.
+//! S28–S30: a file storage encrypted with a passphrase.
 //!
 //! A random data key encrypts the files; the key itself lies in `vault.json`,
 //! wrapped with a key derived from the passphrase. Each file is sealed with
@@ -32,7 +32,7 @@ const MAGIC: &[u8; 4] = b"NSE1";
 const PREFIX: usize = 19;
 const HEADER: usize = MAGIC.len() + PREFIX;
 
-/// S54: Argon2id with 64 MiB, three passes and one lane.
+/// S28: Argon2id with 64 MiB, three passes and one lane.
 const KDF_MEMORY_KIB: u32 = 64 * 1024;
 const KDF_PASSES: u32 = 3;
 const SALT: usize = 16;
@@ -69,7 +69,7 @@ fn wrap_aad(vault: &str) -> Vec<u8> {
     format!("notes vault {vault}").into_bytes()
 }
 
-/// What `vault.json` of format 4 holds besides the format and the vault id, in base64.
+/// What `vault.json` of format 2 holds besides the format and the vault id, in base64.
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Wrapped {
     pub salt: String,
@@ -139,7 +139,7 @@ impl Keys {
         }
     }
 
-    /// S55: attachment content lies under an HMAC of its hash, so the storage
+    /// S28: attachment content lies under an HMAC of its hash, so the storage
     /// cannot tell whether it holds a file it knows.
     pub(crate) fn blob_name(&self, sha256: &str) -> String {
         let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&self.name).expect("any key length");
@@ -334,7 +334,7 @@ impl<W: Write> Write for Opener<'_, W> {
     }
 }
 
-/// S55: the storage as sync sees it, with the files sealed on the way in and
+/// S30: the storage as sync sees it, with the files sealed on the way in and
 /// opened on the way out. Sync reads and writes the same logical paths as
 /// without encryption; only attachment content is stored under another name.
 pub(crate) struct SealedRemote<'a> {
@@ -374,7 +374,7 @@ impl Remote for SealedRemote<'_> {
     }
 
     /// A file that does not open reads as empty, which no reader takes: a log
-    /// file stays unread (S8), an address is passed over.
+    /// file stays unread (S13), an address is passed over.
     fn get(&self, path: &str) -> Result<Option<Vec<u8>>> {
         let Some(data) = self.inner.get(&self.physical(path))? else {
             return Ok(None);
@@ -392,7 +392,7 @@ impl Remote for SealedRemote<'_> {
         self.inner.put(&self.physical(path), &self.keys.seal(path, data)?)
     }
 
-    /// R140: the file is sealed into a temporary file and sent from there, so it never sits in memory.
+    /// S25: the file is sealed into a temporary file and sent from there, so it never sits in memory.
     fn put_file(&self, path: &str, local: &Path) -> Result<()> {
         let tmp = std::env::temp_dir().join(format!("notes-seal-{}.part", uuid::Uuid::now_v7().simple()));
         let sealed = (|| -> Result<()> {

@@ -14,11 +14,11 @@ pub trait Remote: Send + Sync {
     fn get(&self, path: &str) -> Result<Option<Vec<u8>>>;
     /// Creates parent directories as needed and replaces an existing file.
     fn put(&self, path: &str, data: &[u8]) -> Result<()>;
-    /// R140: writes the file at `local` as the content of `path`, without holding it whole in memory.
+    /// S25: writes the file at `local` as the content of `path`, without holding it whole in memory.
     fn put_file(&self, path: &str, local: &Path) -> Result<()> {
         self.put(path, &fs::read(local)?)
     }
-    /// R140: copies the content at `path` into `out` in pieces. `false` when there is nothing there.
+    /// S25: copies the content at `path` into `out` in pieces. `false` when there is nothing there.
     /// `max` bounds the bytes taken; zero means no limit. A storage used whole reads the file and writes it.
     fn get_to(&self, path: &str, out: &mut dyn Write, max: u64) -> Result<bool> {
         let Some(data) = self.get(path)? else {
@@ -45,7 +45,7 @@ pub trait Remote: Send + Sync {
 }
 
 /// A move made of the operations every storage has: read, write, delete.
-/// R140: the content goes through a temporary file, so a large attachment is not held in memory.
+/// S25: the content goes through a temporary file, so a large attachment is not held in memory.
 pub(crate) fn copy_over<R: Remote + ?Sized>(remote: &R, from: &str, to: &str) -> Result<bool> {
     let tmp = std::env::temp_dir().join(format!("notes-copy-{}.part", uuid::Uuid::now_v7().simple()));
     let found = {

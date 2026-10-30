@@ -56,7 +56,7 @@ impl WebDavRemote {
         }
     }
 
-    /// Asks whether sync could work here without writing anything (S26).
+    /// Asks whether sync could work here without writing anything (S46).
     pub fn check(&self) -> Result<ConnectionCheck> {
         if self.answers(&self.base)? {
             return Ok(ConnectionCheck::Ready);
@@ -110,7 +110,7 @@ impl WebDavRemote {
         matches!(self.answers(&folder), Ok(false))
     }
 
-    /// R140: PUT with the file as the body. The length is declared, so the server gets no chunked body.
+    /// S25: PUT with the file as the body. The length is declared, so the server gets no chunked body.
     fn send_file(&self, path: &str, size: u64, local: &Path) -> Result<u16> {
         let file = std::fs::File::open(local)?;
         let request = self
@@ -191,7 +191,7 @@ impl Remote for WebDavRemote {
             .collect())
     }
 
-    /// S49: one MOVE, the content stays on the server. A server without MOVE gets a copy.
+    /// One MOVE, the content stays on the server (S49 of Lists). A server without MOVE gets a copy.
     fn rename(&self, from: &str, to: &str) -> Result<bool> {
         let send = || {
             let request = self
@@ -203,7 +203,7 @@ impl Remote for WebDavRemote {
         match send()? {
             200..=299 => return Ok(true),
             405 | 501 => return copy_over(self, from, to),
-            // The source is gone, or the folder of the target is missing (S43).
+            // The source is gone, or the folder of the target is missing (S18).
             404 | 409 => {}
             // SFTPGo answers a MOVE into a missing folder with 403 (#304).
             403 if self.folder_missing(to) => {}
@@ -268,7 +268,7 @@ impl Remote for WebDavRemote {
         finish_put(path, send()?)
     }
 
-    /// R140: the file goes to the server from the disk, in the pieces ureq reads, not from memory.
+    /// S25: the file goes to the server from the disk, in the pieces ureq reads, not from memory.
     fn put_file(&self, path: &str, local: &Path) -> Result<()> {
         let size = std::fs::metadata(local)?.len();
         match self.send_file(path, size, local) {

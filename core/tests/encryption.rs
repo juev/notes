@@ -52,7 +52,7 @@ fn content(d: &Device, note: &Note, name: &str) -> Option<Vec<u8>> {
     std::fs::read(file.local_path.as_ref()?).ok()
 }
 
-/// Bytes that are no file's content: a pattern long enough to span several chunks (S55).
+/// Bytes that are no file's content: a pattern long enough to span several chunks (S28).
 fn bulk(len: usize, seed: u8) -> Vec<u8> {
     (0..len)
         .map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed))
@@ -92,8 +92,8 @@ fn holds(data: &[u8], needle: &[u8]) -> bool {
     data.windows(needle.len()).any(|w| w == needle)
 }
 
-/// S55: every file is sealed, apart from `vault.json`, the empty marks and the
-/// file that says the storage moved (S49); no path and no byte holds a secret.
+/// S30: every file is sealed, apart from `vault.json`, the empty marks and the
+/// file that says the storage moved (S49 of Lists); no path and no byte holds a secret.
 fn assert_sealed(storage: &TempDir, secrets: &[&str]) {
     let files = stored(storage);
     assert!(files.iter().any(|(p, _)| p.starts_with("notes/log/")));
@@ -119,7 +119,7 @@ fn assert_clear(storage: &TempDir) {
     }
 }
 
-/// A storage that does something of the test's own before `vault.json` of format 4 is written.
+/// A storage that does something of the test's own before `vault.json` of format 2 is written.
 struct OnSeal<'a> {
     inner: DirRemote,
     before: &'a (dyn Fn() -> Result<()> + Sync),
@@ -176,7 +176,7 @@ fn s28_s30_two_devices_converge_through_an_encrypted_folder() {
     assert_eq!(vault(&storage)["format"], 2);
     assert!(a.sync_status().unwrap().encrypted);
 
-    // S58: B learns it from the snapshot of A, which it cannot read, and stops; its own work goes on.
+    // S28: B learns it from the snapshot of A, which it cannot read, and stops; its own work goes on.
     let error = sync_error(&b, &storage);
     assert!(error.contains("enter its passphrase"), "{error}");
     assert!(b.sync_status().unwrap().encrypted);
@@ -247,7 +247,7 @@ fn s28_a_missing_or_wrong_passphrase_and_a_newer_format_stop_sync_with_their_own
     sync(&a, &storage);
     assert_eq!(oldest_first(&a), ["одна", "локально"]);
 
-    // An earlier version stops on format 4 the same way this one stops on a later one (S14).
+    // An earlier version stops on format 2 the same way this one stops on a later one (S17).
     let mut later = vault(&storage);
     later["format"] = 3.into();
     std::fs::write(storage.path().join("notes/vault.json"), later.to_string()).unwrap();
@@ -261,7 +261,7 @@ fn s28_a_missing_or_wrong_passphrase_and_a_newer_format_stop_sync_with_their_own
 fn s28_a_changed_moved_or_plain_file_stays_unread() {
     let storage = tempfile::tempdir().unwrap();
     let (a, b) = (device(), device());
-    // A state that outweighs two small log files, so that they stay in the log (S45).
+    // A state that outweighs two small log files, so that they stay in the log (S15).
     for i in 0..40 {
         add(&a, &format!("старая задача номер {i}, с названием подлиннее"));
     }
@@ -428,7 +428,7 @@ fn s28_content_the_encrypting_device_lacks_comes_from_the_device_that_has_it() {
     attach(&b, &t, "big.bin", &bulk(20, 6));
     sync(&b, &storage);
     sync_files(&b, &storage);
-    // A takes no file over 10 bytes (R140), so the content stays only with B.
+    // A takes no file over 10 bytes (R36), so the content stays only with B.
     let small = AttachmentLimits {
         max_file: 10,
         ..a.attachment_limits()

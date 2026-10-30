@@ -49,19 +49,19 @@ const ROOT: &str = "notes";
 const FORMAT: u32 = 1;
 /// S29: a storage whose files are sealed under a passphrase.
 const SEALED: u32 = 2;
-/// S56: the vault id of the encrypted storage this device has synced with.
+/// S28: the vault id of the encrypted storage this device has synced with.
 const SEALED_VAULT: &str = "sealed_vault";
-/// S56: files left in the clear when the storage was encrypted, still to be removed.
+/// S28: files left in the clear when the storage was encrypted, still to be removed.
 const CLEAR_FILES: &str = "clear_files";
 /// `push/<device>.json` keeps its own number: the storage format does not change it.
 const PUSH_FORMAT: u32 = 1;
-/// The first bytes of a gzip stream: how a reader tells a compressed snapshot (S46).
+/// The first bytes of a gzip stream: how a reader tells a compressed snapshot (S15).
 const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
 
-/// S45: bytes of this device's log files uploaded since its last snapshot, and the size of that snapshot.
+/// S15: bytes of this device's log files uploaded since its last snapshot, and the size of that snapshot.
 const LOG_BYTES: &str = "log_bytes";
 const SNAP_BYTES: &str = "snap_bytes";
-/// S45: what a snapshot is taken to weigh before the device has written one.
+/// S15: what a snapshot is taken to weigh before the device has written one.
 const SNAP_FLOOR: u64 = 16 * 1024;
 
 /// S26: set while the last run for the fields read everything the storage held.
@@ -81,7 +81,7 @@ const KEPT_AT: &str = "replace_kept_at";
 struct Vault {
     format: u32,
     vault: String,
-    /// S54: format 4 only, the data key wrapped under the passphrase.
+    /// S29: format 2 only, the data key wrapped under the passphrase.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     salt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -100,7 +100,7 @@ impl Vault {
     }
 }
 
-/// What the last look at `vault.json` of a storage found (S54).
+/// What the last look at `vault.json` of a storage found (S28).
 #[derive(Clone)]
 pub(crate) enum Sealing {
     Clear,
@@ -124,7 +124,7 @@ const WRONG_PASSPHRASE: &str =
 const NOT_SEALED: &str = "the storage was encrypted and is not any more; if it was reset on purpose, \
      turn sync off and connect it again";
 
-/// `push/<device>.json`: where the device takes nudges (S18).
+/// `push/<device>.json`: where the device takes nudges (S41).
 #[derive(Serialize, Deserialize)]
 struct PushRecord {
     v: u32,
@@ -295,7 +295,7 @@ fn put_vault(remote: &dyn Remote, path: &str, format: u32, vault: &str) -> Resul
     remote.put(path, &serde_json::to_vec(&vault)?)
 }
 
-/// S54: `vault.json` of an encrypted storage.
+/// S29: `vault.json` of an encrypted storage.
 fn put_sealed_vault(remote: &dyn Remote, vault: &str, wrapped: Wrapped) -> Result<()> {
     let vault = Vault {
         format: SEALED,
@@ -313,7 +313,7 @@ fn newer_format(format: u32) -> AppError {
     ))
 }
 
-/// R140: hashes and counts content as it is written, so a large file never sits in memory.
+/// S25: hashes and counts content as it is written, so a large file never sits in memory.
 struct HashingWriter<W: Write> {
     inner: W,
     hasher: Sha256,
@@ -339,7 +339,7 @@ impl<W: Write> Write for HashingWriter<W> {
     }
 }
 
-/// R140, R142: a temporary file of the content, readable by its owner only.
+/// S25: a temporary file of the content, readable by its owner only (R142 of Lists).
 fn private_create(path: &Path) -> Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -351,7 +351,7 @@ fn private_create(path: &Path) -> Result<std::fs::File> {
     Ok(options.open(path)?)
 }
 
-/// The storage as one run sees it (S55).
+/// The storage as one run sees it (S30).
 enum View<'a> {
     Clear(&'a dyn Remote),
     Sealed(SealedRemote<'a>),
@@ -381,7 +381,7 @@ enum Fetched {
 
 const MISMATCH: &str = "the content in the storage does not match its hash";
 
-/// R102: the record of a file that the pass of attachments could not move:
+/// R95: the record of a file that the pass of attachments could not move:
 /// `meta` keeps `since`, `said` and the message under this prefix and the hash.
 const TROUBLE: &str = "blob_trouble:";
 const TROUBLE_FMT: &str = "%Y-%m-%dT%H:%M:%S";
@@ -517,7 +517,7 @@ impl Store {
     }
 
     /// Reads `vault.json` (S17) and, for an encrypted storage, opens
-    /// its data key (S54). What it found is kept for the runs that follow.
+    /// its data key (S28). What it found is kept for the runs that follow.
     fn check_vault(&self, remote: &dyn Remote) -> Result<()> {
         let sealing = self.read_sealing(remote)?;
         *self.sealed.lock().unwrap_or_else(|p| p.into_inner()) = Some((remote.id(), sealing));
@@ -534,7 +534,7 @@ impl Store {
 
     fn read_sealing(&self, remote: &dyn Remote) -> Result<Sealing> {
         let path = format!("{ROOT}/vault.json");
-        // S60: a storage this device knows as encrypted is not written in the clear.
+        // S28: a storage this device knows as encrypted is not written in the clear.
         let was_sealed = db::meta_get(&self.lock().conn, SEALED_VAULT)?;
         if let Some(vault) = read_vault(remote, &path)? {
             match vault.format {
@@ -555,14 +555,14 @@ impl Store {
         Ok(Sealing::Clear)
     }
 
-    /// S58: opens the data key of an encrypted storage with the passphrase of this device.
+    /// S28: opens the data key of an encrypted storage with the passphrase of this device.
     fn open_vault(&self, vault: &Vault) -> Result<Sealing> {
         let wrapped = vault
             .wrapped()
             .ok_or_else(|| AppError::sync("vault.json in the storage is not readable"))?;
         let data = self.data_key(&vault.vault, &wrapped)?;
         let keys = Arc::new(Keys::new(&data));
-        // S56: the first time this device opens the storage it writes a snapshot of
+        // S28: the first time this device opens the storage it writes a snapshot of
         // its state, and checks anew which content and which address are there.
         let mut inner = self.lock();
         let tx = inner.conn.transaction()?;
@@ -739,7 +739,7 @@ impl Store {
         Ok(pushed)
     }
 
-    /// S18: keeps this device's record in `push/` in step with the address it was given.
+    /// S41: keeps this device's record in `push/` in step with the address it was given.
     fn publish_push(&self, remote: &dyn Remote, me: &str) -> Result<()> {
         let wanted = self.push_endpoint()?;
         if wanted == db::meta_get(&self.lock().conn, "push_published")? {
@@ -764,17 +764,17 @@ impl Store {
         }
     }
 
-    /// S19: tells the other devices that there is something to read. Nothing
+    /// S41: tells the other devices that there is something to read. Nothing
     /// here can fail the run.
     fn poke_peers(&self, remote: &dyn Remote, me: &str) {
         let urls = self.peer_addresses(remote, me);
         self.poke(urls.iter().map(String::as_str));
     }
 
-    /// The addresses the other devices take nudges at (S18). A storage that cannot be read names none.
+    /// The addresses the other devices take nudges at (S41). A storage that cannot be read names none.
     fn peer_addresses(&self, remote: &dyn Remote, me: &str) -> Vec<String> {
         let own = format!("{me}.json");
-        // R102: without the list no device is nudged, and nothing else would say so.
+        // R95: without the list no device is nudged, and nothing else would say so.
         let names = remote.list(&format!("{ROOT}/push")).unwrap_or_else(|e| {
             self.note(LogLevel::Error, "push", || {
                 format!("addresses of the other devices not read: {e}")
@@ -790,7 +790,7 @@ impl Store {
             .collect()
     }
 
-    /// The full state of this device as a snapshot numbered `seq`, compressed (S10, S46).
+    /// The full state of this device as a snapshot numbered `seq`, compressed (S15).
     fn snapshot(&self, me: &str, seq: u64) -> Result<Vec<u8>> {
         let inner = self.lock();
         let mut lines: Vec<Line> = {
@@ -866,7 +866,7 @@ impl Store {
         Ok(wanted.into_iter().filter(|(s, _)| is_sha256(s)).collect())
     }
 
-    /// S34: how many of them are not in both places yet.
+    /// S24: how many of them are not in both places yet.
     fn blobs_waiting(&self) -> Result<u32> {
         let wanted = self.blobs_wanted()?;
         Ok(wanted
@@ -887,7 +887,7 @@ impl Store {
         let remote_path = blob_remote_path(sha256);
         let sent = !remote.exists(&remote_path)?;
         if sent {
-            // R140: the file goes from the disk, not from a copy of it in memory.
+            // S25: the file goes from the disk, not from a copy of it in memory.
             remote.put_file(&remote_path, &self.blob_path(sha256))?;
         }
         self.blob_uploaded(sha256)?;
@@ -898,7 +898,7 @@ impl Store {
     fn download_blob(&self, remote: &dyn Remote, sha256: &str) -> Result<Fetched> {
         let path = blob_remote_path(sha256);
         let local = self.blob_path(sha256);
-        // A pass and a request (S35) may fetch the same content at once: each writes its own file.
+        // A pass and a request (S25) may fetch the same content at once: each writes its own file.
         let tmp = local.with_extension(format!("{}.part", uuid::Uuid::now_v7().simple()));
         let max = self.attachment_limits().max_file;
         let mut out = HashingWriter::new(private_create(&tmp)?);
@@ -933,7 +933,7 @@ impl Store {
         Ok(Fetched::Stored)
     }
 
-    /// S34: one pass over attachment content against the given storage. A file
+    /// S24: one pass over attachment content against the given storage. A file
     /// that fails is left waiting and the rest go on.
     pub fn sync_attachments_with(&self, remote: &dyn Remote) -> Result<AttachmentReport> {
         let _running = match self.blob_lock.try_lock() {
@@ -950,7 +950,7 @@ impl Store {
         self.attachments_pass(&view)
     }
 
-    /// S34 with the pass already held.
+    /// S24 with the pass already held.
     fn attachments_pass(&self, view: &View) -> Result<AttachmentReport> {
         let remote = view.remote();
         let mut report = AttachmentReport::default();
@@ -1056,7 +1056,7 @@ impl Store {
         Ok(())
     }
 
-    /// R102: the files the passes before this one could not move.
+    /// R95: the files the passes before this one could not move.
     fn blob_troubles(&self) -> Result<BTreeMap<String, BlobTrouble>> {
         let inner = self.lock();
         let mut stmt = inner.conn.prepare("SELECT key, value FROM meta WHERE key LIKE ?1")?;
@@ -1073,7 +1073,7 @@ impl Store {
         Ok(found)
     }
 
-    /// R102: says how one file fared in a pass. A new failure is an error line at
+    /// R95: says how one file fared in a pass. A new failure is an error line at
     /// once; content the storage does not have is an event until it has waited an
     /// hour; the same failure again is said at the detailed level and becomes an
     /// error line again after an hour; a file that moves after failing is an event.
@@ -1144,7 +1144,7 @@ impl Store {
         Ok(())
     }
 
-    /// S56 against the given storage; `encrypt_storage` takes the configured one.
+    /// S28 against the given storage; `encrypt_storage` takes the configured one.
     pub fn encrypt_storage_with(&self, raw: &dyn Remote, passphrase: String) -> Result<()> {
         if passphrase.is_empty() {
             return Err(AppError::invalid("the passphrase is empty"));
@@ -1166,7 +1166,7 @@ impl Store {
         self.seal_storage(raw, passphrase)
     }
 
-    /// S59 against the given storage; `change_storage_passphrase` takes the configured one.
+    /// S28 against the given storage; `change_storage_passphrase` takes the configured one.
     pub fn change_storage_passphrase_with(&self, raw: &dyn Remote, passphrase: String) -> Result<()> {
         if passphrase.is_empty() {
             return Err(AppError::invalid("the passphrase is empty"));
@@ -1192,7 +1192,7 @@ impl Store {
     }
 
     /// One run for the fields against the given storage. Attachment content is
-    /// left to `sync_attachments_with` (S34).
+    /// left to `sync_attachments_with` (S24).
     pub fn sync_with(&self, remote: &dyn Remote) -> Result<SyncReport> {
         let _running = self.sync_lock.lock().unwrap_or_else(|p| p.into_inner());
         self.replacing(|| self.run_with(remote))
@@ -1202,7 +1202,7 @@ impl Store {
         let me = self.device_id();
         let mut report = SyncReport::default();
 
-        // S14, S17: the format and the snapshots are looked at once per storage
+        // S17: the format and the snapshots are looked at once per storage
         // and process, and again when something does not add up.
         let storage = raw.id();
         let first = self.storage_seen.lock().unwrap_or_else(|p| p.into_inner()).as_deref() != Some(storage.as_str());
@@ -1218,7 +1218,7 @@ impl Store {
         if unreadable && !first {
             let sealed = view.sealed();
             self.check_vault(raw)?;
-            // S58: the storage was encrypted since the last look: the run starts over with its key.
+            // S28: the storage was encrypted since the last look: the run starts over with its key.
             if self.view(raw)?.sealed() != sealed {
                 *self.storage_seen.lock().unwrap_or_else(|p| p.into_inner()) = None;
                 return self.run_with(raw);
@@ -1243,7 +1243,7 @@ impl Store {
         if report.pushed > 0 {
             own_logs.insert(seq);
         }
-        // S45: a snapshot once the log since the last one outweighs it, or once the files are too many.
+        // S15: a snapshot once the log since the last one outweighs it, or once the files are too many.
         let limit = *self.compact_after.lock().unwrap_or_else(|p| p.into_inner());
         let (forced, outweighs) = {
             let conn = &self.lock().conn;
@@ -1260,7 +1260,7 @@ impl Store {
             db::meta_del(&self.lock().conn, "force_snapshot")?;
         }
 
-        // S41: the addresses are read when they are needed anyway, and once after the server was set.
+        // S43: the addresses are read when they are needed anyway, and once after the server was set.
         let unsettled = db::meta_get(&self.lock().conn, crate::push::UNSETTLED_KEY)?.is_some();
         let peers = (report.pushed > 0 || unsettled).then(|| self.peer_addresses(remote, &me));
         if let Some(peers) = &peers {
@@ -1278,7 +1278,7 @@ impl Store {
         Ok(report)
     }
 
-    /// The storage as sync reads and writes it: through the key when it is encrypted (S55).
+    /// The storage as sync reads and writes it: through the key when it is encrypted (S30).
     /// Its `vault.json` is read here when no run of this process has read it yet.
     fn view<'a>(&self, raw: &'a dyn Remote) -> Result<View<'a>> {
         let sealing = match self.sealing_of(raw) {
@@ -1295,7 +1295,7 @@ impl Store {
         }
     }
 
-    /// S56: removes what the storage held in the clear before it was encrypted.
+    /// S28: removes what the storage held in the clear before it was encrypted.
     /// A removal cut short goes on in the next run.
     fn remove_clear_files(&self, raw: &dyn Remote) -> Result<()> {
         let Some(list) = db::meta_get(&self.lock().conn, CLEAR_FILES)? else {
@@ -1311,8 +1311,8 @@ impl Store {
         db::meta_del(&self.lock().conn, CLEAR_FILES)
     }
 
-    /// S56: writes the state of this device and the content it has, sealed
-    /// under a new data key, then `vault.json` of format 4, and only then
+    /// S28: writes the state of this device and the content it has, sealed
+    /// under a new data key, then `vault.json` of format 2, and only then
     /// removes what lay in the clear. The caller holds both passes and has
     /// just read everything the storage held.
     fn seal_storage(&self, raw: &dyn Remote, passphrase: String) -> Result<()> {
@@ -1332,7 +1332,7 @@ impl Store {
                 }
             }
         }
-        // S61: the backups that lay in the clear go with the rest.
+        // S32: the backups that lay in the clear go with the rest.
         for device in raw.folders(&backups::backups_dir())? {
             for name in raw.list(&format!("{}/{device}", backups::backups_dir()))? {
                 clear.push(format!("{}/{device}/{name}", backups::backups_dir()));
@@ -1344,7 +1344,7 @@ impl Store {
         let sealed = SealedRemote::new(raw, keys.clone());
 
         // The snapshot takes a number no device has read yet: every device
-        // reads it, a device without the key stops on it (S14), and the files
+        // reads it, a device without the key stops on it (S28), and the files
         // of the others it holds may go.
         let seq = own_seq(&self.lock().conn)? + 1;
         let snap = format!("{ROOT}/snap/{}", file_name(&me, seq));
@@ -1588,7 +1588,7 @@ impl Store {
 
     /// Replaces the registers and makes this a device the storage has not seen
     /// (S36, S38): with nothing, or with the registers of the database at
-    /// `from` (R90). One transaction: a failure leaves what was there. The
+    /// `from` (R72). One transaction: a failure leaves what was there. The
     /// caller holds the sync lock.
     pub(crate) fn renew(&self, from: Option<&std::path::Path>, keep_settings: bool) -> Result<()> {
         let mut inner = self.lock();
@@ -1640,7 +1640,7 @@ impl Store {
             };
             let mut touched = Touched::new();
             for change in changes.iter().filter(|c| c.is_well_formed()) {
-                // Everything is to be uploaded: the storage has not seen this device (S40).
+                // Everything is to be uploaded: the storage has not seen this device (S38).
                 db::apply(&tx, change, true, &mut touched)?;
             }
             // S38: the texts of the notes that got in, all of them to be uploaded.
@@ -1765,7 +1765,7 @@ impl Store {
         *self.sync_password.lock().unwrap_or_else(|p| p.into_inner()) = password;
     }
 
-    /// S58: keeps the passphrase of an encrypted storage for this process only,
+    /// S31: keeps the passphrase of an encrypted storage for this process only,
     /// the way `set_sync_password` keeps the password. A different one makes
     /// the next run read `vault.json` again and open it with this one.
     pub fn set_sync_passphrase(&self, passphrase: Option<String>) {
@@ -1780,9 +1780,9 @@ impl Store {
         *self.storage_seen.lock().unwrap_or_else(|p| p.into_inner()) = None;
     }
 
-    /// S56: encrypts the WebDAV or folder storage with `passphrase`. The device
+    /// S28: encrypts the WebDAV or folder storage with `passphrase`. The device
     /// syncs first, then writes its state and the content of its attachments
-    /// sealed, then `vault.json` of format 4, and removes what lay in the clear.
+    /// sealed, then `vault.json` of format 2, and removes what lay in the clear.
     /// Takes as long as a sync with every attachment: call it off the main thread.
     /// On success the passphrase is kept as with `set_sync_passphrase`; the app
     /// stores it where it stores the password.
@@ -1793,7 +1793,7 @@ impl Store {
         self.encrypt_storage_with(raw.as_ref(), passphrase)
     }
 
-    /// S59: wraps the data key of the encrypted storage under a new passphrase
+    /// S28: wraps the data key of the encrypted storage under a new passphrase
     /// and rewrites only `vault.json`. The other devices ask for the new one
     /// the next time they read `vault.json`.
     pub fn change_storage_passphrase(&self, passphrase: String) -> Result<()> {
@@ -1886,7 +1886,7 @@ impl Store {
             Ok(Some(report)) => Ok(report),
             Err(e) => Err(e),
         };
-        // R102: a run that changed nothing is said at the most detailed level only, and so is a
+        // R95: a run that changed nothing is said at the most detailed level only, and so is a
         // failure that repeats the one before it: a device left without a network fails on every run.
         let before = db::meta_get(&self.lock().conn, "sync_error")?;
         match &result {
@@ -1916,7 +1916,7 @@ impl Store {
         result
     }
 
-    /// S34: moves attachment content after a run of `sync_now`: uploads what
+    /// S24: moves attachment content after a run of `sync_now`: uploads what
     /// the storage lacks and downloads what this device lacks. A file that
     /// fails stays waiting and does not fail the call. Does nothing while
     /// another pass is going.
@@ -1934,7 +1934,7 @@ impl Store {
         result
     }
 
-    /// S35: downloads the content of one attachment now, ahead of the pass.
+    /// S25: downloads the content of one attachment now, ahead of the pass.
     pub fn fetch_attachment(&self, id: String) -> Result<Attachment> {
         let found = |store: &Store| -> Result<Attachment> {
             let note: Option<String> = store
@@ -1974,7 +1974,7 @@ impl Store {
                 Fetched::Mismatch => Err(AppError::sync(MISMATCH)),
             }
         })();
-        // R102: the app shows that the download failed; the log keeps why.
+        // R95: the app shows that the download failed; the log keeps why.
         if let Err(e) = &fetched {
             let target = blob_label(&attachment.sha256);
             let reason = hide_hash(&e.to_string(), &attachment.sha256);

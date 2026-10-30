@@ -1,4 +1,4 @@
-//! Markdown in notes: docs/specs/product.md, R48–R52.
+//! Markdown in notes as R48–R52 of Lists; the dialect of Notes is in docs/specs/editor.md.
 //!
 //! The note stays the text that was typed. The apps get the ranges to style,
 //! to hide and to replace, in UTF-16 units, which is how Swift's `NSString`,
@@ -84,7 +84,7 @@ pub struct MarkdownTableRow {
     pub cells: Vec<MarkdownCell>,
 }
 
-/// A table to draw as a grid (R60) while the cursor is outside its block.
+/// A table to draw as a grid (E15 in docs/specs/editor.md) while the cursor is outside its block.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct MarkdownTable {
     pub start: u32,

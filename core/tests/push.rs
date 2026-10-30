@@ -37,7 +37,7 @@ impl Inbox {
         Some(format!("{}/{name}", self.base))
     }
 
-    /// What arrived since the last look. Nudges leave after the run (S19): they are waited for first.
+    /// What arrived since the last look. Nudges leave after the run (S41): they are waited for first.
     fn take(&self) -> Vec<String> {
         finish_pushes();
         std::mem::take(&mut self.got.lock().unwrap())
@@ -59,26 +59,26 @@ fn nudges_follow_uploads(a: &Device, b: &Device, inbox: &Inbox) {
     a.sync_now().unwrap();
     inbox.take();
 
-    // S19: an upload nudges the others, not the sender.
+    // S41: an upload nudges the others, not the sender.
     let note = add(a, "от A");
     a.sync_now().unwrap();
     assert_eq!(inbox.take(), ["POST /b sync"]);
 
-    // S21: reading is not an upload, and neither is a run with nothing to do.
+    // S42: reading is not an upload, and neither is a run with nothing to do.
     b.sync_now().unwrap();
     a.sync_now().unwrap();
     b.sync_now().unwrap();
     assert_eq!(oldest_first(b), ["от A"]);
     assert_eq!(inbox.take(), Vec::<String>::new());
 
-    // S18: a device that stops listening is no longer nudged.
+    // S41: a device that stops listening is no longer nudged.
     b.set_push_endpoint(None).unwrap();
     b.sync_now().unwrap();
     a.set_title(note.id.clone(), "от A, изменено".into()).unwrap();
     a.sync_now().unwrap();
     assert_eq!(inbox.take(), Vec::<String>::new());
 
-    // S20: an address nobody listens at does not get in the way.
+    // S41: an address nobody listens at does not get in the way.
     b.set_push_endpoint(Some("http://127.0.0.1:9/nobody".into())).unwrap();
     b.sync_now().unwrap();
     a.set_title(note.id.clone(), "от A, ещё раз".into()).unwrap();
@@ -287,7 +287,7 @@ impl Ntfy {
         *self.elsewhere.lock().unwrap() = Some(other.base.clone());
     }
 
-    /// What arrived since the last look. Nudges leave after the run (S19): they are waited for first.
+    /// What arrived since the last look. Nudges leave after the run (S41): they are waited for first.
     fn take(&self) -> Vec<String> {
         finish_pushes();
         std::mem::take(&mut self.seen.lock().unwrap())
@@ -547,11 +547,11 @@ fn s43_a_device_that_only_sends_names_its_server() {
     assert_eq!(ntfy.take(), [format!("POST /b Bearer {TOKEN}")]);
     assert!(!phone.push_refused());
 
-    // S30: the refusal of a nudge is reported, and the sync run is not hurt by it.
+    // S45: the refusal of a nudge is reported, and the sync run is not hurt by it.
     phone.set_push_token(Some("tk_wrong".into()));
     add(&phone, "и ещё");
     assert!(phone.sync_now().unwrap().pushed > 0);
-    // S19: the nudge leaves after the run, and so does what its answer says.
+    // S41: the nudge leaves after the run, and so does what its answer says.
     finish_pushes();
     assert!(phone.push_refused());
     phone.set_push_token(Some(TOKEN.into()));
