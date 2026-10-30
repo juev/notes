@@ -28,6 +28,7 @@ import SwiftUI
 /// `set:font=Literata` (also `mono`, `lineheight`, `spacing`, `align=justify`, `hyphenate=on`, `size`, `column`), `settingsshot:/path/to.png` (with the tab of `settingsTab`),
 /// `importfull:/backup|/folder of files`, `exportall:/dir`, `exportjson:/dir`, `exporthtml:/dir`, `exportpdf:/file.pdf`,
 /// `attach:/path` (attaches the file to the open note with a link at the cursor),
+/// `corequiet:5,text` (the same without telling the window, as a sync still running),
 /// `corewrite:5,text` (an edit of the core under the open editor, as a sync brings one),
 /// `newnote` (the way ⌘N does), `newentry`, `undo`, `importsn:/path` (imports a backup of Standard Notes).
 /// With `NOTES_DEBUG_DIR=/folder` the run has its data and settings in that folder. With
@@ -309,6 +310,10 @@ enum DebugScript {
         case "attachments":
             print("debug: attachments \(model.attachments.map { "\($0.name) \(model.isInText($0) ? "in the text" : "not in the text")" })")
         case "attach": model.selectedNote.map { model.attach([URL(fileURLWithPath: argument)], to: $0) }
+        case "corequiet":
+            // An edit of the core the window has not heard of, as a sync in the background makes one.
+            let (position, text) = cut(argument, ",")
+            if let id = model.selectedNote { try? model.store?.spliceUtf16(id: id, pos: UInt32(position) ?? 0, deleteLen: 0, insert: text) }
         case "cursor": print("debug: cursor \(editor?.selectedRange().location ?? -1)")
         case "newnote": model.newNote()
         case "newentry": model.newEntryForToday()

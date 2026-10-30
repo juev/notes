@@ -303,3 +303,35 @@ fn r75_a_note_made_undone_and_redone_is_back() {
     assert_eq!(d.get_text(source.id).unwrap(), linked);
     assert!(!d.get_note(made.id).unwrap().deleted);
 }
+
+#[test]
+fn r75_two_redos_of_one_field_put_back_both_actions() {
+    let d = device();
+    let note = add(&d, "заметка");
+    d.set_starred(note.id.clone(), true).unwrap();
+    d.set_starred(note.id.clone(), false).unwrap();
+    d.undo().unwrap();
+    d.undo().unwrap();
+    assert!(!d.get_note(note.id.clone()).unwrap().starred);
+    assert_eq!(d.redo().unwrap(), 1);
+    assert!(d.get_note(note.id.clone()).unwrap().starred);
+    assert_eq!(d.redo().unwrap(), 1);
+    assert!(!d.get_note(note.id.clone()).unwrap().starred);
+    // And all the way back again.
+    assert_eq!(d.undo().unwrap(), 1);
+    assert!(d.get_note(note.id).unwrap().starred);
+}
+
+#[test]
+fn r75_a_note_deleted_and_restored_is_redone_in_order() {
+    let d = device();
+    let note = add(&d, "заметка");
+    d.delete_note(note.id.clone()).unwrap();
+    d.restore_note(note.id.clone()).unwrap();
+    d.undo().unwrap();
+    d.undo().unwrap();
+    d.redo().unwrap();
+    assert!(d.get_note(note.id.clone()).unwrap().deleted);
+    d.redo().unwrap();
+    assert!(!d.get_note(note.id).unwrap().deleted);
+}

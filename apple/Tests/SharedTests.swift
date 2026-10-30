@@ -236,3 +236,9 @@ final class RebasedEditTests: XCTestCase {
         XCTAssertEqual(typed.rebased(over: other), TextEdit(position: 2, deleted: 2, inserted: ""))
     }
 }
+
+final class AppliedEditTests: XCTestCase {
+    func testAnEditGivesTheTextAfterIt() {
+        XCTAssertEqual(TextEdit(position: 1, deleted: 1, inserted: "😀").applied(to: "абв"), "а😀в")
+    }
+}

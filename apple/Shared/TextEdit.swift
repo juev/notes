@@ -23,6 +23,13 @@ struct TextEdit: Equatable {
         return TextEdit(position: start, deleted: a.count - start - tail, inserted: String(decoding: b[start..<(b.count - tail)], as: UTF16.self))
     }
 
+    /// The text after this edit.
+    func applied(to text: String) -> String {
+        var units = Array(text.utf16)
+        units.replaceSubrange(position..<(position + deleted), with: Array(inserted.utf16))
+        return String(decoding: units, as: UTF16.self)
+    }
+
     /// The same edit for a text that `other` has changed meanwhile (S3): both stay.
     func rebased(over other: TextEdit) -> TextEdit {
         let start = other.moved(position)
