@@ -187,9 +187,3 @@ fun MenuDialog(title: String, onDismiss: () -> Unit, content: @Composable () -> 
         dismissButton = { TextButton(onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
 }
-
-/** The note open in the editor; the editor itself comes with the next step of the plan. */
-@Composable
-private fun NoteScreen(id: String) {
-    Text(id)
-}
