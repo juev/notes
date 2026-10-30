@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 use serde_json::{json, Value};
+use sha2::Digest as _;
 use uuid::Uuid;
 
 use super::backup::{self, Item};
@@ -81,9 +82,14 @@ fn id_for(kind: &str, key: &str) -> String {
     Uuid::new_v5(&namespace(), format!("{kind}:{key}").as_bytes()).to_string()
 }
 
-/// The actor of the first change of an imported text (I5 and `body::create_imported`).
-fn seed(uuid: &str) -> [u8; 16] {
-    *Uuid::new_v5(&namespace(), format!("actor:{uuid}").as_bytes()).as_bytes()
+/// The actor of the first change of an imported text (I5 and `body::create_imported`): the same
+/// for the same item with the same text and time, so that two devices importing one backup make
+/// one change. A different text, from a backup of another day or a file found on one device only,
+/// gets another actor: two changes with one actor and one sequence number but different content
+/// would be refused by Automerge for good and the devices would never agree.
+fn seed(uuid: &str, text: &str, time_ms: u64) -> [u8; 16] {
+    let digest = crate::store::hex(&sha2::Sha256::digest(text.as_bytes()));
+    *Uuid::new_v5(&namespace(), format!("actor:{uuid}:{time_ms}:{digest}").as_bytes()).as_bytes()
 }
 
 fn exists(conn: &Connection, kind: &str, id: &str) -> Result<bool> {
@@ -448,7 +454,7 @@ fn write_all(
             w.set_at(KIND_NOTE, &id, &tag::require_field(&name)?, json!(true), at)?;
             tag_names.insert(tag::key(&name));
         }
-        body::create_imported(w, &id, &text, seed(&item.uuid), at)?;
+        body::create_imported(w, &id, &text, seed(&item.uuid, &text, at), at)?;
 
         // I9
         for file in &mine {
@@ -490,7 +496,8 @@ fn write_all(
             if let Some(root) = &root {
                 w.set_at(KIND_NOTE, &id, "folder", json!(root), at)?;
             }
-            body::create_imported(w, &id, &lines.join("\n\n"), seed("files-from-standard-notes"), at)?;
+            let text = lines.join("\n\n");
+            body::create_imported(w, &id, &text, seed("files-from-standard-notes", &text, at), at)?;
             w.flush()?;
             report.notes += 1;
         }

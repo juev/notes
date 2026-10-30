@@ -509,3 +509,26 @@ fn i12_the_report_reads_as_text_and_the_log_has_numbers_only() {
     assert!(log.contains("Standard Notes: 1 notes"), "{log}");
     assert!(!log.contains("Секретная"), "no titles in the log");
 }
+
+#[test]
+fn i5_two_devices_that_import_different_backups_still_agree() {
+    let a = device();
+    let b = device();
+    let storage = tempfile::tempdir().unwrap();
+    // A backup of an earlier day on A, a later one on B: one item, two texts.
+    import(&a, &backup(vec![note("n1", "Общая", "начало")]));
+    let mut later = note("n1", "Общая", "начало и продолжение");
+    later["updated_at_timestamp"] = serde_json::json!((YEAR_AGO_MS + 86_400_000) * 1000);
+    import(&b, &backup(vec![later]));
+    let id = find(&a, "Общая").id;
+    let remote = DirRemote::new(storage.path());
+    a.sync_with(&remote).unwrap();
+    b.sync_with(&remote).unwrap();
+    a.sync_with(&remote).unwrap();
+    b.splice_utf16(id.clone(), 0, 0, "B: ".into()).unwrap();
+    b.sync_with(&remote).unwrap();
+    a.sync_with(&remote).unwrap();
+    b.sync_with(&remote).unwrap();
+    // Both show the same text: one of the two documents, the same one everywhere (S3).
+    assert_eq!(a.get_text(id.clone()).unwrap(), b.get_text(id).unwrap());
+}
