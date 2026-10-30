@@ -19,6 +19,7 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -100,6 +101,10 @@ fun logError(source: String, message: String) {
 object Repo {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     val store: Store get() = NotesApp.instance.store
+
+    /** The way of the screens to the core: one call at a time, in the order they were made. Sync runs beside it. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val core = Dispatchers.IO.limitedParallelism(1)
 
     /** Bumped after every change, local or pulled; screens reload when it moves. */
     val revision = MutableStateFlow(0)
