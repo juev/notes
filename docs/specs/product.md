@@ -23,7 +23,7 @@ The interface is in English with a Russian localization and follows the system l
 ### Folders
 
 - R10. Folders are nested to any depth. A note lies in one folder or in none. A folder has a name and an icon: a symbol from the app's set or an emoji.
-- R11. Notes and folders are moved by dragging and through the menu "Move to…". A folder cannot be moved into itself or into its own subfolder.
+- R11. Notes and folders are moved through the menu "Move to…", and on macOS and the web also by dragging. A folder cannot be moved into itself or into its own subfolder.
 - R12. The sidebar shows the tree of folders with the number of notes in each, counting the notes of its subfolders. A folder can be collapsed; whether it is collapsed is a setting of the device.
 - R13. "No folder" in the sidebar lists the notes that lie outside any folder.
 - R14. Deleting a folder moves the folder, its subfolders and all their notes to the Trash, after a confirmation that names the number of notes. Restoring a note puts it back into its folder and restores the folders on the way if they are in the Trash (S10 in [sync.md](sync.md)).
