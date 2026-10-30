@@ -22,6 +22,8 @@ import SwiftUI
 /// `format:bold` (also `italic`, `strike`, `code`, `highlight`, `link`, `h1`, `h2`, `p`, `bullets`, `numbers`, `tasks`, `quote`), `select:2,6`,
 /// `enter`, `tab`, `backtab` (as those keys in the text), `pastehtml:<b>x</b>` and `pasteurl:https://…` (paste from a pasteboard of the script),
 /// `wait1` (a pause that ends a step of the history of typing), `redo`,
+/// `files` (opens the view of files, `files:off` closes it), `attachments` (prints those of the open note, with whether the text has them),
+/// `attach:/path` (attaches the file to the open note with a link at the cursor),
 /// `corewrite:5,text` (an edit of the core under the open editor, as a sync brings one),
 /// `newnote` (the way ⌘N does), `newentry`, `undo`, `importsn:/path` (imports a backup of Standard Notes).
 /// With `NOTES_DEBUG_DIR=/folder` the run has its data and settings in that folder. With
@@ -173,7 +175,9 @@ enum DebugScript {
         case "focus":
             // The keyboard to the text, in a window that is not the key one as well.
             if let view = editor { view.window?.makeFirstResponder(view) }
-        case "caret": editor?.debugCaret(Int(argument) ?? 0)
+        case "caret":
+            editor?.debugCaret(Int(argument) ?? 0)
+            editor?.scrollRangeToVisible(editor?.selectedRange() ?? NSRange())
         case "seen": print("debug: seen \(editor?.debugSeen.debugDescription ?? "no editor")")
         case "text": print("debug: core text \(model.selectedNote.map { model.text(of: $0) }.debugDescription)")
         case "flush": model.flushEdits()
@@ -208,6 +212,10 @@ enum DebugScript {
             print("debug: pasted \(editor?.paste(from: pasteboard) ?? false)")
         case "wait1": try? await Task.sleep(for: .seconds(TypingHistory.pause + 0.1))
         case "redo": model.undoManager?.redo()
+        case "files": model.filesOpen = argument != "off"
+        case "attachments":
+            print("debug: attachments \(model.attachments.map { "\($0.name) \(model.isInText($0) ? "in the text" : "not in the text")" })")
+        case "attach": model.selectedNote.map { model.attach([URL(fileURLWithPath: argument)], to: $0) }
         case "cursor": print("debug: cursor \(editor?.selectedRange().location ?? -1)")
         case "newnote": model.newNote()
         case "newentry": model.newEntryForToday()

@@ -69,6 +69,7 @@ struct AppCommands: Commands {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        AttachmentFiles.clear()
         #if DEBUG
         MainActor.assumeIsolated { DebugScript.runIfAsked() }
         #endif

@@ -30,10 +30,19 @@ final class AppModel {
     var settings = AppSettings(
         trashDays: 30, fontBody: "system", fontMono: "system", lineHeight: 1.5, paragraphSpacing: 0.5, align: .left,
         hyphenate: false, smartTypography: true, spellcheck: true, spellLanguage: "auto", newNoteFolder: "root")
+    /// The attachments of the open note.
+    var attachments: [Attachment] = []
+    /// R37: the view "Files" is open in place of the list of notes.
+    var filesOpen = false
     /// The note open in the editor.
     var selectedNote: String? {
         willSet { flushEdits() }
-        didSet { if selectedNote != oldValue, let left = oldValue { dropIfUntouched(left) } }
+        didSet {
+            if selectedNote != oldValue {
+                attachments = selectedNote.flatMap { try? store?.attachments(noteId: $0) } ?? []
+                if let left = oldValue { dropIfUntouched(left) }
+            }
+        }
     }
     /// The text view of the open note, for the formats of the menu.
     @ObservationIgnored weak var activeEditor: MarkdownTextView?
@@ -146,6 +155,8 @@ final class AppModel {
         default: break
         }
         reloadNotes()
+        let files = selectedNote.flatMap { try? store.attachments(noteId: $0) } ?? []
+        if files != attachments { attachments = files; activeEditor?.reloadAttachments() }
         textRevision += 1
     }
 
@@ -240,6 +251,76 @@ final class AppModel {
         } else {
             NSWorkspace.shared.open(url)
         }
+    }
+
+    // MARK: Attachments
+
+    /// R30: the files go into the note, each with a link at the cursor.
+    func attach(_ urls: [URL], to id: String) {
+        touched(id)
+        for url in urls {
+            guard let file = perform(named: L("Attach File"), { try $0.addAttachment(noteId: id, path: url.path, name: nil) }) else { continue }
+            activeEditor?.insert(link: AttachmentFiles.link(file))
+        }
+        reloadAttachments()
+    }
+
+    func reloadAttachments() {
+        attachments = selectedNote.flatMap { try? store?.attachments(noteId: $0) } ?? []
+        activeEditor?.reloadAttachments()
+    }
+
+    func attachment(_ id: String) -> Attachment? { attachments.first { $0.id == id } }
+
+    /// R33: whether the text still has the link of an attachment.
+    func isInText(_ file: Attachment) -> Bool {
+        selectedNote.map { text(of: $0).contains("attachment:\(file.id)") } ?? false
+    }
+
+    /// R33: deleted by hand from the panel.
+    func removeAttachment(_ id: String) {
+        perform(named: L("Delete Attachment")) { try $0.removeAttachment(id: id) }
+        reloadAttachments()
+    }
+
+    /// R31, R32: a click shows the file; R35: one that has not arrived is fetched ahead of the queue.
+    func openAttachment(_ id: String) {
+        guard let file = attachment(id) else { return }
+        guard file.localPath != nil else { return fetch(file) }
+        if let url = AttachmentFiles.named(file) { NSWorkspace.shared.open(url) }
+    }
+
+    private func fetch(_ file: Attachment) {
+        guard let store else { return }
+        let id = file.id
+        Task.detached(priority: .userInitiated) {
+            let result = Result { try store.fetchAttachment(id: id) }
+            await MainActor.run {
+                if case .failure(let error) = result { self.alert = describe(error) }
+                self.reloadAttachments()
+            }
+        }
+    }
+
+    /// R37: a tap opens the file; "Show in note" opens the note at the place of the link.
+    func showInNote(_ note: String, then file: String, open openFile: Bool) {
+        if openFile, let found = (try? store?.attachments(noteId: note))?.first(where: { $0.id == file }) {
+            if let url = AttachmentFiles.named(found) { NSWorkspace.shared.open(url) }
+            return
+        }
+        filesOpen = false
+        scope = .all
+        open(note)
+        DispatchQueue.main.async { self.activeEditor?.reveal("attachment:\(file)") }
+    }
+
+    /// R37: every attachment of the notes outside the Trash, the newest first.
+    func allFiles() -> [(file: Attachment, note: Note)] {
+        guard let store else { return [] }
+        let notes = ((try? store.notes(scope: .all)) ?? []) + ((try? store.notes(scope: .archived)) ?? [])
+        return notes.filter { $0.attachments > 0 }
+            .flatMap { note in ((try? store.attachments(noteId: note.id)) ?? []).map { (file: $0, note: note) } }
+            .sorted { $0.note.editedMs > $1.note.editedMs }
     }
 
     // MARK: Reading
