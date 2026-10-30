@@ -73,6 +73,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -346,6 +347,7 @@ private fun LockBar(note: Note) {
 @Composable
 private fun TitleField(note: Note, view: NoteEditText) {
     var title by remember(note.id) { mutableStateOf(note.title) }
+    var saved by remember(note.id) { mutableStateOf(note.title) }
     var focused by remember { mutableStateOf(false) }
     val focus = remember { FocusRequester() }
     LaunchedEffect(note.id) {
@@ -354,13 +356,24 @@ private fun TitleField(note: Note, view: NoteEditText) {
             focus.requestFocus()
         }
     }
-    LaunchedEffect(note.title) { if (!focused) title = note.title }
-    // A title is saved when typing pauses: each saving is an action of undo in the core.
+    LaunchedEffect(note.title) {
+        if (!focused) {
+            title = note.title
+            saved = note.title
+        }
+    }
+    // A title is saved when typing pauses: each saving is an action of undo in the core. The field also
+    // leaves the screen while the text is typed in, and what is not saved by then is saved as it goes.
+    val shown by rememberUpdatedState(title)
     LaunchedEffect(title) {
-        if (title == note.title) return@LaunchedEffect
+        if (title == saved) return@LaunchedEffect
         AppModel.touched(note.id)
         delay(400)
+        saved = title
         AppModel.setTitle(note.id, title)
+    }
+    DisposableEffect(note.id) {
+        onDispose { if (shown != saved) AppModel.setTitle(note.id, shown) }
     }
     BasicTextField(
         title,
@@ -514,6 +527,10 @@ private fun FindBar(view: NoteEditText, onClose: () -> Unit) {
     var with by remember { mutableStateOf("") }
     var count by remember { mutableStateOf(0) }
     LaunchedEffect(query) { count = view.find(query) }
+    DisposableEffect(view) {
+        view.onFound = { count = it }
+        onDispose { view.onFound = {} }
+    }
     DisposableEffect(Unit) { onDispose { view.endFind() } }
     Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
