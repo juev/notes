@@ -121,7 +121,7 @@ fn r70_r72_a_backup_restores_on_a_clean_install() {
     assert_eq!(std::fs::read(file.local_path.unwrap()).unwrap(), b"1 2 3");
     // A clean install had nothing to keep before the restore.
     assert!(fresh.backups().unwrap().is_empty());
-    // The restored device is not the one that made the backup (S40).
+    // The restored device is not the one that made the backup (S38).
     assert_ne!(fresh.device_id(), old.device_id());
 }
 

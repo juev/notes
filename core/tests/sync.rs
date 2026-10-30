@@ -11,14 +11,14 @@ use notes_core::sync::remote::{DirRemote, Remote};
 use notes_core::*;
 use tempfile::TempDir;
 
-/// The root of the storage (S49).
+/// The root of the storage.
 const ROOT: &str = "notes";
 
 fn sync(d: &Device, storage: &TempDir) -> SyncReport {
     d.sync_with(&DirRemote::new(storage.path())).unwrap()
 }
 
-/// S34: the pass that moves attachment content.
+/// S24: the pass that moves attachment content.
 fn sync_files(d: &Device, storage: &TempDir) -> AttachmentReport {
     d.sync_attachments_with(&DirRemote::new(storage.path())).unwrap()
 }
@@ -659,7 +659,7 @@ fn s25_content_that_does_not_match_its_hash_is_not_fetched() {
     assert_eq!(b.attachments(t.id).unwrap()[0].local_path, None);
 }
 
-/// R140: a storage whose byte methods refuse attachment content: the core must use the file methods.
+/// S25: a storage whose byte methods refuse attachment content: the core must use the file methods.
 struct Streams {
     inner: DirRemote,
     sent: AtomicU32,
@@ -1080,7 +1080,7 @@ fn in_storage(storage: &TempDir, sha256: &str) -> bool {
         .exists()
 }
 
-/// Both passes, the way the apps run them (S34).
+/// Both passes, the way the apps run them (S24).
 fn sync_all(d: &Device, storage: &TempDir) {
     sync(d, storage);
     sync_files(d, storage);

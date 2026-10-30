@@ -1,4 +1,4 @@
-//! Backups of the data and restoring from them: R87–R90 in docs/specs/product.md.
+//! Backups of the data and restoring from them: R70–R72 in docs/specs/product.md.
 //!
 //! ```text
 //! Notes_(2026-10-09-11_15_05).notesbackup    a zip:
@@ -44,7 +44,7 @@ struct Manifest {
     blobs: u64,
 }
 
-/// A backup in the app's own folder (R89).
+/// A backup in the app's own folder (R70).
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct Backup {
     /// File name; what `delete_backup` takes.
@@ -56,7 +56,7 @@ pub struct Backup {
     pub size: u64,
 }
 
-/// Settings of this device, not synced (R88).
+/// Settings of this device, not synced (R70).
 #[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
 pub struct BackupSettings {
     /// Hours between automatic backups: 0 (off), 24 or 48.
@@ -76,7 +76,7 @@ pub(crate) fn created_of(name: &str) -> Option<NaiveDateTime> {
     NaiveDateTime::parse_from_str(moment, NAME_FMT).ok()
 }
 
-/// R142: `backups/` and the copies in it, as an earlier version may have left them, closed from
+/// R142 of Lists: `backups/` and the copies in it, as an earlier version may have left them, closed from
 /// other users. A folder that is not there yet is left to the first backup.
 pub(crate) fn close_backups(dir: &Path) -> Result<()> {
     if !dir.is_dir() {
@@ -138,7 +138,7 @@ impl Store {
         })
     }
 
-    /// S60: an archive for the storage written to `part`, without attachment content, and the
+    /// S32: an archive for the storage written to `part`, without attachment content, and the
     /// name it goes under.
     pub(crate) fn write_storage_backup(&self, part: &Path) -> Result<String> {
         let dir = self.backups_dir();
@@ -172,7 +172,7 @@ impl Store {
             copied?;
             bodies?;
             let fields = inner.conn.query_row("SELECT count(*) FROM fields", [], |r| r.get(0))?;
-            // Read from the registers, not from the derived table: before a migration (R92)
+            // Read from the registers, not from the derived table: before a migration (R92 of Lists)
             // the derived tables are as an earlier version left them.
             let mut stmt = inner.conn.prepare(
                 "SELECT DISTINCT json_extract(value, '$') FROM fields
@@ -208,7 +208,7 @@ impl Store {
         Ok(())
     }
 
-    /// R88: removes the oldest backups beyond the number to keep.
+    /// R70: removes the oldest backups beyond the number to keep.
     fn rotate(&self) -> Result<()> {
         let keep = self.backup_settings()?.keep as usize;
         for old in self.backups()?.into_iter().skip(keep) {
@@ -240,7 +240,7 @@ impl Store {
         db::meta_set(&inner.conn, "backup_keep", &settings.keep.to_string())
     }
 
-    /// The backups in the app's folder, newest first (R89).
+    /// The backups in the app's folder, newest first (R72).
     pub fn backups(&self) -> Result<Vec<Backup>> {
         let entries = match std::fs::read_dir(self.backups_dir()) {
             Ok(entries) => entries,
@@ -263,10 +263,10 @@ impl Store {
         Ok(found)
     }
 
-    /// "Create backup now" (R89): makes a backup, then drops the oldest beyond the number to keep.
+    /// "Create backup now" (R89 of Lists): makes a backup, then drops the oldest beyond the number to keep.
     pub fn create_backup(&self) -> Result<Backup> {
         let backup = self.write_backup()?;
-        // R102: the archive is there, but old ones are not removed and the folder grows.
+        // R95: the archive is there, but old ones are not removed and the folder grows.
         if let Err(e) = self.rotate() {
             self.note(LogLevel::Error, "backup", || format!("old backups not removed: {e}"));
             return Err(e);
@@ -274,10 +274,10 @@ impl Store {
         Ok(backup)
     }
 
-    /// R88: makes the automatic backup when its time has come. Cheap to call often.
+    /// R70: makes the automatic backup when its time has come. Cheap to call often.
     pub fn backup_if_due(&self) -> Result<Option<Backup>> {
         let _looking = self.backup_lock.lock().unwrap_or_else(|p| p.into_inner());
-        // R102: a failure of the archive itself is said where it is written; the rest is said here.
+        // R95: a failure of the archive itself is said where it is written; the rest is said here.
         let mut said = false;
         let due = (|| {
             let every = self.backup_settings()?.every_hours;
@@ -313,9 +313,9 @@ impl Store {
         }
     }
 
-    /// R90: replaces the data with what the backup at `path` holds, after a
+    /// R72: replaces the data with what the backup at `path` holds, after a
     /// backup of the present state. With sync on, `over_storage` puts the
-    /// restored state over the storage and the other devices (S40); without
+    /// restored state over the storage and the other devices (S38); without
     /// it the two are merged.
     pub fn restore_backup(&self, path: String, over_storage: bool) -> Result<()> {
         let result = (|| {
@@ -399,7 +399,7 @@ impl Store {
             }
             if hex(&digest.finalize()) == hash {
                 std::fs::rename(&tmp, &target)?;
-                // R142: as private as content added by hand.
+                // R142 of Lists: as private as content added by hand.
                 crate::store::private_file(&target)?;
             } else {
                 std::fs::remove_file(&tmp)?;

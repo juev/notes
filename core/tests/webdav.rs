@@ -140,9 +140,9 @@ fn check(url: &str, password: &str) -> Result<ConnectionCheck> {
     )
 }
 
-// S26
+// S46
 #[test]
-fn connection_test_tells_a_ready_storage_from_one_the_first_sync_creates() {
+fn s46_connection_test_tells_a_ready_storage_from_one_the_first_sync_creates() {
     let dav = start();
     let seen = dav.requests(|| assert_eq!(check(&dav.url, "secret").unwrap(), ConnectionCheck::WillCreate));
     assert!(seen.iter().all(|r| r.starts_with("PROPFIND ")), "{seen:?}");
@@ -153,9 +153,9 @@ fn connection_test_tells_a_ready_storage_from_one_the_first_sync_creates() {
     assert_eq!(seen, ["PROPFIND /dav/user/ depth=0"]);
 }
 
-// S26
+// S46
 #[test]
-fn connection_test_names_what_is_wrong() {
+fn s46_connection_test_names_what_is_wrong() {
     let dav = start();
     let err = check(&dav.url, "wrong").unwrap_err().to_string();
     assert!(err.contains("401") && err.contains("password"), "{err}");
@@ -194,9 +194,9 @@ fn connection_test_names_what_is_wrong() {
     assert!(check("ftp://example.org", "secret").is_err());
 }
 
-// S26
+// S46
 #[test]
-fn connection_test_leaves_the_settings_of_the_device_alone() {
+fn s46_connection_test_leaves_the_settings_of_the_device_alone() {
     let dav = start();
     let a = device();
     connect(&a, &dav, "secret");
@@ -461,7 +461,7 @@ fn s18_put_creates_the_missing_folder_after_a_409_without_asking_for_it() {
     );
 }
 
-/// S54–S56 over HTTP: the storage is encrypted from the settings, the other
+/// S28 over HTTP: the storage is encrypted from the settings, the other
 /// device enters the passphrase, and nothing on the server reads in the clear.
 #[test]
 fn s28_s30_two_devices_converge_through_an_encrypted_webdav_storage() {
@@ -505,7 +505,7 @@ fn s28_s30_two_devices_converge_through_an_encrypted_webdav_storage() {
             }
             assert!(!name.contains(&attached.sha256), "{name}");
             let data = std::fs::read(&path).unwrap();
-            // `vault.json` (here and the one that says the storage moved, S49), the empty marks
+            // `vault.json` (here and the one that says the storage moved, S49 of Lists), the empty marks
             // and what the server keeps next to the files.
             if name == "vault.json" || name.ends_with(".snap") || name.starts_with('.') {
                 continue;

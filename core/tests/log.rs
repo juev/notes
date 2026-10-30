@@ -224,7 +224,7 @@ fn r95_a_backup_does_not_carry_the_log() {
     assert!(!archive.windows(needle.len()).any(|w| w == needle));
 }
 
-// --- R102: attachment content and the calls of the apps (#251) ---
+// --- R95: attachment content and the calls of the apps (#251) ---
 
 use notes_core::sync::remote::{DirRemote, Remote};
 use notes_core::{AppError, Attachment, Note, Result};
@@ -435,7 +435,7 @@ fn r95_content_missing_from_the_storage_is_an_error_only_after_an_hour() {
     let (a, b) = (device(), device());
     let t = add(&a, "с файлом");
     attach(&a, &t, "a.txt", b"content");
-    // The fields arrive and the content does not: the other device has not sent it yet (S34).
+    // The fields arrive and the content does not: the other device has not sent it yet (S24).
     a.sync_with(&DirRemote::new(storage.path())).unwrap();
     b.sync_with(&DirRemote::new(storage.path())).unwrap();
 

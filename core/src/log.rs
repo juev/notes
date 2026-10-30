@@ -1,4 +1,4 @@
-//! The log of the app (R102): a text file in the data folder that the core
+//! The log of the app (R95): a text file in the data folder that the core
 //! writes on macOS and Android alike. It holds what happened, never what the
 //! notes say: counts, outcomes and the text of errors.
 
@@ -93,7 +93,7 @@ impl Store {
         let mut options = std::fs::OpenOptions::new();
         options.create(true).append(true);
         if let Ok(mut file) = options.open(&path) {
-            // R142: the log names failures, so it is for this user alone like the data.
+            // R142 of Lists: the log names failures, so it is for this user alone like the data.
             let _ = crate::store::private_file(&path);
             let _ = file.write_all(line.as_bytes());
         }
@@ -124,7 +124,7 @@ impl Store {
 
 #[uniffi::export]
 impl Store {
-    /// R102: the level of the log on this device; errors until another is chosen.
+    /// R95: the level of the log on this device; errors until another is chosen.
     pub fn log_level(&self) -> LogLevel {
         LogLevel::from_code(self.log_level.load(Ordering::Relaxed))
     }

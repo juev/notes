@@ -1,5 +1,5 @@
 //! A content-free nudge between devices: "something changed, sync now".
-//! Rules: S18–S23 and S27–S30 in docs/specs/sync.md.
+//! Rules: S41–S45 in docs/specs/sync.md.
 
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader};
@@ -17,7 +17,7 @@ const ENDPOINT_KEY: &str = "push_endpoint";
 const SERVER_KEY: &str = "push_server";
 const TOPIC_KEY: &str = "push_topic";
 const SEND_SERVER_KEY: &str = "push_send_server";
-/// Set while the topic has not been compared with those in the storage since the server was set (S41).
+/// Set while the topic has not been compared with those in the storage since the server was set (S43).
 pub(crate) const UNSETTLED_KEY: &str = "push_unsettled";
 
 /// Batches of nudges on their way, in this process.
@@ -38,7 +38,7 @@ impl Drop for Flight {
     }
 }
 
-/// S19: returns when the nudges this process was sending have gone out or
+/// S41: returns when the nudges this process was sending have gone out or
 /// given up. For a caller that the system may stop as soon as it says its
 /// work is done; nobody else has to wait.
 #[uniffi::export]
@@ -48,7 +48,7 @@ pub fn finish_pushes() {
     }
 }
 
-/// S22: the name a device makes up for itself, and so the mark of a topic of this app.
+/// S43: the name a device makes up for itself, and so the mark of a topic of this app.
 fn is_topic(name: &str) -> bool {
     name.len() == 32 && name.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
@@ -78,7 +78,7 @@ fn server_address(server: Option<&str>) -> Result<Option<&str>> {
 }
 
 impl Store {
-    /// Asks whoever listens at each address to sync (S19). The requests leave
+    /// Asks whoever listens at each address to sync (S41). The requests leave
     /// together on a thread of their own, so the caller, a sync run, does not
     /// wait for them. Best effort: an address that does not answer changes
     /// nothing for the sender. An address named twice is asked once (S41).
@@ -106,9 +106,9 @@ impl Store {
                 .map(|url| {
                     let (agent, own, token, sender) = (&agent, &own, &token, &sender);
                     scope.spawn(move || {
-                        // S28: the token goes to the own server and nowhere else.
+                        // S45: the token goes to the own server and nowhere else.
                         let at_home = own.is_some() && origin(url) == *own;
-                        // S41: who sent it, so that a device on the same topic can pass its own by.
+                        // S43: who sent it, so that a device on the same topic can pass its own by.
                         let mut request = agent.post(url).set("X-Title", sender);
                         if let Some(token) = token.as_ref().filter(|_| at_home) {
                             request = request.set("Authorization", &format!("Bearer {token}"));
@@ -139,7 +139,7 @@ impl Store {
         }
     }
 
-    /// S41: makes the topic of this device the one its server shares. Of the
+    /// S43: makes the topic of this device the one its server shares. Of the
     /// addresses of the other devices that are topics on the same server, and
     /// its own, the least becomes its own.
     pub(crate) fn share_topic<'a>(&self, others: impl IntoIterator<Item = &'a str>) -> Result<()> {
@@ -188,7 +188,7 @@ impl Store {
                 None => db::meta_del(&inner.conn, ENDPOINT_KEY),
             }
         };
-        // R102: the address is not named, it carries the topic of ntfy.
+        // R95: the address is not named, it carries the topic of ntfy.
         if let Err(e) = &kept {
             self.note(LogLevel::Error, "push", || format!("address not kept: {e}"));
         }
@@ -199,7 +199,7 @@ impl Store {
         db::meta_get(&self.lock().conn, ENDPOINT_KEY)
     }
 
-    /// S22: takes nudges through an ntfy server, or stops with `None`. The
+    /// S43: takes nudges through an ntfy server, or stops with `None`. The
     /// device picks a random topic once and publishes `<server>/<topic>` as
     /// its address; `wait_for_nudge` listens there.
     pub fn set_push_server(&self, server: Option<String>) -> Result<()> {
@@ -225,7 +225,7 @@ impl Store {
             }
         };
         db::meta_set(&self.lock().conn, SERVER_KEY, server)?;
-        // S41: the next run looks whether the storage already names a topic on this server.
+        // S43: the next run looks whether the storage already names a topic on this server.
         db::meta_set(&self.lock().conn, UNSETTLED_KEY, "1")?;
         self.set_push_endpoint(Some(format!("{server}/{topic}")))
     }
@@ -234,7 +234,7 @@ impl Store {
         db::meta_get(&self.lock().conn, SERVER_KEY)
     }
 
-    /// S29: the ntfy server the token belongs to on a device that takes
+    /// S45: the ntfy server the token belongs to on a device that takes
     /// nudges some other way and so has no push server. Only sending uses it.
     pub fn set_push_send_server(&self, server: Option<String>) -> Result<()> {
         let server = server_address(server.as_deref())?;
@@ -250,7 +250,7 @@ impl Store {
         db::meta_get(&self.lock().conn, SEND_SERVER_KEY)
     }
 
-    /// S27: keeps the access token of the own ntfy server for this process
+    /// S45: keeps the access token of the own ntfy server for this process
     /// only, the way `set_sync_password` keeps the password.
     pub fn set_push_token(&self, token: Option<String>) {
         let token = token.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
@@ -258,7 +258,7 @@ impl Store {
         *self.refusals() = (false, false);
     }
 
-    /// S30: whether the own server answered the last subscription or the last
+    /// S45: whether the own server answered the last subscription or the last
     /// nudge with 401 or 403: the token is wrong, missing or not allowed there.
     pub fn push_refused(&self) -> bool {
         let refusals = self.refusals();
@@ -293,7 +293,7 @@ impl Store {
             request = request.set("Authorization", &format!("Bearer {token}"));
         }
         let answer = request.call();
-        // S30: only an answer says anything about the token; a server that is away does not.
+        // S45: only an answer says anything about the token; a server that is away does not.
         if answer.is_ok() || refused(&answer) {
             let denied = answer.is_err();
             let was = std::mem::replace(&mut self.refusals().0, denied);
@@ -307,7 +307,7 @@ impl Store {
             pause();
             return false;
         };
-        // S41: the topic is shared, and what this device posted to it comes back.
+        // S43: the topic is shared, and what this device posted to it comes back.
         let own = format!(r#""title":"{}""#, self.device_id());
         for line in BufReader::new(response.into_reader()).lines() {
             match line {
@@ -322,7 +322,7 @@ impl Store {
                 Err(_) => break,
             }
         }
-        // S23: the connection broke; a nudge may have been missed. A server
+        // S43: the connection broke; a nudge may have been missed. A server
         // that drops everyone at once must not be asked in a tight loop.
         pause();
         true

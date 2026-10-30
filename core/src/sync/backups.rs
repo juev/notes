@@ -1,8 +1,8 @@
-//! Backups in the storage: S60 and S61 in docs/specs/sync.md, R153 and R154 in
-//! docs/specs/product.md.
+//! Backups in the storage: S32 in docs/specs/sync.md, R71 and R72 in docs/specs/product.md, and the
+//! switch of R154 of Lists.
 //!
 //! ```text
-//! notes/backups/<device>/Notes_(2026-10-09-11_15_05).notesbackup   R87 without blobs/
+//! notes/backups/<device>/Notes_(2026-10-09-11_15_05).notesbackup   R70 without blobs/
 //! ```
 
 use chrono::NaiveDateTime;
@@ -16,13 +16,13 @@ use crate::model::SyncConfig;
 use crate::store::Store;
 use crate::LogLevel;
 
-/// R154: "0" when this device keeps no copies in the storage.
+/// R154 of Lists: "0" when this device keeps no copies in the storage.
 const ENABLED: &str = "storage_backups";
-/// S60: when this device last put a copy into the storage, and why the last attempt failed.
+/// S32: when this device last put a copy into the storage, and why the last attempt failed.
 const LAST: &str = "storage_backup_last";
 const ERROR: &str = "storage_backup_error";
 
-/// A backup in the storage (R154).
+/// A backup in the storage (R71).
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct StorageBackup {
     /// The device that made it; what `restore_storage_backup` takes.
@@ -33,7 +33,7 @@ pub struct StorageBackup {
     pub this_device: bool,
 }
 
-/// What the settings show about the copies in the storage (R154).
+/// What the settings show about the copies in the storage (R154 of Lists).
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct StorageBackupStatus {
     /// The sync is WebDAV or a folder: there is a storage to keep copies in.
@@ -63,7 +63,7 @@ impl Store {
         Ok(db::meta_get(&self.lock().conn, ENABLED)?.as_deref() != Some("0"))
     }
 
-    /// S60: called at the end of a pass that went through. Puts a copy into the storage when the
+    /// S32: called at the end of a pass that went through. Puts a copy into the storage when the
     /// time has come and removes this device's copies beyond the number to keep. A failure is
     /// kept for the settings and the log; it does not fail the pass.
     pub(crate) fn backup_to_storage(&self, remote: &dyn Remote, me: &str) {
@@ -138,7 +138,7 @@ impl Store {
 
     /// The storage as sync sees it, for a call made outside a pass; `None` without one.
     fn storage_view<T>(&self, f: impl FnOnce(&dyn Remote) -> Result<T>) -> Result<Option<T>> {
-        // Not at the same time as a pass, which may be moving the storage (S36, S56).
+        // Not at the same time as a pass, which may be moving the storage (S33, S28).
         let _running = self.sync_lock.lock().unwrap_or_else(|p| p.into_inner());
         let Some(raw) = self.file_storage()? else {
             return Ok(None);
@@ -169,7 +169,7 @@ impl Store {
         })
     }
 
-    /// R154: belongs to the device and is not synced. Turning it on puts a copy into the storage
+    /// R154 of Lists: belongs to the device and is not synced. Turning it on puts a copy into the storage
     /// with the next pass when none is there yet from within the schedule.
     pub fn set_storage_backups(&self, enabled: bool) -> Result<()> {
         let inner = self.lock();
@@ -181,7 +181,7 @@ impl Store {
         }
     }
 
-    /// R154: the copies of every device in the storage, newest first. Asks the storage.
+    /// R154 of Lists: the copies of every device in the storage, newest first. Asks the storage.
     pub fn storage_backups(&self) -> Result<Vec<StorageBackup>> {
         let me = self.device_id();
         let found = self.storage_view(|remote| {
@@ -206,7 +206,7 @@ impl Store {
         Ok(found)
     }
 
-    /// R154: downloads the copy and restores it as `restore_backup` does (R90).
+    /// R72: downloads the copy and restores it as `restore_backup` does.
     pub fn restore_storage_backup(&self, device: String, name: String, over_storage: bool) -> Result<()> {
         if !device_ok(&device) || !name_ok(&name) {
             return Err(AppError::invalid("not a backup of this app"));

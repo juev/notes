@@ -1,4 +1,4 @@
-//! Markdown in notes: docs/specs/product.md, R48–R52.
+//! Markdown in notes as R48–R52 of Lists; the dialect of Notes is in docs/specs/editor.md.
 
 use notes_core::MarkdownKind::*;
 use notes_core::*;
