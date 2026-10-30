@@ -18,7 +18,7 @@ Notes is built the same way as Lists and starts from a copy of its code. The dec
 |---|---|---|
 | Core | Rust | data model, SQLite, merging of changes, text CRDT, sync, push, encryption, Markdown parsing, search, import and export |
 | macOS | Swift, SwiftUI and AppKit for the editor | windows, menu bar, Share Extension, the editor on TextKit |
-| Android | Kotlin, Jetpack Compose | screens, share target, the editor |
+| Android | Kotlin, Jetpack Compose, `EditText` for the editor | screens, share target, the editor |
 | Web | Rust server `notes-web` on the same core, one HTML page with JavaScript | the phone and any other browser |
 
 The reasons are those of Lists: everything that decides whether the devices converge exists in one copy, in the core; the interface is written in the language of the platform, because the points of quick capture are system APIs. The core reaches the shells through UniFFI, pinned to an exact version, with a narrow boundary: records, enums, synchronous methods of one object, a few stateless functions.
@@ -126,9 +126,17 @@ The author's backup shows how Standard Notes is used in practice, and the first 
 - Typing has an undo history of its own (`TypingHistory`). The undo of `NSTextView` keeps positions that an edit from another device makes wrong, and E25 asks that such an edit stays when the user's typing is undone.
 - An attachment in the text stays TextKit 1: the first character of its link is a control glyph laid out as a box of the size of the attachment, the rest of the link has no glyphs, the paragraph gets a minimum line height, and the view of the attachment lies over the box. TextKit 2 was not taken, because all of the hiding of markup works on glyphs.
 
+## The Android app
+
+`android/` is built from parts of the app of Lists: the build, secrets in the Keystore, background work, backups, push and the viewer of attachments. The screens are new. The editor differs from Lists on purpose.
+
+- The editor is a subclass of `EditText` inside a Compose screen, not `MarkdownField` of Lists. An experiment on an emulator with API 36 and Gboard on 2026-10-30, with Compose foundation 1.12.1, decided it: `BasicTextField` showed no spelling underlines in either of its two forms and takes no inline content, while `EditText` underlined words, kept markup hidden and laid out a picture in the text with spans. An `EditText` checks only the paragraphs edited since it was opened, and the app covers the rest with a session of its own (E50).
+- The text goes to the core as splices joined by word, as on macOS, and typing has the same undo history of its own. Lists saves the whole string when the field loses focus, which would turn an edit from another device into a deletion.
+- The cost of a keystroke in an `EditText` grows with the number of spans in the whole text: on the emulator 4 ms at 2 346 characters with 78 hiding spans and 95 ms at 37 690 characters with 1 200. The layout of the core runs off the main thread, and spans are changed by difference.
+
 ## Spelling and grammar
 
-Spelling is checked by the system on each platform: `NSSpellChecker` on macOS, the browser on the web, the system spell checker service on Android. Whether the text field of Compose supports the system spell checker was not checked; if it does not, it has to be connected to our editor separately, and this is a risk for the estimate. Grammar is checked later, through a LanguageTool server the user runs; the text goes only to that server.
+Spelling is checked by the system on each platform: `NSSpellChecker` on macOS, the browser on the web, the system spell checker service on Android. The text field of Compose does not use the spell checker service at all, which is one of the reasons the Android editor is an `EditText` (see "The Android app"). Grammar is checked later, through a LanguageTool server the user runs; the text goes only to that server.
 
 ## Sources
 

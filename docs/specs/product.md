@@ -48,7 +48,7 @@ The interface is in English with a Russian localization and follows the system l
 ### Attachments
 
 - R30. A file is attached through the menu or the toolbar, by dragging it into the note, by pasting it from the clipboard, and through the share sheet of the system (R85). It is inserted at the cursor as a link `attachment:<id>` ([editor.md](editor.md), E30).
-- R31. Images, video, audio and PDF are shown inside the note, in place of the link. An image takes the width of the column at most; a tap opens it full-screen. Video and audio get a player. A PDF shows its first page with the number of pages; a tap opens the whole document inside the app, with the option to open it in the system app.
+- R31. Images, video, audio and PDF are shown inside the note, in place of the link. An image takes the width of the column at most; a tap opens it full-screen. Video and audio get a player; on Android a video shows a frame with a play button and a tap opens the player full-screen, and audio plays in its own line. A PDF shows its first page with the number of pages; a tap opens the whole document inside the app, with the option to open it in the system app.
 - R32. Any other file is shown as a chip with an icon of its type, its name and its size; a tap opens it with the system app (macOS: a copy under the original name in a temporary folder, as in Lists; Android: through `FileProvider`; web: a download).
 - R33. Each note has an attachments panel that lists all its attachments. An attachment whose link is no longer in the text is marked "Not in the text" and has the actions "Insert at cursor" and "Delete". An attachment is deleted only by hand from this panel or together with its note.
 - R34. Moving a note to the Trash keeps its attachments; restoring it brings them back. Deleting a note for good deletes its attachments from the device and from the storage (S7, S26, S27 in [sync.md](sync.md)).
@@ -109,7 +109,7 @@ Moments are ISO 8601 in UTC, to the second.
 
 ### Undo
 
-- R75. Actions on notes and folders (moving, flagging, deleting, restoring, renaming) can be undone and redone: ⌘Z and ⇧⌘Z on macOS, a button and the system "undo" on Android, a button on the web. The history of actions lives in the core, as in Lists (`undo.rs` there). Undo of typing in the editor is described in [editor.md](editor.md), E25.
+- R75. Actions on notes and folders (moving, flagging, deleting, restoring, renaming) can be undone and redone: ⌘Z and ⇧⌘Z on macOS, buttons on Android, a button on the web. The history of actions lives in the core, as in Lists (`undo.rs` there). Undo of typing in the editor is described in [editor.md](editor.md), E25.
 
 ### Sync and settings
 

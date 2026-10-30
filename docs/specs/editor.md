@@ -41,7 +41,7 @@ The rule from the request: within a note the user changes only the kind of text 
 - E22. Return in a list item continues the list with the next marker; Return in an empty item ends the list. Tab and ⇧Tab change the level of a list item. The core decides the edit (`markdown_newline` in Lists), and the platform applies it as ordinary input.
 - E23. Pasting rich text (HTML from a browser or a word processor) converts it in the core to Markdown of this dialect; pasting as plain text (⌥⇧⌘V on macOS, the menu elsewhere) inserts the text as it is. Pasting a URL over a selection makes a link with the selection as its text. Pasting an image or a file creates an attachment (R30 in [product.md](product.md)).
 - E24. Typing `[[` opens the note picker of R50 in [product.md](product.md). Typing `/` at the start of an empty line is ordinary text: there is no block menu.
-- E25. Undo in the editor (⌘Z, ⇧⌘Z on macOS; the system undo on Android; the browser's on the web) undoes the user's own typing on this device, in steps separated by pauses and by formatting actions. Edits that arrived from other devices are not undone. The undo history lives for as long as the note stays open.
+- E25. Undo in the editor (⌘Z, ⇧⌘Z on macOS; the buttons on the bar above the keyboard on Android; the browser's on the web) undoes the user's own typing on this device, in steps separated by pauses and by formatting actions. Edits that arrived from other devices are not undone. The undo history lives for as long as the note stays open.
 - E26. With `smart_typography` on (the default), typing replaces: straight double quotes with «» in Russian text and “” in English text, the language taken from the letter before the quote; a hyphen between spaces with an em dash with a non-breaking space before it; three dots with an ellipsis; `->` with →. Nothing is replaced inside code and inside link addresses. Undo right after a replacement brings back what was typed. The text keeps the replaced characters.
 
 ### Attachments and links in the text
@@ -59,13 +59,13 @@ All settings in this section apply to every note, to the editor and to export to
 - E43. **Paragraph spacing:** from 0 to 1.5 of the line, in steps of 0.25; the default is 0.5.
 - E44. **Column width**, on the device: narrow (about 60 characters), medium (about 72, the default), wide (about 90), or the full width of the window. The text is centred in the window.
 - E45. **Alignment:** left (the default) or justified. Justified text turns hyphenation on, since without it the gaps between words grow; with left alignment hyphenation is a separate switch, off by default.
-- E46. **Hyphenation** uses the rules of the language of the paragraph: Russian for Cyrillic text, English for Latin. On macOS this is `hyphenationFactor` of the paragraph style, on Android `hyphenationFrequency`, on the web CSS `hyphens: auto` with `lang` on the paragraph. Headings, code and tables are not hyphenated.
+- E46. **Hyphenation** uses the rules of the language of the paragraph: Russian for Cyrillic text, English for Latin. On macOS this is `hyphenationFactor` of the paragraph style, on Android `hyphenationFrequency` with the language set for the paragraph, on the web CSS `hyphens: auto` with `lang` on the paragraph. Headings, code and tables are not hyphenated; on Android below API 35 the system has no way to except them, so there they are hyphenated with the rest.
 - E47. **Fixed proportions** that the user does not set: heading 1 is 1.6 of the text size, heading 2 1.35, heading 3 1.15, all in the text font with a heavier weight; code is 0.9 of the text size; quotes are indented with a line on the left; the space before a heading is twice the paragraph spacing.
-- E48. **Line breaking** keeps a one-letter Russian word (а, в, и, к, о, с, у, я) on the same line as the word after it, and an em dash on the same line as the word before it. This is done when the text is laid out; the stored text does not change.
+- E48. **Line breaking** keeps a one-letter Russian word (а, в, и, к, о, с, у, я) on the same line as the word after it, and an em dash on the same line as the word before it. This is done when the text is laid out; the stored text does not change. On Android this needs API 35 (`LineBreakConfigSpan`); below it the rule does not apply.
 
 ### Spelling
 
-- E50. Spelling is checked by the system: `NSSpellChecker` on macOS, the browser on the web, the system spell checker service on Android. The switch `spellcheck` (on by default) and the language `spell_language` (automatic, or a chosen one) apply on all devices.
+- E50. Spelling is checked by the system: `NSSpellChecker` on macOS, the browser on the web, the system spell checker service on Android. On Android the text field checks by itself only the paragraphs edited since the note was opened, so the app also asks the service for the whole text when a note opens and when an edit arrives from another device, with one session for each language it finds, and marks the words the way the field does. The switch `spellcheck` The switch `spellcheck` (on by default) and the language `spell_language` (automatic, or a chosen one) apply on all devices.
 - E51. Misspelled words are underlined only in text: not in code, link addresses, attachment links or URLs. The ranges come from the core (E10).
 - E52. A word added to the dictionary goes to the dictionary of the system on that device and does not sync.
 
@@ -84,7 +84,3 @@ The parsing rules are covered by tests in `core/tests/markdown.rs` named after t
 - E45, E46: justified alignment on → long Russian and English words are hyphenated in paragraphs, not in headings or code; the same note exported to PDF breaks the same way as in the editor on macOS (checked by eye).
 - E48: a line ending in `в` → `в` moves to the next line with its word.
 - E51: a misspelled word inside a code span → not underlined.
-
-## To check
-
-- E50: whether the text field on Android, painted by our own editor, gets the system spell checker. If it does not, the editor asks the spell checker service of the system itself and paints the underlines from its answers. Checked on an emulator before the Android editor is built.
