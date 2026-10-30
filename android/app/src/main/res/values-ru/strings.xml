@@ -115,6 +115,21 @@
     <string name="heading2">Заголовок 2</string>
     <string name="heading3">Заголовок 3</string>
     <string name="paragraph">Обычный абзац</string>
+    <string name="attachment_not_found">Вложение не найдено</string>
+    <string name="attachment_waiting">%1$s — содержимое ещё не загружено</string>
+    <string name="share">Поделиться</string>
+    <string name="open_in_another_app">Открыть в другом приложении</string>
+    <string name="cannot_show_file">Этот файл нельзя показать</string>
+    <string name="attachments_count">Вложения (%1$d)</string>
+    <string name="attach_file">Вложить файл…</string>
+    <string name="not_in_text">Нет в тексте</string>
+    <string name="insert_at_cursor">Вставить у курсора</string>
+    <plurals name="pages">
+        <item quantity="one">%1$d страница</item>
+        <item quantity="few">%1$d страницы</item>
+        <item quantity="many">%1$d страниц</item>
+        <item quantity="other">%1$d страницы</item>
+    </plurals>
     <plurals name="days_left">
         <item quantity="one">Остался %1$d день</item>
         <item quantity="few">Осталось %1$d дня</item>

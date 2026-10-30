@@ -3,12 +3,20 @@ package org.evsyukov.notes
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.pdf.PdfDocument
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.evsyukov.notes.ui.AppModel
 import uniffi.notes_core.NewNote
 import uniffi.notes_core.Scope
+import java.io.File
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 /**
  * The debug scenarios, a step at a time: `adb shell am broadcast -n org.evsyukov.notes/.DebugReceiver --es step <step>`.
@@ -33,6 +41,11 @@ class DebugReceiver : BroadcastReceiver() {
             "scope" -> onMain { AppModel.select(scope(value)) }
             "open" -> onMain { AppModel.open(noteTitled(value)) }
             "close" -> onMain { AppModel.closeNote() }
+            "files" -> files()
+            "spell" -> {
+                Repo.store.createNote(NewNote("Орфография", null, emptyList(), SPELL))
+                Repo.changed()
+            }
             "justify" -> {
                 Repo.store.setSettings(Repo.store.settings().copy(align = uniffi.notes_core.TextAlign.JUSTIFY, fontBody = "Literata"))
                 Repo.changed()
@@ -61,6 +74,11 @@ class DebugReceiver : BroadcastReceiver() {
     }
 
     private companion object {
+        val SPELL = "Это предложеие с ошибкой и опечтка здесь. Верные слова остаются чистыми.\n\n" +
+            "`кодд ошибкка` и [ссылка](https://example.com/опечтка).\n\n" +
+            "This sentense has speling misstakes and `codde wrongg` and [a link](https://exmaple.com/wrongg) here.\n\n" +
+            "```\nwrongg misstake in the block\n```\n"
+
         val PROSE = "# Заголовок\n\nВозможности человеческого воображения и взаимодействие представителей разнообразных направлений " +
             "предоставляют возможность рассматривать в лес и в поле идти — дальше. Internationalization and characteristically " +
             "extraordinary considerations demonstrate hyphenation in English paragraphs of a narrow column.\n"
@@ -114,6 +132,50 @@ class DebugReceiver : BroadcastReceiver() {
         value.startsWith("folder=") -> Scope.Folder(Repo.store.folders().first { it.name == value.substringAfter('=') }.id)
         value.startsWith("tag=") -> Scope.Tag(value.substringAfter('='))
         else -> Scope.All
+    }
+
+    /** E14, R31, R32: a note with a file of each kind, written here. */
+    private fun files() {
+        val store = Repo.store
+        val note = store.createNote(NewNote("Вложения", null, emptyList(), "Текст до вложений.\n"))
+        val dir = File(NotesApp.instance.cacheDir, "debug").apply { mkdirs() }
+        val bitmap = Bitmap.createBitmap(1200, 700, Bitmap.Config.ARGB_8888)
+        Canvas(bitmap).run {
+            drawColor(Color.rgb(70, 130, 200))
+            drawCircle(600f, 350f, 200f, Paint().apply { color = Color.YELLOW })
+        }
+        val image = File(dir, "картинка.png").apply { outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) } }
+        val pdf = File(dir, "отчёт.pdf").apply {
+            PdfDocument().run {
+                repeat(3) { index ->
+                    val page = startPage(PdfDocument.PageInfo.Builder(400, 560, index + 1).create())
+                    page.canvas.drawText("Страница ${index + 1}", 40f, 80f, Paint().apply { textSize = 28f })
+                    finishPage(page)
+                }
+                outputStream().use { writeTo(it) }
+                close()
+            }
+        }
+        val text = File(dir, "данные.csv").apply { writeText("a,b\n1,2\n") }
+        val sound = File(dir, "звук.mp3").apply { writeBytes(wave()) }
+        val video = File("/data/local/tmp/clip.mp4")
+        val links = StringBuilder("Текст до вложений.\n\n")
+        val all = listOf(image, pdf, text, sound) + listOf(video).filter { it.canRead() }
+        all.forEach { links.append(AttachmentLink.text(store.addAttachment(note.id, it.absolutePath, it.name))).append("\n\n") }
+        links.append("Текст после вложений.\n")
+        store.setText(note.id, links.toString())
+        Repo.changed()
+    }
+
+    /** One second of a tone in the simplest WAV. */
+    private fun wave(): ByteArray {
+        val rate = 8000
+        val data = ByteArray(rate) { (127 + 100 * kotlin.math.sin(it * 0.1)).toInt().toByte() }
+        val header = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN).apply {
+            put("RIFF".toByteArray()).putInt(36 + data.size).put("WAVEfmt ".toByteArray()).putInt(16).putShort(1).putShort(1)
+            putInt(rate).putInt(rate).putShort(1).putShort(8).put("data".toByteArray()).putInt(data.size)
+        }
+        return header.array() + data
     }
 
     private fun seed() {

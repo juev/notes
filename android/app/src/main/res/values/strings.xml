@@ -116,6 +116,19 @@
     <string name="heading2">Heading 2</string>
     <string name="heading3">Heading 3</string>
     <string name="paragraph">Plain Paragraph</string>
+    <string name="attachment_not_found">Attachment not found</string>
+    <string name="attachment_waiting">%1$s — waiting for its content</string>
+    <string name="share">Share</string>
+    <string name="open_in_another_app">Open in Another App</string>
+    <string name="cannot_show_file">This file cannot be shown</string>
+    <string name="attachments_count">Attachments (%1$d)</string>
+    <string name="attach_file">Attach File…</string>
+    <string name="not_in_text">Not in the text</string>
+    <string name="insert_at_cursor">Insert at Cursor</string>
+    <plurals name="pages">
+        <item quantity="one">%1$d page</item>
+        <item quantity="other">%1$d pages</item>
+    </plurals>
     <plurals name="days_left">
         <item quantity="one">%1$d day left</item>
         <item quantity="other">%1$d days left</item>
