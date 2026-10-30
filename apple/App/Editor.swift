@@ -179,6 +179,8 @@ struct MarkdownEditor: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> NSScrollView {
+        let model = model
+        let noteId = noteId
         let view = MarkdownTextView(frame: .zero)
         view.prepare()
         view.isVerticallyResizable = true
@@ -203,8 +205,6 @@ struct MarkdownEditor: NSViewRepresentable {
         view.isIncrementalSearchingEnabled = true
         view.addFiles = { urls in MainActor.assumeIsolated { model.attach(urls, to: noteId) } }
         view.sharedUndoManager = { [weak model] in MainActor.assumeIsolated { model?.undoManager } }
-        let model = model
-        let noteId = noteId
         view.onEdit = { edit, text in MainActor.assumeIsolated { model.textEdited(noteId, edit, whole: text) } }
         view.openLink = { url in MainActor.assumeIsolated { model.openLink(url) } }
         let scroll = NSScrollView()
