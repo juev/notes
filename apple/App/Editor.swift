@@ -33,6 +33,9 @@ struct Editor: View {
                 LinkedFrom(id: note.id)
             }
             .id(note.id)
+            .sheet(isPresented: Binding(get: { model.historyOpen }, set: { model.historyOpen = $0 })) {
+                VersionHistory(noteId: note.id)
+            }
             .onAppear {
                 title = note.title
                 if model.takeTitleFocus() { titleFocused = true }
@@ -51,6 +54,9 @@ struct Editor: View {
                     .labelStyle(.iconOnly)
                     .buttonStyle(.plain)
             }
+            Button(L("Version History"), systemImage: "clock.arrow.circlepath") { model.historyOpen = true }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.plain)
             Button(L("Attach File…"), systemImage: "paperclip") {
                 if let id = model.selectedNote { model.attach(IncomingFiles.pick(), to: id) }
             }
