@@ -515,7 +515,7 @@ fn item_of(line: &str) -> Option<Item> {
 // ---- rich text to Markdown (E23) ----
 
 /// An address as the destination of a link: in angle brackets when it has spaces or brackets.
-fn destination(url: &str) -> String {
+pub(crate) fn destination(url: &str) -> String {
     if url.contains([' ', '(', ')', '<', '>']) {
         format!("<{}>", url.replace('>', "%3E"))
     } else {
@@ -839,7 +839,7 @@ fn inline_children(element: ElementRef) -> String {
 }
 
 /// Markers around the text, outside its spaces: `** a **` would not be bold.
-fn wrap(inner: &str, marker: &str) -> String {
+pub(crate) fn wrap(inner: &str, marker: &str) -> String {
     let core = inner.trim();
     if core.is_empty() {
         return inner.to_string();
