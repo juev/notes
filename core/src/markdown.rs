@@ -1,10 +1,12 @@
-//! Markdown in notes as R48–R52 of Lists; the dialect of Notes is in docs/specs/editor.md.
+//! The Markdown of a note (E1–E16, E30, E31, E51 in docs/specs/editor.md); the scheme of parsing
+//! and painting is that of R48–R52 of Lists.
 //!
 //! The note stays the text that was typed. The apps get the ranges to style,
 //! to hide and to replace, in UTF-16 units, which is how Swift's `NSString`,
 //! Kotlin and JavaScript all index a string, so one note looks the same
 //! everywhere.
 
+use std::collections::HashSet;
 use std::ops::Range;
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, LinkType, Options, Parser, Tag};
@@ -17,12 +19,24 @@ pub enum MarkdownKind {
     Strong,
     Emphasis,
     Strikethrough,
+    /// `==text==` (E1).
+    Highlight,
     Code,
     CodeBlock,
     Quote,
-    /// Text that opens `url`; only `http`, `https` and `mailto` get here.
+    /// Text that opens `url`; only `http`, `https` and `mailto` get here (E4).
     Link {
         url: String,
+    },
+    /// The text of a link `note:<id>` to another note (E31).
+    NoteLink {
+        id: String,
+    },
+    /// A whole link `attachment:<id>` (E30), replaced by the attachment (E14): shown inside the
+    /// note when written as an image, `![…](…)`, as a chip otherwise.
+    AttachmentLink {
+        id: String,
+        inline: bool,
     },
     /// `-`, `*`, `+` or `1.` of a list item: shown as a bullet or as the number.
     ListMarker {
@@ -35,10 +49,10 @@ pub enum MarkdownKind {
         checked: bool,
     },
     Rule,
-    /// A line of a table as it is typed: monospaced. Outside the block that
-    /// holds the cursor the table is drawn as a grid from `MarkdownLayout::tables`.
+    /// A line of a table as it is typed: monospaced. While the cursor is outside
+    /// the table it is drawn as a grid from `MarkdownLayout::tables` (E15).
     TableRow,
-    /// Markup characters: hidden unless the cursor is in their block.
+    /// Markup characters: hidden while the cursor is outside the reveal range of the span.
     Markup,
 }
 
@@ -49,11 +63,17 @@ pub struct MarkdownSpan {
     pub kind: MarkdownKind,
     /// Index into `MarkdownLayout::blocks`.
     pub block: u32,
+    /// The source of the span shows while the cursor is at `reveal_start..=reveal_end`, ends
+    /// included: the markup of inline formatting while the cursor is in the formatted span or
+    /// right next to it (E11), the `#` of a heading, the `>` of a quote and an attachment while it
+    /// is on their line (E12, E14), the address of a link while it is in the link (E13), the
+    /// fences of a code block while it is in the block (E16), a table while it is in the table (E15).
+    pub reveal_start: u32,
+    pub reveal_end: u32,
 }
 
 /// A paragraph, a heading, a list item without the items nested in it, a code
-/// block or a table. Markup shows in the block that holds the cursor,
-/// its end included.
+/// block or a table.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct MarkdownBlock {
     pub start: u32,
@@ -95,6 +115,12 @@ pub struct MarkdownTable {
     pub rows: Vec<MarkdownTableRow>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct MarkdownRange {
+    pub start: u32,
+    pub end: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, uniffi::Record)]
 pub struct MarkdownLayout {
     /// Ordered by start; of two that start together the longer comes first.
@@ -103,6 +129,9 @@ pub struct MarkdownLayout {
     pub blocks: Vec<MarkdownBlock>,
     /// Ordered by start.
     pub tables: Vec<MarkdownTable>,
+    /// Where spelling is not checked (E51): code, addresses and attachment links. Ordered, not
+    /// overlapping.
+    pub no_spellcheck: Vec<MarkdownRange>,
 }
 
 /// A replacement in the note: `start..end` becomes `text`, the cursor moves to `cursor`.
@@ -114,10 +143,15 @@ pub struct MarkdownEdit {
     pub cursor: u32,
 }
 
-/// What to style, hide and replace in a note.
+/// What to style, hide and replace in a note (E10).
 #[uniffi::export]
 pub fn markdown_layout(text: String) -> MarkdownLayout {
-    let (spans, blocks, tables) = layout(&text);
+    let Parsed {
+        spans,
+        blocks,
+        tables,
+        no_spellcheck,
+    } = layout(&text);
     let units = Utf16::of(&text);
     MarkdownLayout {
         tables: tables
@@ -155,6 +189,8 @@ pub fn markdown_layout(text: String) -> MarkdownLayout {
                 end: units.at(s.range.end),
                 kind: s.kind,
                 block: s.block as u32,
+                reveal_start: units.at(s.reveal.start),
+                reveal_end: units.at(s.reveal.end),
             })
             .collect(),
         blocks: blocks
@@ -164,10 +200,17 @@ pub fn markdown_layout(text: String) -> MarkdownLayout {
                 end: units.at(b.end),
             })
             .collect(),
+        no_spellcheck: no_spellcheck
+            .into_iter()
+            .map(|r| MarkdownRange {
+                start: units.at(r.start),
+                end: units.at(r.end),
+            })
+            .collect(),
     }
 }
 
-/// What Return does at `cursor` beyond starting a line: continues a list or a
+/// What Return does at `cursor` beyond starting a line (E22): continues a list or a
 /// block quote, or takes the marker off an item left empty. `None` where Return
 /// only starts a line.
 #[uniffi::export]
@@ -182,8 +225,7 @@ pub fn markdown_newline(text: String, cursor: u32) -> Option<MarkdownEdit> {
         return None;
     }
     // The parser has the last word: `- - -` is a rule and a `-` in a code block is text.
-    let (spans, _, _) = layout(&text);
-    let marked = spans.iter().any(|s| {
+    let marked = layout(&text).spans.iter().any(|s| {
         (line_start..line_start + prefix.end.max(1)).contains(&s.range.start)
             && matches!(
                 s.kind,
@@ -337,6 +379,22 @@ struct Span {
     range: Range<usize>,
     kind: MarkdownKind,
     block: usize,
+    reveal: Range<usize>,
+}
+
+/// A span as the parse finds it; without a reveal range it reveals with its block.
+struct Found {
+    range: Range<usize>,
+    kind: MarkdownKind,
+    reveal: Option<Range<usize>>,
+}
+
+fn put(found: &mut Vec<Found>, range: Range<usize>, kind: MarkdownKind, reveal: Range<usize>) {
+    found.push(Found {
+        range,
+        kind,
+        reveal: Some(reveal),
+    });
 }
 
 struct Frame<'a> {
@@ -361,8 +419,8 @@ fn is_inline(tag: &Tag) -> bool {
     )
 }
 
-/// The address of a link with its scheme in lower case, or nothing when the
-/// scheme is not one a note may lead to. The rest stays as typed.
+/// The address of a web or mail link with its scheme in lower case, or nothing when the
+/// scheme is not one of those. The rest stays as typed.
 fn address(url: &str) -> Option<String> {
     ["http://", "https://", "mailto:"].iter().find_map(|scheme| {
         let head = url.get(..scheme.len())?;
@@ -371,11 +429,40 @@ fn address(url: &str) -> Option<String> {
     })
 }
 
+/// Where a link leads (E4): the web or mail, a note (E31) or an attachment (E30).
+enum Target {
+    Web(String),
+    Note(String),
+    Attachment(String),
+}
+
+fn target(url: &str) -> Option<Target> {
+    let id = |scheme: &str| {
+        let head = url.get(..scheme.len())?;
+        let id = &url[scheme.len()..];
+        (head.eq_ignore_ascii_case(scheme) && !id.is_empty()).then(|| id.to_string())
+    };
+    if let Some(id) = id("attachment:") {
+        return Some(Target::Attachment(id));
+    }
+    if let Some(id) = id("note:") {
+        return Some(Target::Note(id));
+    }
+    address(url).map(Target::Web)
+}
+
 fn trimmed(text: &str, range: &Range<usize>) -> Range<usize> {
     let slice = &text[range.clone()];
     let start = range.start + (slice.len() - slice.trim_start_matches('\n').len());
     let end = range.end - (slice.len() - slice.trim_end_matches(['\n', '\r', ' ', '\t']).len());
     start..end.max(start)
+}
+
+/// The lines that hold `range`, without the line break after the last of them.
+fn line_of(text: &str, range: &Range<usize>) -> Range<usize> {
+    let start = text[..range.start].rfind('\n').map_or(0, |i| i + 1);
+    let end = text[range.end..].find('\n').map_or(text.len(), |i| range.end + i);
+    start..end
 }
 
 /// The parts of `range` its children do not cover: the markup of an inline element.
@@ -422,12 +509,30 @@ fn cell(text: &str, range: &Range<usize>) -> Range<usize> {
     start..end.max(start)
 }
 
-fn layout(text: &str) -> (Vec<Span>, Vec<Range<usize>>, Vec<Table>) {
+/// A `==` that may open or close a highlight (E1), in the block that holds it.
+struct Mark {
+    block: usize,
+    at: usize,
+    opens: bool,
+    closes: bool,
+}
+
+/// What the parse of a note gives, in bytes.
+struct Parsed {
+    spans: Vec<Span>,
+    blocks: Vec<Range<usize>>,
+    tables: Vec<Table>,
+    no_spellcheck: Vec<Range<usize>>,
+}
+
+fn layout(text: &str) -> Parsed {
     let mut tables: Vec<Table> = Vec::new();
     let mut rows: Vec<(bool, Vec<Range<usize>>)> = Vec::new();
     let mut cells: Vec<Range<usize>> = Vec::new();
-    let mut found: Vec<(Range<usize>, MarkdownKind)> = Vec::new();
+    let mut found: Vec<Found> = Vec::new();
     let mut leaves: Vec<Range<usize>> = Vec::new();
+    let mut quiet: Vec<Range<usize>> = Vec::new();
+    let mut marks: Vec<Mark> = Vec::new();
     let mut stack: Vec<Frame> = Vec::new();
     let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
 
@@ -471,7 +576,7 @@ fn layout(text: &str) -> (Vec<Span>, Vec<Range<usize>>, Vec<Table>) {
                     }),
                     _ => {}
                 }
-                close(text, &mut frame, depth, &mut found, &mut leaves);
+                close(text, &mut frame, depth, &mut found, &mut leaves, &mut quiet);
                 if let Some(parent) = stack.last_mut() {
                     if is_inline(&frame.tag) {
                         extend(&mut parent.inline, &frame.range);
@@ -483,7 +588,7 @@ fn layout(text: &str) -> (Vec<Span>, Vec<Range<usize>>, Vec<Table>) {
                 flush(stack.last_mut(), &mut leaves);
                 let rule = trimmed(text, &range);
                 leaves.push(rule.clone());
-                found.push((rule, MarkdownKind::Rule));
+                put(&mut found, rule.clone(), MarkdownKind::Rule, rule);
                 if let Some(parent) = stack.last_mut() {
                     parent.children.push(range);
                 }
@@ -498,23 +603,44 @@ fn layout(text: &str) -> (Vec<Span>, Vec<Range<usize>>, Vec<Table>) {
                     Event::Code(_) => {
                         let ticks = text[range.clone()].bytes().take_while(|b| *b == b'`').count();
                         if ticks > 0 && range.len() >= ticks * 2 {
-                            found.push((range.start..range.start + ticks, MarkdownKind::Markup));
-                            found.push((range.start + ticks..range.end - ticks, MarkdownKind::Code));
-                            found.push((range.end - ticks..range.end, MarkdownKind::Markup));
+                            let inside = range.start + ticks..range.end - ticks;
+                            put(
+                                &mut found,
+                                range.start..range.start + ticks,
+                                MarkdownKind::Markup,
+                                range.clone(),
+                            );
+                            put(&mut found, inside.clone(), MarkdownKind::Code, range.clone());
+                            put(
+                                &mut found,
+                                range.end - ticks..range.end,
+                                MarkdownKind::Markup,
+                                range.clone(),
+                            );
+                            quiet.push(inside);
                         }
                     }
                     Event::TaskListMarker(checked) => {
-                        found.push((range.clone(), MarkdownKind::Checkbox { checked }));
+                        let line = line_of(text, &range);
+                        put(&mut found, range.clone(), MarkdownKind::Checkbox { checked }, line);
                         if let Some(item) = stack.iter_mut().rev().find(|f| matches!(f.tag, Tag::Item)) {
                             item.task = true;
                         }
                     }
                     Event::Text(_) => {
-                        let plain = !stack
+                        let code = stack.iter().any(|f| matches!(f.tag, Tag::CodeBlock(_)));
+                        let linked = stack
                             .iter()
-                            .any(|f| matches!(f.tag, Tag::Link { .. } | Tag::Image { .. } | Tag::CodeBlock(_)));
-                        if plain {
-                            bare_links(text, &range, &mut found);
+                            .any(|f| matches!(f.tag, Tag::Link { .. } | Tag::Image { .. }));
+                        if !code && !linked {
+                            bare_links(text, &range, &mut found, &mut quiet);
+                        }
+                        if !code {
+                            let block = stack
+                                .iter()
+                                .rposition(|f| !is_inline(&f.tag))
+                                .map_or(0, |i| stack[i].range.start);
+                            highlight_marks(text, &range, block, &mut marks);
                         }
                     }
                     _ => {}
@@ -526,8 +652,84 @@ fn layout(text: &str) -> (Vec<Span>, Vec<Range<usize>>, Vec<Table>) {
             }
         }
     }
+    highlights(marks, &quiet, &mut found);
+    // E15: while the cursor is in a table all of its source shows, the markup in its cells too.
+    for f in &mut found {
+        if let Some(table) = tables
+            .iter()
+            .find(|t| t.range.start <= f.range.start && f.range.end <= t.range.end)
+        {
+            f.reveal = Some(table.range.clone());
+        }
+    }
     let (spans, blocks) = arrange(text, found, leaves);
-    (spans, blocks, tables)
+    Parsed {
+        spans,
+        blocks,
+        tables,
+        no_spellcheck: merged(quiet),
+    }
+}
+
+/// The candidates for `==` among the characters of a text event: a run of exactly two `=` that no
+/// backslash escapes. One opens when a character other than a space follows it, and closes when
+/// one other than a space comes before it, like `~~` of GitHub.
+fn highlight_marks(text: &str, range: &Range<usize>, block: usize, marks: &mut Vec<Mark>) {
+    let bytes = text.as_bytes();
+    let mut seen = HashSet::new();
+    for (i, _) in text[range.clone()].match_indices('=') {
+        let mut start = range.start + i;
+        while start > 0 && bytes[start - 1] == b'=' {
+            start -= 1;
+        }
+        let end = start + bytes[start..].iter().take_while(|b| **b == b'=').count();
+        if end - start != 2 || !seen.insert(start) || (start > 0 && bytes[start - 1] == b'\\') {
+            continue;
+        }
+        let after = text[end..].chars().next();
+        let before = text[..start].chars().next_back();
+        marks.push(Mark {
+            block,
+            at: start,
+            opens: after.is_some_and(|c| !c.is_whitespace()),
+            closes: before.is_some_and(|c| !c.is_whitespace()),
+        });
+    }
+}
+
+/// Pairs the candidates of each block from the left: a closing one ends the highlight the last
+/// opening one started. `==` inside code and addresses is text.
+fn highlights(mut marks: Vec<Mark>, quiet: &[Range<usize>], found: &mut Vec<Found>) {
+    marks.retain(|m| !quiet.iter().any(|q| q.start <= m.at && m.at < q.end));
+    marks.sort_by_key(|m| (m.block, m.at));
+    let mut open: Option<&Mark> = None;
+    for mark in &marks {
+        match open {
+            Some(first) if first.block == mark.block && mark.closes && mark.at > first.at + 2 => {
+                let whole = first.at..mark.at + 2;
+                put(found, first.at..first.at + 2, MarkdownKind::Markup, whole.clone());
+                put(found, first.at + 2..mark.at, MarkdownKind::Highlight, whole.clone());
+                put(found, mark.at..mark.at + 2, MarkdownKind::Markup, whole);
+                open = None;
+            }
+            Some(first) if first.block == mark.block && !mark.opens => {}
+            _ => open = mark.opens.then_some(mark),
+        }
+    }
+}
+
+/// Ranges in order, the overlapping and touching ones joined.
+fn merged(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
+    ranges.retain(|r| !r.is_empty());
+    ranges.sort_by_key(|r| (r.start, r.end));
+    let mut out: Vec<Range<usize>> = Vec::new();
+    for range in ranges {
+        match out.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => out.push(range),
+        }
+    }
+    out
 }
 
 fn extend(extent: &mut Option<Range<usize>>, range: &Range<usize>) {
@@ -546,59 +748,112 @@ fn flush(frame: Option<&mut Frame>, leaves: &mut Vec<Range<usize>>) {
     }
 }
 
-fn bare_links(text: &str, range: &Range<usize>, found: &mut Vec<(Range<usize>, MarkdownKind)>) {
+/// Addresses typed without markup (E1, the autolinks of GitHub): `http://`, `https://` and
+/// `www.` at the start of a word, and mail addresses.
+fn bare_links(text: &str, range: &Range<usize>, found: &mut Vec<Found>, quiet: &mut Vec<Range<usize>>) {
     let slice = &text[range.clone()];
     // A keyboard starts a sentence with a capital: `Https://` is an address too.
     // Lower case of ASCII alone keeps every byte offset.
     let lower = slice.to_ascii_lowercase();
+    let starts_word = |at: usize| slice[..at].chars().next_back().is_none_or(|c| !c.is_alphanumeric());
+    let mut links: Vec<Range<usize>> = Vec::new();
     let mut from = 0;
-    while let Some(i) = ["https://", "http://"]
+    while let Some(i) = ["https://", "http://", "www."]
         .iter()
-        .filter_map(|scheme| lower[from..].find(scheme))
+        .filter_map(|prefix| lower[from..].find(prefix))
         .min()
     {
         let start = from + i;
-        let boundary = slice[..start].chars().next_back().is_none_or(|c| !c.is_alphanumeric());
         let mut end = start + slice[start..].find(char::is_whitespace).unwrap_or(slice.len() - start);
         while slice[start..end].ends_with(['.', ',', ';', ':', '!', '?', ')', '"', '\'', '>']) {
             end -= 1;
         }
-        let url = address(&slice[start..end])
-            .filter(|url| boundary && url.split_once("://").is_some_and(|(_, rest)| !rest.is_empty()));
-        if let Some(url) = url {
-            found.push((range.start + start..range.start + end, MarkdownKind::Link { url }));
+        let typed = &slice[start..end];
+        let url = if lower[start..].starts_with("www.") {
+            let host = typed.get(4..).unwrap_or_default();
+            host.starts_with(|c: char| c.is_alphanumeric())
+                .then(|| format!("http://{typed}"))
+        } else {
+            address(typed).filter(|url| url.split_once("://").is_some_and(|(_, rest)| !rest.is_empty()))
+        };
+        if let Some(url) = url.filter(|_| starts_word(start)) {
+            links.push(start..end);
+            found.push(Found {
+                range: range.start + start..range.start + end,
+                kind: MarkdownKind::Link { url },
+                reveal: None,
+            });
         }
         from = end.max(start + 1);
     }
+
+    for (at, _) in slice.match_indices('@') {
+        if links.iter().any(|l| l.start <= at && at < l.end) {
+            continue;
+        }
+        let local = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '+' | '-' | '_');
+        let host = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_');
+        let start = slice[..at]
+            .char_indices()
+            .rev()
+            .take_while(|(_, c)| local(*c))
+            .last()
+            .map_or(at, |(i, _)| i);
+        let mut end = slice[at + 1..]
+            .char_indices()
+            .take_while(|(_, c)| host(*c))
+            .last()
+            .map_or(at + 1, |(i, c)| at + 1 + i + c.len_utf8());
+        while end > at + 1 && slice[..end].ends_with('.') {
+            end -= 1;
+        }
+        let domain = &slice[at + 1..end];
+        let fits = start < at
+            && starts_word(start)
+            && domain.contains('.')
+            && domain.ends_with(|c: char| c.is_ascii_alphanumeric())
+            && !domain.starts_with('.');
+        if fits {
+            found.push(Found {
+                range: range.start + start..range.start + end,
+                kind: MarkdownKind::Link {
+                    url: format!("mailto:{}", &slice[start..end]),
+                },
+                reveal: None,
+            });
+            links.push(start..end);
+        }
+    }
+    quiet.extend(links.into_iter().map(|l| range.start + l.start..range.start + l.end));
 }
 
 fn close(
     text: &str,
     frame: &mut Frame,
     depth: usize,
-    found: &mut Vec<(Range<usize>, MarkdownKind)>,
+    found: &mut Vec<Found>,
     leaves: &mut Vec<Range<usize>>,
+    quiet: &mut Vec<Range<usize>>,
 ) {
     let range = frame.range.clone();
     let inside = match (frame.children.first(), frame.children.last()) {
         (Some(first), Some(last)) => Some(first.start..last.end),
         _ => None,
     };
-    let escapes = |found: &mut Vec<(Range<usize>, MarkdownKind)>| {
+    let escapes = |found: &mut Vec<Found>| {
         for gap in gaps(&range, &frame.children) {
             if &text[gap.clone()] == "\\" {
-                found.push((gap, MarkdownKind::Markup));
+                let escaped = text[gap.end..].chars().next().map_or(0, char::len_utf8);
+                put(found, gap.clone(), MarkdownKind::Markup, gap.start..gap.end + escaped);
             }
         }
     };
-    let styled = |kind: MarkdownKind, found: &mut Vec<(Range<usize>, MarkdownKind)>| {
+    let styled = |kind: MarkdownKind, found: &mut Vec<Found>| {
         let Some(inside) = inside.clone() else { return };
-        found.push((inside, kind));
-        found.extend(
-            gaps(&range, &frame.children)
-                .into_iter()
-                .map(|gap| (gap, MarkdownKind::Markup)),
-        );
+        put(found, inside, kind, range.clone());
+        for gap in gaps(&range, &frame.children) {
+            put(found, gap, MarkdownKind::Markup, range.clone());
+        }
     };
     match &frame.tag {
         Tag::Paragraph => {
@@ -609,13 +864,14 @@ fn close(
             let heading = trimmed(text, &range);
             leaves.push(heading.clone());
             // A lone `-` under a line of text underlines a heading by the letter
-            // of CommonMark. Here it is a list item being started: the line above
+            // of CommonMark. Here it is a list item being started (E5): the line above
             // must not turn into a heading for the one keystroke before its text.
             if let Some(last) = frame.children.last() {
                 let under = &text[last.end.min(heading.end)..heading.end];
                 if under.trim() == "-" {
                     let at = last.end + under.find('-').unwrap_or(0);
-                    found.push((at..at + 1, MarkdownKind::ListMarker { ordered: false }));
+                    let line = line_of(text, &(at..at));
+                    put(found, at..at + 1, MarkdownKind::ListMarker { ordered: false }, line);
                     return;
                 }
             }
@@ -627,13 +883,13 @@ fn close(
                 HeadingLevel::H5 => 5,
                 HeadingLevel::H6 => 6,
             };
-            found.push((heading, MarkdownKind::Heading { level }));
+            put(found, heading.clone(), MarkdownKind::Heading { level }, heading.clone());
             for gap in gaps(&range, &frame.children) {
                 let slice = &text[gap.clone()];
                 let start = gap.start + (slice.len() - slice.trim_start_matches(['\n', '\r']).len());
                 let end = gap.end - (slice.len() - slice.trim_end_matches(['\n', '\r']).len());
                 if start < end && !text[start..end].trim().is_empty() {
-                    found.push((start..end, MarkdownKind::Markup));
+                    put(found, start..end, MarkdownKind::Markup, heading.clone());
                 }
             }
         }
@@ -650,38 +906,55 @@ fn close(
                 LinkType::Email => format!("mailto:{dest_url}"),
                 _ => dest_url.to_string(),
             };
-            match (address(&url), inside.is_some()) {
-                (Some(url), true) => styled(MarkdownKind::Link { url }, found),
+            // An autolink shows nothing but its address; any other link hides it in its markup.
+            if matches!(link_type, LinkType::Autolink | LinkType::Email) {
+                quiet.push(range.clone());
+            } else {
+                quiet.extend(gaps(&range, &frame.children));
+            }
+            match (target(&url), inside.is_some()) {
+                (Some(Target::Attachment(id)), _) => {
+                    let inline = matches!(frame.tag, Tag::Image { .. });
+                    let line = line_of(text, &range);
+                    put(found, range.clone(), MarkdownKind::AttachmentLink { id, inline }, line);
+                    quiet.push(range.clone());
+                }
+                (Some(Target::Web(url)), true) => styled(MarkdownKind::Link { url }, found),
+                (Some(Target::Note(id)), true) => styled(MarkdownKind::NoteLink { id }, found),
                 // Nothing to show but the address: it stays visible.
-                (Some(url), false) => found.push((range.clone(), MarkdownKind::Link { url })),
-                (None, true) => found.extend(
-                    gaps(&range, &frame.children)
-                        .into_iter()
-                        .map(|gap| (gap, MarkdownKind::Markup)),
-                ),
+                (Some(Target::Web(url)), false) => put(found, range.clone(), MarkdownKind::Link { url }, range.clone()),
+                (Some(Target::Note(id)), false) => {
+                    put(found, range.clone(), MarkdownKind::NoteLink { id }, range.clone())
+                }
+                (None, true) => {
+                    for gap in gaps(&range, &frame.children) {
+                        put(found, gap, MarkdownKind::Markup, range.clone());
+                    }
+                }
                 (None, false) => {}
             }
         }
         Tag::CodeBlock(kind) => {
             let block = trimmed(text, &range);
             leaves.push(block.clone());
-            found.push((block.clone(), MarkdownKind::CodeBlock));
+            quiet.push(block.clone());
+            put(found, block.clone(), MarkdownKind::CodeBlock, block.clone());
             if matches!(kind, CodeBlockKind::Fenced(_)) {
                 let rows = lines(text, &block);
                 if let Some(first) = rows.first() {
-                    found.push((first.clone(), MarkdownKind::Markup));
+                    put(found, first.clone(), MarkdownKind::Markup, block.clone());
                 }
                 if let Some(last) = rows.last().filter(|_| rows.len() > 1) {
                     let fence = text[last.clone()].trim_start_matches([' ', '>']).trim();
                     if fence.len() >= 3 && (fence.bytes().all(|b| b == b'`') || fence.bytes().all(|b| b == b'~')) {
-                        found.push((last.clone(), MarkdownKind::Markup));
+                        put(found, last.clone(), MarkdownKind::Markup, block.clone());
                     }
                 }
             }
         }
         Tag::BlockQuote(_) => {
             let quote = trimmed(text, &range);
-            found.push((quote.clone(), MarkdownKind::Quote));
+            put(found, quote.clone(), MarkdownKind::Quote, quote.clone());
             for (n, line) in lines(text, &quote).into_iter().enumerate() {
                 let bytes = text[line.clone()].as_bytes();
                 let mut i = 0;
@@ -699,7 +972,8 @@ fn close(
                 }
                 if outer == 0 && bytes.get(i) == Some(&b'>') {
                     let space = usize::from(bytes.get(i + 1) == Some(&b' '));
-                    found.push((line.start + i..line.start + i + 1 + space, MarkdownKind::QuoteMarker));
+                    let sign = line.start + i..line.start + i + 1 + space;
+                    put(found, sign, MarkdownKind::QuoteMarker, line.clone());
                 }
             }
         }
@@ -713,12 +987,23 @@ fn close(
                 Some(b'-' | b'*' | b'+') if digits == 0 => (1, false),
                 _ => return,
             };
+            let line = line_of(text, &(range.start..range.start));
             if frame.task {
                 // The checkbox stands for the item; its bullet only shows while editing.
                 let space = usize::from(bytes.get(len) == Some(&b' '));
-                found.push((range.start..range.start + len + space, MarkdownKind::Markup));
+                put(
+                    found,
+                    range.start..range.start + len + space,
+                    MarkdownKind::Markup,
+                    line,
+                );
             } else {
-                found.push((range.start..range.start + len, MarkdownKind::ListMarker { ordered }));
+                put(
+                    found,
+                    range.start..range.start + len,
+                    MarkdownKind::ListMarker { ordered },
+                    line,
+                );
             }
         }
         Tag::Table(_) => {
@@ -726,7 +1011,7 @@ fn close(
             let table = trimmed(text, &range);
             leaves.push(table.clone());
             for line in lines(text, &table) {
-                found.push((line, MarkdownKind::TableRow));
+                put(found, line, MarkdownKind::TableRow, table.clone());
             }
         }
         Tag::HtmlBlock => leaves.push(trimmed(text, &range)),
@@ -735,31 +1020,23 @@ fn close(
 }
 
 /// Turns what was found into ordered spans, each in its block.
-fn arrange(
-    text: &str,
-    mut found: Vec<(Range<usize>, MarkdownKind)>,
-    leaves: Vec<Range<usize>>,
-) -> (Vec<Span>, Vec<Range<usize>>) {
-    let line_of = |at: usize| {
-        let start = text[..at].rfind('\n').map_or(0, |i| i + 1);
-        let end = text[at..].find('\n').map_or(text.len(), |i| at + i);
-        start..end
-    };
-    found.retain(|(range, _)| !range.is_empty());
-    found.sort_by(|a, b| a.0.start.cmp(&b.0.start).then(b.0.end.cmp(&a.0.end)));
+fn arrange(text: &str, mut found: Vec<Found>, leaves: Vec<Range<usize>>) -> (Vec<Span>, Vec<Range<usize>>) {
+    let line_start = |at: usize| text[..at].rfind('\n').map_or(0, |i| i + 1);
+    found.retain(|f| !f.range.is_empty());
+    found.sort_by(|a, b| a.range.start.cmp(&b.range.start).then(b.range.end.cmp(&a.range.end)));
 
     // A block starts with its line, so that the marker of a list item or the
     // sign of a quote belongs to the text that follows it.
     let mut blocks: Vec<Range<usize>> = leaves
         .into_iter()
         .filter(|l| !l.is_empty())
-        .map(|l| line_of(l.start).start..l.end)
+        .map(|l| line_start(l.start)..l.end)
         .collect();
     let holds = |blocks: &[Range<usize>], at: usize| blocks.iter().any(|b| b.start <= at && at < b.end);
     // What stands alone, the marker of an empty item, is a block of its line.
-    for (range, _) in &found {
-        if !holds(&blocks, range.start) {
-            blocks.push(line_of(range.start));
+    for f in &found {
+        if !holds(&blocks, f.range.start) {
+            blocks.push(line_of(text, &(f.range.start..f.range.start)));
         }
     }
     blocks.sort_by_key(|b| (b.start, b.end));
@@ -773,11 +1050,16 @@ fn arrange(
 
     let spans = found
         .into_iter()
-        .filter_map(|(range, kind)| {
+        .filter_map(|f| {
             let block = disjoint
                 .iter()
-                .position(|b| b.start <= range.start && range.start < b.end)?;
-            Some(Span { range, kind, block })
+                .position(|b| b.start <= f.range.start && f.range.start < b.end)?;
+            Some(Span {
+                reveal: f.reveal.unwrap_or_else(|| disjoint[block].clone()),
+                range: f.range,
+                kind: f.kind,
+                block,
+            })
         })
         .collect();
     (spans, disjoint)
