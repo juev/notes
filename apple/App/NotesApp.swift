@@ -13,6 +13,11 @@ struct NotesApp: App {
         }
         .defaultSize(width: 1100, height: 700)
         .commands { AppCommands(model: model) }
+
+        Settings {
+            SettingsView()
+                .environment(model)
+        }
     }
 }
 
@@ -87,6 +92,7 @@ struct AppCommands: Commands {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         AttachmentFiles.clear()
+        MainActor.assumeIsolated { AppModel.shared.applyTheme() }
         #if DEBUG
         MainActor.assumeIsolated { DebugScript.runIfAsked() }
         #endif

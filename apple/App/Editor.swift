@@ -28,7 +28,7 @@ struct Editor: View {
                     .padding(.vertical, 6)
                 if !note.locked, !note.deleted { formatBar }
                 Divider()
-                MarkdownEditor(noteId: note.id, editable: !note.locked && !note.deleted, revision: model.textRevision, focus: model.textFocusRequests)
+                MarkdownEditor(noteId: note.id, editable: !note.locked && !note.deleted, revision: model.textRevision, focus: model.textFocusRequests, typography: model.typographyRevision)
                 if !model.attachments.isEmpty { AttachmentPanel(locked: note.locked) }
                 LinkedFrom(id: note.id)
             }
@@ -147,9 +147,33 @@ struct MarkdownEditor: NSViewRepresentable {
     let editable: Bool
     let revision: Int
     let focus: Int
+    let typography: Int
 
-    final class Coordinator {
+    final class Coordinator: NSObject, NSTextViewDelegate {
         var focus = 0
+        var typography = 0
+        /// E51: the state of spelling goes through the view, which knows the ranges of the core.
+        func textView(_ view: NSTextView, shouldSetSpellingState value: Int, range: NSRange) -> Int {
+            (view as? MarkdownTextView)?.spellingState(value, at: range) ?? value
+        }
+    }
+
+    /// E40–E46: the settings on the text view.
+    private func apply(typography view: MarkdownTextView) {
+        let settings = model.settings
+        let size = CGFloat(model.textSize)
+        view.baseFont = Typography.family(settings.fontBody).flatMap { NSFont(descriptor: NSFontDescriptor(fontAttributes: [.family: $0]), size: size) }
+            ?? .systemFont(ofSize: size)
+        view.codeFont = Typography.family(settings.fontMono).flatMap { NSFont(descriptor: NSFontDescriptor(fontAttributes: [.family: $0]), size: size) }
+            ?? .monospacedSystemFont(ofSize: size, weight: .regular)
+        view.lineHeight = CGFloat(settings.lineHeight)
+        view.paragraphSpacing = CGFloat(settings.paragraphSpacing)
+        view.justified = settings.align == .justify
+        view.hyphenates = Typography.hyphenates(align: settings.align, hyphenate: settings.hyphenate)
+        view.columnCharacters = model.columnWidth.characters
+        view.isContinuousSpellCheckingEnabled = settings.spellcheck
+        if settings.spellLanguage != "auto" { NSSpellChecker.shared.setLanguage(settings.spellLanguage) }
+        NSSpellChecker.shared.automaticallyIdentifiesLanguages = settings.spellLanguage == "auto"
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -162,6 +186,7 @@ struct MarkdownEditor: NSViewRepresentable {
         view.autoresizingMask = [.width]
         view.textContainer?.widthTracksTextView = true
         view.textContainerInset = NSSize(width: 16, height: 12)
+        view.delegate = context.coordinator
         view.isAutomaticQuoteSubstitutionEnabled = false
         view.isAutomaticDashSubstitutionEnabled = false
         view.isAutomaticTextReplacementEnabled = false
@@ -178,7 +203,6 @@ struct MarkdownEditor: NSViewRepresentable {
         view.isIncrementalSearchingEnabled = true
         view.addFiles = { urls in MainActor.assumeIsolated { model.attach(urls, to: noteId) } }
         view.sharedUndoManager = { [weak model] in MainActor.assumeIsolated { model?.undoManager } }
-        view.baseFont = .systemFont(ofSize: NSFont.systemFontSize + 2)
         let model = model
         let noteId = noteId
         view.onEdit = { edit, text in MainActor.assumeIsolated { model.textEdited(noteId, edit, whole: text) } }
@@ -190,6 +214,7 @@ struct MarkdownEditor: NSViewRepresentable {
         view.drawsBackground = false
         context.coordinator.focus = focus
         view.frame.size.width = max(scroll.contentSize.width, 400)
+        apply(typography: view)
         view.setText(model.text(of: noteId))
         return scroll
     }
@@ -202,6 +227,11 @@ struct MarkdownEditor: NSViewRepresentable {
         guard let view = scroll.documentView as? MarkdownTextView else { return }
         view.isEditable = editable
         view.smartTypography = model.settings.smartTypography
+        if context.coordinator.typography != typography {
+            context.coordinator.typography = typography
+            apply(typography: view)
+            view.applyTypography()
+        }
         if context.coordinator.focus != focus {
             context.coordinator.focus = focus
             view.window?.makeFirstResponder(view)

@@ -150,3 +150,51 @@ final class TypingHistoryTests: XCTestCase {
         XCTAssertNil(history.popRedo())
     }
 }
+
+/// E41–E48: what the settings of typography come to.
+final class TypographyTests: XCTestCase {
+    func testTheSizeStaysInItsRange() {
+        XCTAssertEqual(Typography.size(saved: nil, system: 13), 13)
+        XCTAssertEqual(Typography.size(saved: 40, system: 13), 28)
+        XCTAssertEqual(Typography.size(saved: 5, system: 13), 12)
+    }
+
+    func testTheStepsOfTheSettings() {
+        XCTAssertEqual(Typography.lineHeights.first, 1.2)
+        XCTAssertEqual(Typography.lineHeights.last, 2.0)
+        XCTAssertEqual(Typography.lineHeights.count, 9)
+        XCTAssertEqual(Typography.paragraphSpacings, [0, 0.25, 0.5, 0.75, 1, 1.25, 1.5])
+    }
+
+    func testJustifiedTextHyphenates() {
+        XCTAssertTrue(Typography.hyphenates(align: .justify, hyphenate: false))
+        XCTAssertTrue(Typography.hyphenates(align: .left, hyphenate: true))
+        XCTAssertFalse(Typography.hyphenates(align: .left, hyphenate: false))
+    }
+
+    func testTheLanguageOfAParagraphByItsLetters() {
+        XCTAssertEqual(Typography.language(of: "Текст на русском with a few words"), "ru")
+        XCTAssertEqual(Typography.language(of: "English text"), "en")
+    }
+
+    func testAOneLetterWordStaysWithTheNextWord() {
+        let text = Array("идти в лес".utf16)
+        XCTAssertFalse(Typography.mayBreak(text, before: 7), "not between в and лес")
+        XCTAssertTrue(Typography.mayBreak(text, before: 5), "before в is fine")
+        let long = Array("слово кот".utf16)
+        XCTAssertTrue(Typography.mayBreak(long, before: 6))
+    }
+
+    func testAnEmDashStaysWithTheWordBeforeIt() {
+        let text = Array("слово — другое".utf16)
+        XCTAssertFalse(Typography.mayBreak(text, before: 6))
+        XCTAssertTrue(Typography.mayBreak(text, before: 8))
+    }
+
+    func testTheColumnsOfTheSpecification() {
+        XCTAssertEqual(ColumnWidth.narrow.characters, 60)
+        XCTAssertEqual(ColumnWidth.medium.characters, 72)
+        XCTAssertEqual(ColumnWidth.wide.characters, 90)
+        XCTAssertNil(ColumnWidth.full.characters)
+    }
+}

@@ -62,6 +62,21 @@ final class AppModel {
     /// R3: a note made here and not edited yet; it is deleted without going to the Trash when left so.
     @ObservationIgnored private var freshNote: String?
 
+    /// E41: the size of the text on this device.
+    var textSize: Int = Int(Typography.size(
+        saved: Storage.defaults.object(forKey: "textSize") as? Int, system: NSFont.systemFontSize + 2)) {
+        didSet { Storage.defaults.set(textSize, forKey: "textSize"); typographyRevision += 1 }
+    }
+    /// E44: the width of the column on this device.
+    var columnWidth = ColumnWidth(rawValue: Storage.defaults.string(forKey: "columnWidth") ?? "") ?? .medium {
+        didSet { Storage.defaults.set(columnWidth.rawValue, forKey: "columnWidth"); typographyRevision += 1 }
+    }
+    /// R80: system, light or dark.
+    var theme = Storage.defaults.string(forKey: "theme") ?? "system" {
+        didSet { Storage.defaults.set(theme, forKey: "theme"); applyTheme() }
+    }
+    /// Grows when the look of the text changes.
+    var typographyRevision = 0
     /// R12: the folders collapsed in the sidebar, a setting of this device.
     var foldedFolders: Set<String> = Set(Storage.defaults.stringArray(forKey: "foldedFolders") ?? []) {
         didSet { Storage.defaults.set(Array(foldedFolders), forKey: "foldedFolders") }
@@ -261,6 +276,17 @@ final class AppModel {
         } else {
             NSWorkspace.shared.open(url)
         }
+    }
+
+    // MARK: Settings
+
+    func saveSettings(_ new: AppSettings) {
+        perform { try $0.setSettings(settings: new) }
+        typographyRevision += 1
+    }
+
+    func applyTheme() {
+        NSApp.appearance = theme == "dark" ? NSAppearance(named: .darkAqua) : theme == "light" ? NSAppearance(named: .aqua) : nil
     }
 
     // MARK: Links between notes
