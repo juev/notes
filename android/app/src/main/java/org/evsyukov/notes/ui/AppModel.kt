@@ -19,8 +19,8 @@ import org.evsyukov.notes.Repo
 import org.evsyukov.notes.ViewDisplay
 import org.evsyukov.notes.editor.EditCoalescer
 import org.evsyukov.notes.editor.TextEdit
-import org.evsyukov.notes.logged
 import org.evsyukov.notes.logError
+import org.evsyukov.notes.logged
 import uniffi.notes_core.AppException
 import uniffi.notes_core.AppSettings
 import uniffi.notes_core.Attachment
